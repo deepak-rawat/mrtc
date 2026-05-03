@@ -1,0 +1,61 @@
+/*
+ * SRTP (RFC 3711) - AES-128-CM with HMAC-SHA1-80.
+ *
+ * Minimal implementation: protect/unprotect RTP packets using
+ * keying material derived from DTLS-SRTP.
+ */
+#ifndef RTC_SRTP_H
+#define RTC_SRTP_H
+
+#include "rtc_types.h"
+#include <openssl/evp.h>
+
+#define SRTP_MAX_KEY_LEN  16
+#define SRTP_MAX_SALT_LEN 14
+#define SRTP_AUTH_TAG_LEN 10
+#define SRTP_MAX_PACKET   1500
+
+/* Key derivation labels (RFC 3711 section 4.3.1) */
+#define SRTP_LABEL_RTP_ENCRYPTION 0x00
+#define SRTP_LABEL_RTP_AUTH       0x01
+#define SRTP_LABEL_RTP_SALT       0x02
+
+typedef struct {
+    /* Master key + salt (from DTLS export) */
+    uint8_t master_key[SRTP_MAX_KEY_LEN];
+    uint8_t master_salt[SRTP_MAX_SALT_LEN];
+
+    /* Derived session keys */
+    uint8_t session_key[SRTP_MAX_KEY_LEN];
+    uint8_t session_salt[SRTP_MAX_SALT_LEN];
+    uint8_t session_auth_key[20]; /* HMAC-SHA1 key */
+
+    /* Rollover counter */
+    uint32_t roc;
+    uint16_t last_seq;
+    bool initialized;
+} rtc_srtp_ctx_t;
+
+/* Initialize SRTP context with master key + salt */
+int rtc_srtp_init(rtc_srtp_ctx_t *ctx, const uint8_t *master_key, size_t key_len,
+                  const uint8_t *master_salt, size_t salt_len);
+
+/*
+ * Protect an RTP packet in-place.
+ * Input: buf contains a plain RTP packet of *len bytes.
+ * Output: buf is overwritten with the SRTP packet, *len updated.
+ * buf must have room for SRTP_AUTH_TAG_LEN extra bytes.
+ */
+int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len);
+
+/*
+ * Unprotect an SRTP packet in-place.
+ * Input: buf contains an SRTP packet of *len bytes.
+ * Output: buf is overwritten with the plain RTP packet, *len updated.
+ */
+int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len);
+
+/* Cleanup */
+void rtc_srtp_close(rtc_srtp_ctx_t *ctx);
+
+#endif /* RTC_SRTP_H */

@@ -1,0 +1,22 @@
+/*
+ * mrtc - Minimal WebRTC client library in C (for learning)
+ *
+ * Single include header that pulls in the public API.
+ * Internal headers (ICE, DTLS, SRTP, transport, etc.) are in rtc/src/.
+ * External dependency: OpenSSL (libssl, libcrypto)
+ */
+#ifndef RTC_H
+#define RTC_H
+
+/* ---- Public API headers ---- */
+#include "rtc_types.h"
+#include "rtc_sdp.h"
+#include "rtc_track.h"
+#include "rtc_data_channel.h"
+#include "rtc_peer.h"
+
+/* Library init / cleanup (call once) */
+int rtc_init(void);
+void rtc_cleanup(void);
+
+#endif /* RTC_H */

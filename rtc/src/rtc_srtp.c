@@ -1,0 +1,303 @@
+/*
+ * rtc_srtp.c - SRTP (RFC 3711) AES-128-CM with HMAC-SHA1-80.
+ *
+ * Implements key derivation, encryption/decryption, and authentication
+ * for RTP packets using AES-128 Counter Mode.
+ */
+#include "rtc_srtp.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <openssl/evp.h>
+#include <openssl/core_names.h>
+
+/* HMAC-SHA1 helper using modern EVP_MAC API */
+static int srtp_hmac_sha1(const uint8_t *key, size_t key_len, const uint8_t *data1,
+                          size_t data1_len, const uint8_t *data2, size_t data2_len, uint8_t *out,
+                          size_t out_size) {
+    EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
+    if (!mac)
+        return RTC_ERR_SRTP;
+
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+    EVP_MAC_free(mac);
+    if (!ctx)
+        return RTC_ERR_SRTP;
+
+    OSSL_PARAM params[] = {OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, "SHA1", 0),
+                           OSSL_PARAM_construct_end()};
+
+    int ret = RTC_ERR_SRTP;
+    if (EVP_MAC_init(ctx, key, key_len, params) && EVP_MAC_update(ctx, data1, data1_len) &&
+        (data2_len == 0 || EVP_MAC_update(ctx, data2, data2_len))) {
+        size_t outl = out_size;
+        if (EVP_MAC_final(ctx, out, &outl, out_size))
+            ret = RTC_OK;
+    }
+
+    EVP_MAC_CTX_free(ctx);
+    return ret;
+}
+
+/*
+ * SRTP Key Derivation Function (RFC 3711, Section 4.3.1)
+ *
+ * derived_key = AES-CM(master_key, master_salt XOR (label << 48))
+ */
+static int srtp_kdf(const uint8_t *master_key, size_t key_len, const uint8_t *master_salt,
+                    size_t salt_len, uint8_t label, uint8_t *out, size_t out_len) {
+    /* Build the "x" value: salt XOR (label || index) padded to 14 bytes */
+    uint8_t x[14];
+    memset(x, 0, sizeof(x));
+    if (salt_len > 14)
+        salt_len = 14;
+    memcpy(x, master_salt, salt_len);
+    x[7] ^= label; /* label goes at byte 7 (after 48-bit shift for index=0) */
+
+    /* Use AES-128-ECB to generate keystream blocks */
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx)
+        return RTC_ERR_NOMEM;
+
+    /* AES-CM: encrypt counter blocks with master_key */
+    uint8_t iv[16];
+    memset(iv, 0, sizeof(iv));
+    memcpy(iv, x, 14);
+    /* iv[14..15] = 0 (block counter starts at 0) */
+
+    size_t produced = 0;
+    uint16_t block_count = 0;
+
+    while (produced < out_len) {
+        /* Set counter in iv[14..15] */
+        iv[14] = (block_count >> 8) & 0xFF;
+        iv[15] = block_count & 0xFF;
+
+        uint8_t plaintext[16];
+        memset(plaintext, 0, sizeof(plaintext));
+
+        int outl = 0;
+        EVP_EncryptInit_ex(ctx, EVP_aes_128_ecb(), NULL, master_key, NULL);
+        EVP_CIPHER_CTX_set_padding(ctx, 0);
+        EVP_EncryptUpdate(ctx, out + produced, &outl, iv, 16);
+        EVP_EncryptFinal_ex(ctx, out + produced + outl, &outl);
+
+        produced += 16;
+        block_count++;
+    }
+
+    EVP_CIPHER_CTX_free(ctx);
+    return RTC_OK;
+}
+
+int rtc_srtp_init(rtc_srtp_ctx_t *ctx, const uint8_t *master_key, size_t key_len,
+                  const uint8_t *master_salt, size_t salt_len) {
+    memset(ctx, 0, sizeof(*ctx));
+
+    if (key_len > SRTP_MAX_KEY_LEN)
+        key_len = SRTP_MAX_KEY_LEN;
+    if (salt_len > SRTP_MAX_SALT_LEN)
+        salt_len = SRTP_MAX_SALT_LEN;
+
+    memcpy(ctx->master_key, master_key, key_len);
+    memcpy(ctx->master_salt, master_salt, salt_len);
+
+    /* Derive session keys */
+    int rc;
+    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTP_ENCRYPTION,
+                  ctx->session_key, SRTP_MAX_KEY_LEN);
+    if (rc != RTC_OK)
+        return rc;
+
+    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTP_SALT,
+                  ctx->session_salt, SRTP_MAX_SALT_LEN);
+    if (rc != RTC_OK)
+        return rc;
+
+    uint8_t auth_key[20];
+    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTP_AUTH, auth_key, 20);
+    if (rc != RTC_OK)
+        return rc;
+    memcpy(ctx->session_auth_key, auth_key, 20);
+
+    ctx->initialized = true;
+    RTC_LOG_INFO("SRTP: context initialized");
+    return RTC_OK;
+}
+
+/*
+ * AES-128-CM encryption/decryption (same operation - XOR with keystream).
+ *
+ * IV construction (RFC 3711 Section 4.1.1):
+ *   IV = (session_salt XOR (SSRC || packet_index)) padded to 16 bytes
+ */
+static int srtp_aes_cm(const uint8_t *session_key, const uint8_t *session_salt, uint32_t ssrc,
+                       uint32_t roc, uint16_t seq, uint8_t *data, size_t len) {
+    /* Build IV */
+    uint8_t iv[16];
+    memset(iv, 0, sizeof(iv));
+
+    /* SSRC at bytes 4..7 */
+    iv[4] = (ssrc >> 24) & 0xFF;
+    iv[5] = (ssrc >> 16) & 0xFF;
+    iv[6] = (ssrc >> 8) & 0xFF;
+    iv[7] = ssrc & 0xFF;
+
+    /* Packet index (ROC || SEQ) at bytes 8..13 */
+    iv[8] = (roc >> 24) & 0xFF;
+    iv[9] = (roc >> 16) & 0xFF;
+    iv[10] = (roc >> 8) & 0xFF;
+    iv[11] = roc & 0xFF;
+    iv[12] = (seq >> 8) & 0xFF;
+    iv[13] = seq & 0xFF;
+
+    /* XOR with session salt */
+    for (int i = 0; i < 14; i++)
+        iv[i] ^= session_salt[i];
+
+    /* AES-128-CTR with the constructed IV */
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx)
+        return RTC_ERR_NOMEM;
+
+    /* Use AES-128-CTR (OpenSSL handles the counter increment) */
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_128_ctr(), NULL, session_key, iv) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return RTC_ERR_SRTP;
+    }
+
+    int outl = 0;
+    EVP_EncryptUpdate(ctx, data, &outl, data, (int)len);
+    EVP_EncryptFinal_ex(ctx, data + outl, &outl);
+    EVP_CIPHER_CTX_free(ctx);
+
+    return RTC_OK;
+}
+
+int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
+    if (!ctx->initialized)
+        return RTC_ERR_SRTP;
+    if (*len < 12)
+        return RTC_ERR_INVALID; /* minimum RTP header */
+
+    /* Parse RTP header for SSRC and sequence number */
+    uint16_t seq = ((uint16_t)buf[2] << 8) | buf[3];
+    uint32_t ssrc =
+        ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) | ((uint32_t)buf[10] << 8) | buf[11];
+
+    /* Update ROC */
+    if (ctx->last_seq == 0 && ctx->roc == 0) {
+        ctx->last_seq = seq;
+    } else if (seq < ctx->last_seq && (ctx->last_seq - seq) > 0x8000) {
+        ctx->roc++;
+    }
+    ctx->last_seq = seq;
+
+    /* Determine header length (handle CSRC and extension) */
+    size_t hdr_len = 12;
+    uint8_t cc = buf[0] & 0x0F;
+    hdr_len += (size_t)cc * 4;
+    if (buf[0] & 0x10) { /* extension bit */
+        if (hdr_len + 4 > *len)
+            return RTC_ERR_INVALID;
+        uint16_t ext_len = ((uint16_t)buf[hdr_len + 2] << 8) | buf[hdr_len + 3];
+        hdr_len += 4 + (size_t)ext_len * 4;
+    }
+    if (hdr_len > *len)
+        return RTC_ERR_INVALID;
+
+    /* Encrypt payload (not header) */
+    int rc = srtp_aes_cm(ctx->session_key, ctx->session_salt, ssrc, ctx->roc, seq, buf + hdr_len,
+                         *len - hdr_len);
+    if (rc != RTC_OK)
+        return rc;
+
+    /* Compute authentication tag: HMAC-SHA1 over (header + encrypted payload + ROC) */
+    uint8_t roc_buf[4];
+    roc_buf[0] = (ctx->roc >> 24) & 0xFF;
+    roc_buf[1] = (ctx->roc >> 16) & 0xFF;
+    roc_buf[2] = (ctx->roc >> 8) & 0xFF;
+    roc_buf[3] = ctx->roc & 0xFF;
+
+    uint8_t hmac[20];
+    rc = srtp_hmac_sha1(ctx->session_auth_key, 20, buf, *len, roc_buf, 4, hmac, sizeof(hmac));
+    if (rc != RTC_OK)
+        return rc;
+
+    /* Append truncated (80-bit / 10 byte) tag */
+    memcpy(buf + *len, hmac, SRTP_AUTH_TAG_LEN);
+    *len += SRTP_AUTH_TAG_LEN;
+
+    return RTC_OK;
+}
+
+int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
+    if (!ctx->initialized)
+        return RTC_ERR_SRTP;
+    if (*len < 12 + SRTP_AUTH_TAG_LEN)
+        return RTC_ERR_INVALID;
+
+    size_t srtp_len = *len - SRTP_AUTH_TAG_LEN;
+    uint8_t *tag = buf + srtp_len;
+
+    /* Parse RTP header */
+    uint16_t seq = ((uint16_t)buf[2] << 8) | buf[3];
+    uint32_t ssrc =
+        ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) | ((uint32_t)buf[10] << 8) | buf[11];
+
+    /* Estimate ROC */
+    uint32_t roc = ctx->roc;
+    if (ctx->last_seq != 0 && seq < ctx->last_seq && (ctx->last_seq - seq) > 0x8000)
+        roc = ctx->roc + 1;
+
+    /* Verify authentication tag */
+    uint8_t roc_buf[4];
+    roc_buf[0] = (roc >> 24) & 0xFF;
+    roc_buf[1] = (roc >> 16) & 0xFF;
+    roc_buf[2] = (roc >> 8) & 0xFF;
+    roc_buf[3] = roc & 0xFF;
+
+    uint8_t hmac[20];
+    int hrc =
+        srtp_hmac_sha1(ctx->session_auth_key, 20, buf, srtp_len, roc_buf, 4, hmac, sizeof(hmac));
+    if (hrc != RTC_OK)
+        return hrc;
+
+    if (memcmp(hmac, tag, SRTP_AUTH_TAG_LEN) != 0) {
+        RTC_LOG_ERR("SRTP: authentication failed");
+        return RTC_ERR_SRTP;
+    }
+
+    /* Determine header length */
+    size_t hdr_len = 12;
+    uint8_t cc = buf[0] & 0x0F;
+    hdr_len += (size_t)cc * 4;
+    if (buf[0] & 0x10) {
+        if (hdr_len + 4 > srtp_len)
+            return RTC_ERR_INVALID;
+        uint16_t ext_len = ((uint16_t)buf[hdr_len + 2] << 8) | buf[hdr_len + 3];
+        hdr_len += 4 + (size_t)ext_len * 4;
+    }
+    if (hdr_len > srtp_len)
+        return RTC_ERR_INVALID;
+
+    /* Decrypt payload */
+    int rc = srtp_aes_cm(ctx->session_key, ctx->session_salt, ssrc, roc, seq, buf + hdr_len,
+                         srtp_len - hdr_len);
+    if (rc != RTC_OK)
+        return rc;
+
+    /* Update state */
+    if (seq > ctx->last_seq || (ctx->last_seq - seq) > 0x8000) {
+        ctx->last_seq = seq;
+        ctx->roc = roc;
+    }
+
+    *len = srtp_len;
+    return RTC_OK;
+}
+
+void rtc_srtp_close(rtc_srtp_ctx_t *ctx) {
+    memset(ctx, 0, sizeof(*ctx));
+}
