@@ -4,6 +4,7 @@
 #include "test_harness.h"
 #include "meeting.h"
 #include "signaling/signaling_msg.h"
+#include <rtc/rtc_types.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -250,6 +251,8 @@ int main(void) {
     printf("========================================\n");
     printf("  Signaling Meeting Tests\n");
     printf("========================================\n\n");
+
+    rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(meeting_create_destroy);
     RUN_TEST(meeting_join_leave);

@@ -20,9 +20,8 @@ static void fill_test_pattern(video_frame_t *f, int seed) {
 }
 
 /* Compute PSNR between two Y planes */
-static double compute_psnr(const uint8_t *a, int stride_a,
-                           const uint8_t *b, int stride_b,
-                           int w, int h) {
+static double compute_psnr(const uint8_t *a, int stride_a, const uint8_t *b, int stride_b, int w,
+                           int h) {
     double mse = 0;
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
@@ -30,7 +29,8 @@ static double compute_psnr(const uint8_t *a, int stride_a,
             mse += d * d;
         }
     mse /= (double)(w * h);
-    if (mse < 0.01) return 99.0;
+    if (mse < 0.01)
+        return 99.0;
     return 10.0 * log10(255.0 * 255.0 / mse);
 }
 
@@ -51,7 +51,7 @@ TEST(vp8_encode_decode) {
     video_packet_t pkt;
     ASSERT_EQ(video_encode(&enc, &input, &pkt), RTC_OK);
     ASSERT(pkt.len > 0);
-    ASSERT(pkt.is_keyframe);  /* First frame should be keyframe */
+    ASSERT(pkt.is_keyframe); /* First frame should be keyframe */
     printf("    encoded: %d bytes (keyframe=%d)\n", pkt.len, pkt.is_keyframe);
 
     /* Decode */
@@ -61,10 +61,10 @@ TEST(vp8_encode_decode) {
     ASSERT_EQ(output.height, h);
 
     /* Check quality (lossy codec, so use PSNR) */
-    double psnr = compute_psnr(input.planes[0], input.stride[0],
-                               output.planes[0], output.stride[0], w, h);
+    double psnr =
+        compute_psnr(input.planes[0], input.stride[0], output.planes[0], output.stride[0], w, h);
     printf("    PSNR: %.1f dB\n", psnr);
-    ASSERT(psnr > 25.0);  /* VP8 at 500kbps 320x240 should be >25dB */
+    ASSERT(psnr > 25.0); /* VP8 at 500kbps 320x240 should be >25dB */
 
     video_frame_free(&input);
     video_encoder_destroy(&enc);
@@ -101,8 +101,8 @@ TEST(vp8_keyframe_request) {
     fill_test_pattern(&input, 100);
     ASSERT_EQ(video_encode(&enc, &input, &pkt), RTC_OK);
     ASSERT(pkt.is_keyframe);
-    printf("    before request: keyframe=%d, after request: keyframe=%d\n",
-           was_key_before, pkt.is_keyframe);
+    printf("    before request: keyframe=%d, after request: keyframe=%d\n", was_key_before,
+           pkt.is_keyframe);
 
     video_frame_free(&input);
     video_encoder_destroy(&enc);
@@ -137,8 +137,8 @@ TEST(vp8_bitrate_change) {
         total_low += pkt.len;
     }
 
-    printf("    high bitrate total: %d bytes, low bitrate total: %d bytes\n",
-           total_high, total_low);
+    printf("    high bitrate total: %d bytes, low bitrate total: %d bytes\n", total_high,
+           total_low);
     /* Low bitrate should produce less data (may take a few frames to converge) */
 
     video_frame_free(&input);
@@ -186,6 +186,8 @@ int main(void) {
     printf("========================================\n");
     printf("  Video Codec Tests (VP8)\n");
     printf("========================================\n\n");
+
+    rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(vp8_encode_decode);
     RUN_TEST(vp8_keyframe_request);

@@ -202,6 +202,8 @@ int main(void) {
     printf("  TURN Unit Tests\n");
     printf("========================================\n\n");
 
+    rtc_set_log_level(RTC_LOG_DEBUG);
+
     RUN_TEST(turn_allocate_request);
     RUN_TEST(turn_channel_bind_request);
     RUN_TEST(turn_channel_data_frame);

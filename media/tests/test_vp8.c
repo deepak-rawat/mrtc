@@ -255,6 +255,8 @@ int main(void) {
     printf("  VP8 RTP Packetization Tests\n");
     printf("========================================\n\n");
 
+    rtc_set_log_level(RTC_LOG_DEBUG);
+
     RUN_TEST(vp8_packetize_small);
     RUN_TEST(vp8_packetize_large);
     RUN_TEST(vp8_depacketize_single);

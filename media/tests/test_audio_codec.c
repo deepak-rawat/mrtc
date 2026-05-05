@@ -69,8 +69,8 @@ TEST(opus_stereo) {
     int16_t *pcm = (int16_t *)malloc((size_t)(frame_samples * ch) * sizeof(int16_t));
     fill_sine(pcm, frame_samples, ch, 1000, sr);
 
-    audio_frame_t in_frame = { .samples = pcm, .sample_count = frame_samples,
-                               .sample_rate = sr, .channels = ch };
+    audio_frame_t in_frame = {
+        .samples = pcm, .sample_count = frame_samples, .sample_rate = sr, .channels = ch};
     uint8_t pkt[4000];
     int pkt_len = (int)sizeof(pkt);
     ASSERT_EQ(audio_encode(&enc, &in_frame, pkt, &pkt_len), RTC_OK);
@@ -100,8 +100,8 @@ TEST(opus_packet_loss) {
     fill_sine(pcm, frame_samples, ch, 440, sr);
 
     /* Encode and decode one good frame */
-    audio_frame_t in_frame = { .samples = pcm, .sample_count = frame_samples,
-                               .sample_rate = sr, .channels = ch };
+    audio_frame_t in_frame = {
+        .samples = pcm, .sample_count = frame_samples, .sample_rate = sr, .channels = ch};
     uint8_t pkt[4000];
     int pkt_len = (int)sizeof(pkt);
     ASSERT_EQ(audio_encode(&enc, &in_frame, pkt, &pkt_len), RTC_OK);
@@ -134,8 +134,8 @@ TEST(opus_multiple_frames) {
 
     for (int i = 0; i < 50; i++) {
         fill_sine(pcm, frame_samples, ch, 440 + i * 10, sr);
-        audio_frame_t in = { .samples = pcm, .sample_count = frame_samples,
-                             .sample_rate = sr, .channels = ch };
+        audio_frame_t in = {
+            .samples = pcm, .sample_count = frame_samples, .sample_rate = sr, .channels = ch};
         uint8_t pkt[4000];
         int pkt_len = (int)sizeof(pkt);
         ASSERT_EQ(audio_encode(&enc, &in, pkt, &pkt_len), RTC_OK);
@@ -162,6 +162,8 @@ int main(void) {
     printf("========================================\n");
     printf("  Audio Codec Tests (Opus)\n");
     printf("========================================\n\n");
+
+    rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(opus_encode_decode);
     RUN_TEST(opus_stereo);

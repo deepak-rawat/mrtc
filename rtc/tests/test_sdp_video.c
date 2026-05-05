@@ -334,7 +334,7 @@ int main(void) {
     printf("========================================\n\n");
 
     rtc_init();
-    rtc_set_log_level(RTC_LOG_WARN);
+    rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(sdp_generate_video);
     RUN_TEST(sdp_parse_video);
