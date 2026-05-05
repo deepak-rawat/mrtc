@@ -104,6 +104,16 @@ typedef enum {
 } rtc_log_level_t;
 
 void rtc_set_log_level(rtc_log_level_t level);
+
+/*
+ * Direct log output to a file. Pass NULL to disable file logging.
+ * If `log_to_stderr` is true, logs continue going to stderr as well.
+ * Returns RTC_OK on success, RTC_ERR_GENERIC if the file cannot be opened.
+ * The caller should call rtc_log_close() before exit to flush and close.
+ */
+int rtc_set_log_file(const char *path, bool log_to_stderr);
+void rtc_log_close(void);
+
 void rtc_log(rtc_log_level_t level, const char *fmt, ...);
 
 #define RTC_LOG_ERR(...)  rtc_log(RTC_LOG_ERROR, __VA_ARGS__)
