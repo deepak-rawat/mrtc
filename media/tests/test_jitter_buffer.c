@@ -7,7 +7,7 @@
 
 /* ------------------------------------------------------------------ */
 TEST(jb_in_order) {
-    jitter_buffer_config_t cfg = { .target_delay_ms = 0, .max_delay_ms = 500 };
+    jitter_buffer_config_t cfg = {.target_delay_ms = 0, .max_delay_ms = 500};
     jitter_buffer_t *jb = jitter_buffer_create(&cfg);
     ASSERT(jb != NULL);
 
@@ -31,7 +31,7 @@ TEST(jb_in_order) {
 
 /* ------------------------------------------------------------------ */
 TEST(jb_reorder) {
-    jitter_buffer_config_t cfg = { .target_delay_ms = 0, .max_delay_ms = 500 };
+    jitter_buffer_config_t cfg = {.target_delay_ms = 0, .max_delay_ms = 500};
     jitter_buffer_t *jb = jitter_buffer_create(&cfg);
 
     uint8_t d1[] = "a", d2[] = "b", d3[] = "c";
@@ -54,7 +54,7 @@ TEST(jb_reorder) {
 
 /* ------------------------------------------------------------------ */
 TEST(jb_empty_pop) {
-    jitter_buffer_config_t cfg = { .target_delay_ms = 0, .max_delay_ms = 500 };
+    jitter_buffer_config_t cfg = {.target_delay_ms = 0, .max_delay_ms = 500};
     jitter_buffer_t *jb = jitter_buffer_create(&cfg);
 
     jitter_buffer_packet_t out;
@@ -66,7 +66,7 @@ TEST(jb_empty_pop) {
 
 /* ------------------------------------------------------------------ */
 TEST(jb_duplicate_drop) {
-    jitter_buffer_config_t cfg = { .target_delay_ms = 0, .max_delay_ms = 500 };
+    jitter_buffer_config_t cfg = {.target_delay_ms = 0, .max_delay_ms = 500};
     jitter_buffer_t *jb = jitter_buffer_create(&cfg);
 
     uint8_t d[] = "x";
@@ -86,7 +86,7 @@ TEST(jb_duplicate_drop) {
 
 /* ------------------------------------------------------------------ */
 TEST(jb_adaptive_delay) {
-    jitter_buffer_config_t cfg = { .target_delay_ms = 20, .max_delay_ms = 500 };
+    jitter_buffer_config_t cfg = {.target_delay_ms = 20, .max_delay_ms = 500};
     jitter_buffer_t *jb = jitter_buffer_create(&cfg);
 
     int initial_delay = jitter_buffer_get_delay(jb);
@@ -112,6 +112,8 @@ int main(void) {
     printf("========================================\n");
     printf("  Jitter Buffer Tests\n");
     printf("========================================\n\n");
+
+    rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(jb_in_order);
     RUN_TEST(jb_reorder);

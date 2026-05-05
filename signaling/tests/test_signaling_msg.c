@@ -3,6 +3,7 @@
  */
 #include "test_harness.h"
 #include "signaling/signaling_msg.h"
+#include <rtc/rtc_types.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -181,6 +182,8 @@ int main(void) {
     printf("========================================\n");
     printf("  Signaling Message Tests\n");
     printf("========================================\n\n");
+
+    rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(json_build_join);
     RUN_TEST(json_build_leave);

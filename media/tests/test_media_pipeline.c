@@ -335,6 +335,7 @@ int main(void) {
     printf("========================================\n\n");
 
     rtc_init();
+    rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(pipeline_create_destroy);
     RUN_TEST(pipeline_add_send_stream);

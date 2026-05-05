@@ -309,7 +309,7 @@ int main(void) {
     printf("========================================\n\n");
 
     rtc_init();
-    rtc_set_log_level(RTC_LOG_WARN);
+    rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(dc_create);
     RUN_TEST(dc_open_handshake);

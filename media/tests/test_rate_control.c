@@ -3,12 +3,12 @@
  */
 #include "test_harness.h"
 #include "rate_control.h"
+#include <rtc/rtc_types.h>
 
 /* ------------------------------------------------------------------ */
 TEST(rc_no_loss_increase) {
-    rate_control_config_t cfg = { .target_bitrate_kbps = 500,
-                                  .min_bitrate_kbps = 100,
-                                  .max_bitrate_kbps = 2500 };
+    rate_control_config_t cfg = {
+        .target_bitrate_kbps = 500, .min_bitrate_kbps = 100, .max_bitrate_kbps = 2500};
     rate_controller_t *rc = rate_control_create(&cfg);
     ASSERT(rc != NULL);
 
@@ -28,9 +28,8 @@ TEST(rc_no_loss_increase) {
 
 /* ------------------------------------------------------------------ */
 TEST(rc_high_loss_decrease) {
-    rate_control_config_t cfg = { .target_bitrate_kbps = 1000,
-                                  .min_bitrate_kbps = 100,
-                                  .max_bitrate_kbps = 2500 };
+    rate_control_config_t cfg = {
+        .target_bitrate_kbps = 1000, .min_bitrate_kbps = 100, .max_bitrate_kbps = 2500};
     rate_controller_t *rc = rate_control_create(&cfg);
 
     int initial = rate_control_get_bitrate(rc);
@@ -48,24 +47,23 @@ TEST(rc_high_loss_decrease) {
 
 /* ------------------------------------------------------------------ */
 TEST(rc_clamp_min_max) {
-    rate_control_config_t cfg = { .target_bitrate_kbps = 200,
-                                  .min_bitrate_kbps = 100,
-                                  .max_bitrate_kbps = 500 };
+    rate_control_config_t cfg = {
+        .target_bitrate_kbps = 200, .min_bitrate_kbps = 100, .max_bitrate_kbps = 500};
     rate_controller_t *rc = rate_control_create(&cfg);
 
     /* Drive down with heavy loss */
     for (int i = 0; i < 50; i++)
-        rate_control_on_rtcp_rr(rc, 128, 100, 0);  /* 50% loss */
+        rate_control_on_rtcp_rr(rc, 128, 100, 0); /* 50% loss */
 
     int low = rate_control_get_bitrate(rc);
-    ASSERT_EQ(low, 100);  /* Clamped to min */
+    ASSERT_EQ(low, 100); /* Clamped to min */
 
     /* Drive up with no loss */
     for (int i = 0; i < 200; i++)
         rate_control_on_rtcp_rr(rc, 0, 10, 0);
 
     int high = rate_control_get_bitrate(rc);
-    ASSERT_EQ(high, 500);  /* Clamped to max */
+    ASSERT_EQ(high, 500); /* Clamped to max */
 
     printf("    clamp: min=%d, max=%d\n", low, high);
     rate_control_destroy(rc);
@@ -73,15 +71,14 @@ TEST(rc_clamp_min_max) {
 
 /* ------------------------------------------------------------------ */
 TEST(rc_keyframe_on_spike) {
-    rate_control_config_t cfg = { .target_bitrate_kbps = 500,
-                                  .min_bitrate_kbps = 100,
-                                  .max_bitrate_kbps = 2500 };
+    rate_control_config_t cfg = {
+        .target_bitrate_kbps = 500, .min_bitrate_kbps = 100, .max_bitrate_kbps = 2500};
     rate_controller_t *rc = rate_control_create(&cfg);
 
     ASSERT(!rate_control_should_keyframe(rc));
 
     /* Loss spike > 10% → fraction_lost > 26 */
-    rate_control_on_rtcp_rr(rc, 51, 50, 0);  /* ~20% loss */
+    rate_control_on_rtcp_rr(rc, 51, 50, 0); /* ~20% loss */
     ASSERT(rate_control_should_keyframe(rc));
 
     /* Flag should be cleared after reading */
@@ -93,9 +90,8 @@ TEST(rc_keyframe_on_spike) {
 
 /* ------------------------------------------------------------------ */
 TEST(rc_high_rtt_penalty) {
-    rate_control_config_t cfg = { .target_bitrate_kbps = 1000,
-                                  .min_bitrate_kbps = 100,
-                                  .max_bitrate_kbps = 2500 };
+    rate_control_config_t cfg = {
+        .target_bitrate_kbps = 1000, .min_bitrate_kbps = 100, .max_bitrate_kbps = 2500};
     rate_controller_t *rc = rate_control_create(&cfg);
 
     int initial = rate_control_get_bitrate(rc);
@@ -115,6 +111,8 @@ int main(void) {
     printf("========================================\n");
     printf("  Rate Control Tests\n");
     printf("========================================\n\n");
+
+    rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(rc_no_loss_increase);
     RUN_TEST(rc_high_loss_decrease);
