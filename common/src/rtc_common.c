@@ -22,9 +22,32 @@
 
 /* ---------- Logging ---------- */
 static rtc_log_level_t g_log_level = RTC_LOG_INFO;
+static FILE *g_log_file = NULL;
+static bool g_log_stderr = true;
 
 void rtc_set_log_level(rtc_log_level_t level) {
     g_log_level = level;
+}
+
+int rtc_set_log_file(const char *path, bool log_to_stderr) {
+    if (g_log_file) {
+        fclose(g_log_file);
+        g_log_file = NULL;
+    }
+    g_log_stderr = log_to_stderr;
+    if (path) {
+        g_log_file = fopen(path, "a");
+        if (!g_log_file)
+            return RTC_ERR_GENERIC;
+    }
+    return RTC_OK;
+}
+
+void rtc_log_close(void) {
+    if (g_log_file) {
+        fclose(g_log_file);
+        g_log_file = NULL;
+    }
 }
 
 void rtc_log(rtc_log_level_t level, const char *fmt, ...) {
@@ -32,14 +55,25 @@ void rtc_log(rtc_log_level_t level, const char *fmt, ...) {
         return;
 
     static const char *labels[] = {"ERROR", "WARN", "INFO", "DEBUG"};
-    fprintf(stderr, "[mrtc][%s] ", labels[level]);
+    char buf[1024];
+    int n = snprintf(buf, sizeof(buf), "[mrtc][%s] ", labels[level]);
 
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    n += vsnprintf(buf + n, sizeof(buf) - n, fmt, ap);
     va_end(ap);
 
-    fprintf(stderr, "\n");
+    if (n >= (int)sizeof(buf) - 1)
+        n = (int)sizeof(buf) - 2;
+    buf[n++] = '\n';
+    buf[n] = '\0';
+
+    if (g_log_stderr)
+        fwrite(buf, 1, n, stderr);
+    if (g_log_file) {
+        fwrite(buf, 1, n, g_log_file);
+        fflush(g_log_file);
+    }
 }
 
 /* ---------- Socket helpers ---------- */
