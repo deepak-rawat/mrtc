@@ -25,6 +25,7 @@
 #include <rtc/rtc.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 int main(int argc, char *argv[]) {
     const char *meeting = NULL;
@@ -72,6 +73,14 @@ int main(int argc, char *argv[]) {
 
     /* Init mrtc */
     rtc_init();
+
+    /* Log to timestamped file + stderr */
+    char log_path[128];
+    time_t t = time(NULL);
+    struct tm *tm = localtime(&t);
+    strftime(log_path, sizeof(log_path), "mrtc_%Y%m%d_%H%M%S.log", tm);
+    rtc_set_log_file(log_path, true);
+    printf("  Log file: %s\n", log_path);
 
     /* Init SDL3 UI */
     ui_sdl3_t ui;
@@ -268,6 +277,7 @@ int main(int argc, char *argv[]) {
         test_tone_close(&test_audio);
     ui_sdl3_close(&ui);
     SDL_Quit();
+    rtc_log_close();
     rtc_cleanup();
 
     printf("  Bye!\n");
