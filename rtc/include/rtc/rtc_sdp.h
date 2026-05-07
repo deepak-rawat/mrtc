@@ -10,7 +10,7 @@
 #ifndef RTC_SDP_H
 #define RTC_SDP_H
 
-#include "rtc_types.h"
+#include "rtc_common.h"
 
 /* ICE candidate types (shared with ICE agent internals) */
 #define ICE_MAX_CANDIDATES 16

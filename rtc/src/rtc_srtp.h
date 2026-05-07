@@ -7,7 +7,7 @@
 #ifndef RTC_SRTP_H
 #define RTC_SRTP_H
 
-#include "rtc_types.h"
+#include "rtc_common.h"
 #include <openssl/evp.h>
 
 #define SRTP_MAX_KEY_LEN  16

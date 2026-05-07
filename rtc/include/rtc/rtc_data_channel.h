@@ -13,7 +13,7 @@
 #ifndef RTC_DATA_CHANNEL_H
 #define RTC_DATA_CHANNEL_H
 
-#include "rtc_types.h"
+#include "rtc_common.h"
 
 #define RTC_DC_MAX_CHANNELS  16
 #define RTC_DC_MAX_LABEL     128

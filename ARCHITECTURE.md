@@ -40,7 +40,7 @@ All public API functions use the `rtc_` prefix.
 ```
 ├── CMakeLists.txt          # Top-level build (project: mrtc)
 ├── common/                 # Platform abstractions (libmrtc_common)
-│   ├── include/rtc/        #   rtc_types.h — sockets, threads, errors, logging
+│   ├── include/rtc/        #   rtc_common.h — sockets, threads, errors, logging
 │   └── src/
 ├── rtc/                    # Core transport library (libmrtc)
 │   ├── include/rtc/        #   rtc_peer.h, rtc_track.h, rtc_sdp.h, rtc_stun.h

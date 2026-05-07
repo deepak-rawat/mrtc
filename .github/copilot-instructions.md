@@ -31,7 +31,7 @@ and library dependency graph. Per-component design docs:
 - Output parameters are passed as pointers (first param for "method-like" functions)
 
 ### Error Handling
-Error codes are defined in `rtc_types.h`:
+Error codes are defined in `rtc_common.h`:
 - `RTC_OK` (0) - Success
 - `RTC_ERR_GENERIC` (-1) through `RTC_ERR_SDP` (-9) for specific failures
 
@@ -54,7 +54,7 @@ Error codes are defined in `rtc_types.h`:
 - Recv callback fires on the transport's background thread — callers must protect shared state
 
 ### Logging
-Use the logging macros from `rtc_types.h`:
+Use the logging macros from `rtc_common.h`:
 ```c
 RTC_LOG_ERR("Error: %s", msg);
 RTC_LOG_WARN("Warning: %s", msg);

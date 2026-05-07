@@ -10,7 +10,7 @@
 #ifndef RTC_RTCP_H
 #define RTC_RTCP_H
 
-#include "rtc_types.h"
+#include "rtc_common.h"
 
 /* RTCP packet types (RFC 3550 section 12.1) */
 #define RTCP_PT_SR   200

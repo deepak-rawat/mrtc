@@ -7,7 +7,7 @@
 #ifndef MEDIA_VIDEO_CODEC_H
 #define MEDIA_VIDEO_CODEC_H
 
-#include <rtc/rtc_types.h>
+#include <rtc/rtc_common.h>
 #include <stdint.h>
 #include <stdbool.h>
 

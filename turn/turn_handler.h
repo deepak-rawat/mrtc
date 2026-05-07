@@ -4,7 +4,7 @@
 #ifndef TURN_HANDLER_H
 #define TURN_HANDLER_H
 
-#include <rtc/rtc_types.h>
+#include <rtc/rtc_common.h>
 #include <rtc/rtc_stun.h>
 
 #define TURN_MAX_ALLOCATIONS  64

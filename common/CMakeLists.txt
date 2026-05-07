@@ -8,8 +8,8 @@ add_library(mrtc_common STATIC
 )
 
 # PUBLIC include paths:
-#   include       → allows #include "rtc/rtc_types.h"
-#   include/rtc   → allows #include "rtc_types.h" (for sibling headers in rtc/)
+#   include       → allows #include "rtc/rtc_common.h"
+#   include/rtc   → allows #include "rtc_common.h" (for sibling headers in rtc/)
 target_include_directories(mrtc_common PUBLIC include include/rtc)
 
 target_link_libraries(mrtc_common PUBLIC OpenSSL::Crypto ${PLATFORM_LIBS})

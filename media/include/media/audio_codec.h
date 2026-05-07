@@ -4,7 +4,7 @@
 #ifndef MEDIA_AUDIO_CODEC_H
 #define MEDIA_AUDIO_CODEC_H
 
-#include <rtc/rtc_types.h>
+#include <rtc/rtc_common.h>
 #include <stdint.h>
 
 /* Raw audio frame */

@@ -2,7 +2,7 @@
  * rtc_utils.c - Library init/cleanup only.
  * All other utilities (logging, threading, sockets, etc.) are in common/.
  */
-#include "rtc/rtc_types.h"
+#include "rtc/rtc_common.h"
 
 #ifdef _WIN32
 #  include <windows.h>

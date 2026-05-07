@@ -3,7 +3,7 @@
  */
 #include "test_harness.h"
 #include "signaling/signaling_msg.h"
-#include <rtc/rtc_types.h>
+#include <rtc/rtc_common.h>
 #include <string.h>
 #include <stdlib.h>
 

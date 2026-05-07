@@ -7,7 +7,7 @@
 #ifndef RTC_ICE_H
 #define RTC_ICE_H
 
-#include "rtc_types.h"
+#include "rtc_common.h"
 #include "rtc_stun.h"
 #include "rtc_sdp.h" /* for rtc_ice_candidate_t, ICE_MAX_CANDIDATES, etc. */
 

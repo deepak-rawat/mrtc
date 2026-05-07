@@ -3,7 +3,7 @@
  */
 #include "test_harness.h"
 #include "rate_control.h"
-#include <rtc/rtc_types.h>
+#include <rtc/rtc_common.h>
 
 /* ------------------------------------------------------------------ */
 TEST(rc_no_loss_increase) {

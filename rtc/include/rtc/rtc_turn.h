@@ -7,7 +7,7 @@
 #ifndef RTC_TURN_H
 #define RTC_TURN_H
 
-#include "rtc_types.h"
+#include "rtc_common.h"
 #include "rtc_stun.h"
 
 /* Forward declarations */

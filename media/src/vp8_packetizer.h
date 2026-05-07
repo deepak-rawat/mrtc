@@ -19,7 +19,7 @@
 #ifndef RTC_MEDIA_VP8_PACKETIZER_H
 #define RTC_MEDIA_VP8_PACKETIZER_H
 
-#include <rtc/rtc_types.h>
+#include <rtc/rtc_common.h>
 
 /* VP8 payload descriptor size (1-byte minimal form) */
 #define VP8_PD_SIZE 1

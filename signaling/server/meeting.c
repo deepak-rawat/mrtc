@@ -3,7 +3,7 @@
  */
 #include "meeting.h"
 #include "signaling/signaling_msg.h"
-#include <rtc/rtc_types.h>
+#include <rtc/rtc_common.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>

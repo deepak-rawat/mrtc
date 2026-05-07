@@ -9,7 +9,7 @@
 #define RTC_H
 
 /* ---- Public API headers ---- */
-#include "rtc_types.h"
+#include "rtc_common.h"
 #include "rtc_sdp.h"
 #include "rtc_track.h"
 #include "rtc_data_channel.h"

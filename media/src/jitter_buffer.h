@@ -4,7 +4,7 @@
 #ifndef MEDIA_JITTER_BUFFER_H
 #define MEDIA_JITTER_BUFFER_H
 
-#include <rtc/rtc_types.h>
+#include <rtc/rtc_common.h>
 #include <stdint.h>
 #include <stdbool.h>
 

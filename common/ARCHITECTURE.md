@@ -2,7 +2,7 @@
 
 Cross-platform abstractions for sockets, threading, timing, and logging shared by all components.
 
-## Public API (`include/rtc/rtc_types.h`)
+## Public API (`include/rtc/rtc_common.h`)
 
 ### Error Handling
 - `rtc_err_t` — standard return type (0 = `RTC_OK`, negative = error)

@@ -8,7 +8,7 @@
 #ifndef RTC_TRACK_H
 #define RTC_TRACK_H
 
-#include "rtc_types.h"
+#include "rtc_common.h"
 
 #define RTC_MAX_TRANSCEIVERS 8
 

@@ -7,7 +7,7 @@
 #ifndef SIGNALING_CLIENT_H
 #define SIGNALING_CLIENT_H
 
-#include <rtc/rtc_types.h>
+#include <rtc/rtc_common.h>
 
 /* Callbacks fired on the lws service thread */
 typedef void (*sig_on_joined_fn)(const char *my_id, const char **peer_ids, int peer_count,

@@ -11,7 +11,7 @@
 #ifndef RTC_TRANSPORT_H
 #define RTC_TRANSPORT_H
 
-#include "rtc_types.h"
+#include "rtc_common.h"
 #include "rtc_poller.h"
 
 #define RTC_TRANSPORT_MAX_TIMERS 16

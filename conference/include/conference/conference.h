@@ -18,7 +18,7 @@
 #ifndef CONFERENCE_H
 #define CONFERENCE_H
 
-#include <rtc/rtc_types.h>
+#include <rtc/rtc_common.h>
 #include <media/video_codec.h>
 #include <media/audio_codec.h>
 #include <signaling/signaling_client.h>

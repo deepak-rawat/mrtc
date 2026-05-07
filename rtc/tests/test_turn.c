@@ -4,7 +4,7 @@
  */
 #include "test_harness.h"
 #include "rtc/rtc_stun.h"
-#include "rtc/rtc_types.h"
+#include "rtc/rtc_common.h"
 #include <string.h>
 
 /* ------------------------------------------------------------------ */

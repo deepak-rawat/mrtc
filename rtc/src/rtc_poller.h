@@ -9,7 +9,7 @@
 #ifndef RTC_POLLER_H
 #define RTC_POLLER_H
 
-#include "rtc_types.h"
+#include "rtc_common.h"
 
 #define RTC_POLLER_MAX_EVENTS 4
 

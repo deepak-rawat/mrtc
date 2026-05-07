@@ -4,7 +4,7 @@
  * Part of libmrtc_common — shared by all mrtc components.
  * Does NOT include rtc_init/rtc_cleanup (those stay in the rtc library).
  */
-#include "rtc/rtc_types.h"
+#include "rtc/rtc_common.h"
 
 #include <stdio.h>
 #include <stdlib.h>

@@ -1,8 +1,8 @@
 /*
  * Common types, platform abstractions, and error codes for mrtc.
  */
-#ifndef RTC_TYPES_H
-#define RTC_TYPES_H
+#ifndef RTC_COMMON_H
+#define RTC_COMMON_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -121,4 +121,4 @@ void rtc_log(rtc_log_level_t level, const char *fmt, ...);
 #define RTC_LOG_INFO(...) rtc_log(RTC_LOG_INFO, __VA_ARGS__)
 #define RTC_LOG_DBG(...)  rtc_log(RTC_LOG_DEBUG, __VA_ARGS__)
 
-#endif /* RTC_TYPES_H */
+#endif /* RTC_COMMON_H */

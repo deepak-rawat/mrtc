@@ -16,7 +16,7 @@
 #ifndef RTC_PEER_H
 #define RTC_PEER_H
 
-#include "rtc_types.h"
+#include "rtc_common.h"
 #include "rtc_sdp.h"
 #include "rtc_track.h"
 #include "rtc_data_channel.h"

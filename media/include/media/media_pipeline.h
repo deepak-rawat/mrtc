@@ -14,7 +14,7 @@
 
 #include "video_codec.h"
 #include "audio_codec.h"
-#include <rtc/rtc_types.h>
+#include <rtc/rtc_common.h>
 #include <rtc/rtc_track.h>
 
 #define MP_MAX_SEND_STREAMS 4

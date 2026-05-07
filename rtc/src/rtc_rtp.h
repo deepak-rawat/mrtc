@@ -6,7 +6,7 @@
 #ifndef RTC_RTP_H
 #define RTC_RTP_H
 
-#include "rtc_types.h"
+#include "rtc_common.h"
 
 #define RTP_VERSION     2
 #define RTP_HEADER_SIZE 12

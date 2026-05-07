@@ -7,7 +7,7 @@
 #ifndef RTC_DTLS_H
 #define RTC_DTLS_H
 
-#include "rtc_types.h"
+#include "rtc_common.h"
 #include <openssl/ssl.h>
 
 #define RTC_DTLS_FINGERPRINT_SIZE 96 /* SHA-256 hex string + colons */

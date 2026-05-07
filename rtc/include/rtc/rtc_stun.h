@@ -9,7 +9,7 @@
 #ifndef RTC_STUN_H
 #define RTC_STUN_H
 
-#include "rtc_types.h"
+#include "rtc_common.h"
 
 /* STUN message types */
 #define STUN_BINDING_REQUEST        0x0001
