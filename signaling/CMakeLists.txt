@@ -15,6 +15,7 @@ target_link_libraries(mrtc_signaling PUBLIC
     cjson
     PkgConfig::LWS
 )
+mrtc_set_warnings(mrtc_signaling)
 
 # --- Server executable ---
 add_executable(signaling_server
@@ -23,18 +24,22 @@ add_executable(signaling_server
 )
 target_include_directories(signaling_server PRIVATE server)
 target_link_libraries(signaling_server PRIVATE mrtc_signaling)
+mrtc_set_warnings(signaling_server)
 
 # --- Tests ---
-set(SIG_TEST_NAMES test_signaling_msg test_signaling)
-foreach(test_name ${SIG_TEST_NAMES})
-    add_executable(${test_name} tests/${test_name}.c)
-    target_include_directories(${test_name} PRIVATE
-        ${PROJECT_SOURCE_DIR}/tests
-        server
-    )
-    target_link_libraries(${test_name} PRIVATE mrtc_signaling)
-endforeach()
+if(MRTC_BUILD_TESTS)
+    set(SIG_TEST_NAMES test_signaling_msg test_signaling)
+    foreach(test_name ${SIG_TEST_NAMES})
+        add_executable(${test_name} tests/${test_name}.c)
+        target_include_directories(${test_name} PRIVATE
+            ${PROJECT_SOURCE_DIR}/tests
+            server
+        )
+        target_link_libraries(${test_name} PRIVATE mrtc_signaling)
+        add_test(NAME ${test_name} COMMAND ${test_name})
+    endforeach()
 
-# test_signaling needs meeting.c (server logic under test)
-target_sources(test_signaling PRIVATE server/meeting.c)
-target_include_directories(test_signaling PRIVATE server)
+    # test_signaling needs meeting.c (server logic under test)
+    target_sources(test_signaling PRIVATE server/meeting.c)
+    target_include_directories(test_signaling PRIVATE server)
+endif()

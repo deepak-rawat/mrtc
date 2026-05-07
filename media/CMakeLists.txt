@@ -23,14 +23,18 @@ target_include_directories(mrtc_media
     PRIVATE src              # Private: vp8_packetizer.h, jitter_buffer.h, etc.
 )
 target_link_libraries(mrtc_media PUBLIC mrtc PkgConfig::VPX PkgConfig::OPUS)
+mrtc_set_warnings(mrtc_media)
 
 # Tests (need access to internal headers for component-level testing)
-set(MEDIA_TEST_NAMES test_vp8 test_video_codec test_audio_codec test_jitter_buffer test_rate_control test_media_pipeline)
-foreach(test_name ${MEDIA_TEST_NAMES})
-    add_executable(${test_name} tests/${test_name}.c)
-    target_include_directories(${test_name} PRIVATE
-        ${PROJECT_SOURCE_DIR}/tests
-        ${CMAKE_CURRENT_SOURCE_DIR}/src      # Access internal headers
-    )
-    target_link_libraries(${test_name} PRIVATE mrtc_media)
-endforeach()
+if(MRTC_BUILD_TESTS)
+    set(MEDIA_TEST_NAMES test_vp8 test_video_codec test_audio_codec test_jitter_buffer test_rate_control test_media_pipeline)
+    foreach(test_name ${MEDIA_TEST_NAMES})
+        add_executable(${test_name} tests/${test_name}.c)
+        target_include_directories(${test_name} PRIVATE
+            ${PROJECT_SOURCE_DIR}/tests
+            ${CMAKE_CURRENT_SOURCE_DIR}/src      # Access internal headers
+        )
+        target_link_libraries(${test_name} PRIVATE mrtc_media)
+        add_test(NAME ${test_name} COMMAND ${test_name})
+    endforeach()
+endif()

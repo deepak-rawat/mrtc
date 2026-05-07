@@ -1,8 +1,34 @@
-cmake_minimum_required(VERSION 3.10)
-project(mrtc C)
+cmake_minimum_required(VERSION 3.14)
+project(mrtc VERSION 0.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Default build type for single-config generators (Make, Ninja)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
+endif()
+
+# Options
+option(MRTC_BUILD_TESTS "Build test executables" ON)
+option(MRTC_ENABLE_ASAN "Enable AddressSanitizer (Debug builds)" OFF)
+
+# Compiler warning flags applied to all targets in this project
+function(mrtc_set_warnings target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endfunction()
+
+# AddressSanitizer
+if(MRTC_ENABLE_ASAN AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address)
+endif()
 
 # Platform detection
 if(WIN32)
@@ -13,8 +39,12 @@ else()
     set(PLATFORM_LIBS m Threads::Threads)
 endif()
 
-# Find OpenSSL (the only external dependency)
 find_package(OpenSSL REQUIRED)
+
+# Testing
+if(MRTC_BUILD_TESTS)
+    enable_testing()
+endif()
 
 # Libraries and applications
 add_subdirectory(common)
