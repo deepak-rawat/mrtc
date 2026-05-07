@@ -125,18 +125,11 @@ static rtc_ice_agent_t *g_stun_agent; /* agent to forward STUN to */
 static void ice_test_recv_cb(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                              const rtc_addr_t *from, void *user) {
     (void)user;
-    if (type == RTC_PKT_STUN && g_stun_agent) {
-        rtc_ice_handle_stun(g_stun_agent, data, len, from);
-        rtc_mutex_lock(&g_ice_mutex);
-        if (len <= sizeof(g_stun_recv_buf)) {
-            memcpy(g_stun_recv_buf, data, len);
-            g_stun_recv_len = len;
-            if (from)
-                g_stun_recv_from = *from;
-        }
-        g_stun_recv_count++;
-        rtc_cond_signal(&g_ice_cond);
-        rtc_mutex_unlock(&g_ice_mutex);
+    rtc_mutex_lock(&g_ice_mutex);
+    rtc_ice_agent_t *agent = g_stun_agent;
+    rtc_mutex_unlock(&g_ice_mutex);
+    if (type == RTC_PKT_STUN && agent) {
+        rtc_ice_handle_stun(agent, data, len, from);
     } else {
         rtc_mutex_lock(&g_ice_mutex);
         if (len <= sizeof(g_data_recv_buf)) {
@@ -262,7 +255,9 @@ TEST(ice_two_agents_connect) {
      * which sends a binding response back.
      */
     g_stun_recv_count = 0;
+    rtc_mutex_lock(&g_ice_mutex);
     g_stun_agent = &bob;
+    rtc_mutex_unlock(&g_ice_mutex);
     rtc_transport_set_recv_callback(&transport_b, ice_test_recv_cb, NULL);
 
     /* Register Alice's transport to capture the binding response */
@@ -282,7 +277,6 @@ TEST(ice_two_agents_connect) {
     ASSERT_EQ(rc, RTC_OK);
 
     /* Wait for Alice to receive the binding response via her transport callback */
-    g_stun_recv_count = 0; /* reset for Alice's side */
     bool got = wait_for_stun(1, 2000);
     ASSERT(got);
 
@@ -295,11 +289,15 @@ TEST(ice_two_agents_connect) {
 
     printf("    Alice -> Bob STUN check: request sent, response received\n");
 
-    g_stun_agent = NULL;
-    rtc_ice_close(&alice);
-    rtc_ice_close(&bob);
+    rtc_transport_set_recv_callback(&transport_b, NULL, NULL);
+    rtc_transport_set_recv_callback(&transport_a, NULL, NULL);
     rtc_transport_close(&transport_a);
     rtc_transport_close(&transport_b);
+    rtc_mutex_lock(&g_ice_mutex);
+    g_stun_agent = NULL;
+    rtc_mutex_unlock(&g_ice_mutex);
+    rtc_ice_close(&alice);
+    rtc_ice_close(&bob);
 }
 
 /* ------------------------------------------------------------------ */
@@ -357,10 +355,12 @@ TEST(ice_data_transfer) {
 
     printf("    Bob -> Alice: \"%s\" (%zu bytes)\n", reply, g_data_recv_len);
 
-    rtc_ice_close(&alice);
-    rtc_ice_close(&bob);
+    rtc_transport_set_recv_callback(&transport_a, NULL, NULL);
+    rtc_transport_set_recv_callback(&transport_b, NULL, NULL);
     rtc_transport_close(&transport_a);
     rtc_transport_close(&transport_b);
+    rtc_ice_close(&alice);
+    rtc_ice_close(&bob);
 }
 
 /* ------------------------------------------------------------------ */
