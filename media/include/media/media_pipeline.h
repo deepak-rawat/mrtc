@@ -14,6 +14,7 @@
 
 #include "video_codec.h"
 #include "audio_codec.h"
+#include "video_stats.h"
 #include <rtc/rtc_common.h>
 #include <rtc/rtc_track.h>
 
@@ -113,5 +114,23 @@ void media_pipeline_remove_peer(media_pipeline_t *p, const char *peer_id);
  */
 int media_pipeline_recv_rtp(media_pipeline_t *p, media_recv_stream_t *stream, const uint8_t *data,
                             int len, uint16_t seq, uint32_t timestamp, bool marker);
+
+/* ---- Debug configuration (all features off by default) ---- */
+
+typedef struct {
+    const char *send_dump_path;            /* IVF dump path, NULL = disabled */
+    const char *recv_dump_path;            /* IVF dump path, NULL = disabled */
+    int dump_width, dump_height, dump_fps; /* IVF header params */
+    bool enable_frame_checksum;            /* log Y-plane checksum at DEBUG level */
+    int psnr_sample_interval;              /* 0=off, N=every Nth encoded frame */
+} media_debug_config_t;
+
+/* Configure all debug features at once. Pass NULL to disable everything. */
+int media_pipeline_set_debug(media_pipeline_t *p, const media_debug_config_t *cfg);
+
+/* ---- Stats access (app polls these, computes rates by diffing) ---- */
+
+const video_send_stats_t *media_pipeline_get_send_stats(media_pipeline_t *p, int index);
+const video_recv_stats_t *media_pipeline_get_recv_stats(media_pipeline_t *p, int index);
 
 #endif /* MEDIA_PIPELINE_H */

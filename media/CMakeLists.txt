@@ -15,6 +15,9 @@ set(MEDIA_SOURCES
     src/media_pipeline.c
     src/test_pattern.c
     src/test_tone.c
+    src/video_stats.c
+    src/video_dump.c
+    src/video_debug.c
 )
 
 add_library(mrtc_media STATIC ${MEDIA_SOURCES})
@@ -22,12 +25,12 @@ target_include_directories(mrtc_media
     PUBLIC  include          # Public: media_pipeline.h, video_codec.h, etc.
     PRIVATE src              # Private: vp8_packetizer.h, jitter_buffer.h, etc.
 )
-target_link_libraries(mrtc_media PUBLIC mrtc PkgConfig::VPX PkgConfig::OPUS)
+target_link_libraries(mrtc_media PUBLIC mrtc PkgConfig::VPX PkgConfig::OPUS m)
 mrtc_set_warnings(mrtc_media)
 
 # Tests (need access to internal headers for component-level testing)
 if(MRTC_BUILD_TESTS)
-    set(MEDIA_TEST_NAMES test_vp8 test_video_codec test_audio_codec test_jitter_buffer test_rate_control test_media_pipeline)
+    set(MEDIA_TEST_NAMES test_vp8 test_video_codec test_audio_codec test_jitter_buffer test_rate_control test_media_pipeline test_video_stats test_video_dump test_video_debug)
     foreach(test_name ${MEDIA_TEST_NAMES})
         add_executable(${test_name} tests/${test_name}.c)
         target_include_directories(${test_name} PRIVATE
