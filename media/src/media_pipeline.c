@@ -558,3 +558,11 @@ const video_recv_stats_t *media_pipeline_get_recv_stats(media_pipeline_t *p, int
         return NULL;
     return &p->recv[index].recv_stats;
 }
+
+/* ---- RTCP feedback ---- */
+
+void media_pipeline_on_rtcp_rr(media_pipeline_t *p, int fraction_lost, int rtt_ms, int jitter) {
+    if (!p || !p->rate_ctrl)
+        return;
+    rate_control_on_rtcp_rr(p->rate_ctrl, fraction_lost, rtt_ms, jitter);
+}

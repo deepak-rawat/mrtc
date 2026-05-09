@@ -24,8 +24,12 @@ static rtc_pkt_type_t transport_classify(const uint8_t *data, size_t len) {
         return RTC_PKT_CHANNEL_DATA; /* TURN */
     if (b >= 20 && b <= 63)
         return RTC_PKT_DTLS;
-    if (b >= 128 && b <= 191)
+    if (b >= 128 && b <= 191) {
+        /* Distinguish RTCP (PT 200-204 in byte[1]) from RTP */
+        if (len >= 2 && data[1] >= 200 && data[1] <= 204)
+            return RTC_PKT_RTCP;
         return RTC_PKT_RTP;
+    }
     return RTC_PKT_UNKNOWN;
 }
 

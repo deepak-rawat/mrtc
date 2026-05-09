@@ -6,6 +6,7 @@
  */
 #include "rtc/rtc_track.h"
 #include "rtc_rtp.h"
+#include "rtc_rtcp.h"
 #include "rtc_transport.h"
 #include "rtc_srtp.h"
 
@@ -19,6 +20,7 @@ struct rtc_rtp_sender {
     rtc_rtp_session_t rtp_session;
     rtc_srtp_ctx_t *srtp; /* borrowed from peer, set after CONNECTED */
     void *transport;      /* borrowed rtc_transport_t* for sendto */
+    rtc_rtcp_stats_t rtcp_stats;
     bool active;
 };
 
@@ -28,6 +30,7 @@ struct rtc_rtp_receiver {
     rtc_on_frame_fn on_frame;
     void *on_frame_user;
     uint32_t ssrc; /* remote SSRC to match */
+    rtc_rtcp_stats_t rtcp_stats;
     bool active;
 };
 
@@ -54,6 +57,9 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
     int rc = rtc_rtp_session_send(&sender->rtp_session, &pkt, payload, len, samples, marker);
     if (rc != RTC_OK)
         return rc;
+
+    /* Update RTCP sender stats */
+    rtc_rtcp_stats_on_rtp_send(&sender->rtcp_stats, pkt.header.timestamp, len);
 
     /* SRTP protect (sender SRTP ctx only touched from main thread) */
     size_t pkt_len = pkt.buf_len;

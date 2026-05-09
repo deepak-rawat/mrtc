@@ -67,8 +67,8 @@ tiled video grid, keyboard controls.
 | Area | Limitation |
 |---|---|
 | Atomics | `volatile` used instead of `_Atomic` — no real memory ordering |
-| RTCP | Only SR/RR — no NACK, PLI, FIR, REMB |
-| Bandwidth | Rate controller has no real signal (BWE not implemented) |
+| RTCP | SR/RR integrated with periodic send, SRTCP, rate control feedback — no NACK, PLI, FIR, REMB |
+| Bandwidth | AIMD rate controller driven by RTCP RR — no delay-based BWE |
 | FEC | No forward error correction |
 | ICE | No trickle ICE, no relay candidates, always controlling role |
 | Stats | No `getStats()` API |
@@ -114,13 +114,7 @@ typedef struct media_recv_stream { /* decoder + jb + depack */ } media_recv_stre
 Saves ~270KB per unused side per stream (VP8 depacketizer reassembly buffer alone
 is 256KB).
 
-**1.3 — Remove orphaned rate_ctrl from pipeline**
-
-`media_pipeline_on_rtcp_rr()` was removed but `rate_ctrl` field remains. The send
-path still calls `rate_control_get_bitrate()` / `rate_control_should_keyframe()` but
-the controller never receives real feedback. Remove until BWE is implemented in Phase 3.
-
-**1.4 — Make `rtc_sdp.h` private**
+**1.3 — Make `rtc_sdp.h` private**
 
 `rtc_peer.h` only needs `SDP_MAX_SIZE` and `rtc_sdp_type_t`. Move those into
 `rtc_peer.h`, move `rtc_sdp.h` to `rtc/src/`.

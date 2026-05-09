@@ -22,7 +22,8 @@ typedef enum {
     RTC_PKT_STUN,         /* first byte [0, 3]     */
     RTC_PKT_CHANNEL_DATA, /* first byte [64, 79] — TURN ChannelData */
     RTC_PKT_DTLS,         /* first byte [20, 63]   */
-    RTC_PKT_RTP,          /* first byte [128, 191] */
+    RTC_PKT_RTP,          /* first byte [128, 191], byte[1] PT < 200 */
+    RTC_PKT_RTCP,         /* first byte [128, 191], byte[1] PT 200-204 */
     RTC_PKT_UNKNOWN,
 } rtc_pkt_type_t;
 

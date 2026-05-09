@@ -121,6 +121,24 @@ int rtc_srtp_init(rtc_srtp_ctx_t *ctx, const uint8_t *master_key, size_t key_len
         return rc;
     memcpy(ctx->session_auth_key, auth_key, 20);
 
+    /* Derive RTCP session keys (labels 0x03-0x05) */
+    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTCP_ENCRYPTION,
+                  ctx->rtcp_session_key, SRTP_MAX_KEY_LEN);
+    if (rc != RTC_OK)
+        return rc;
+
+    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTCP_SALT,
+                  ctx->rtcp_session_salt, SRTP_MAX_SALT_LEN);
+    if (rc != RTC_OK)
+        return rc;
+
+    uint8_t rtcp_auth_key[20];
+    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTCP_AUTH, rtcp_auth_key,
+                  20);
+    if (rc != RTC_OK)
+        return rc;
+    memcpy(ctx->rtcp_session_auth_key, rtcp_auth_key, 20);
+
     ctx->initialized = true;
     RTC_LOG_INFO("SRTP: context initialized");
     return RTC_OK;
@@ -295,6 +313,141 @@ int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     }
 
     *len = srtp_len;
+    return RTC_OK;
+}
+
+/*
+ * SRTCP AES-128-CM (RFC 3711 Section 3.4)
+ *
+ * IV for RTCP: session_salt XOR (SSRC || srtcp_index), padded to 16 bytes.
+ * Unlike SRTP, the "packet index" is the 31-bit SRTCP index (no ROC/seq).
+ */
+static int srtcp_aes_cm(const uint8_t *session_key, const uint8_t *session_salt, uint32_t ssrc,
+                        uint32_t srtcp_index, uint8_t *data, size_t len) {
+    uint8_t iv[16];
+    memset(iv, 0, sizeof(iv));
+
+    /* SSRC at bytes 4..7 */
+    iv[4] = (ssrc >> 24) & 0xFF;
+    iv[5] = (ssrc >> 16) & 0xFF;
+    iv[6] = (ssrc >> 8) & 0xFF;
+    iv[7] = ssrc & 0xFF;
+
+    /* SRTCP index at bytes 8..11 (31 bits, no E flag here) */
+    iv[8] = (srtcp_index >> 24) & 0xFF;
+    iv[9] = (srtcp_index >> 16) & 0xFF;
+    iv[10] = (srtcp_index >> 8) & 0xFF;
+    iv[11] = srtcp_index & 0xFF;
+
+    for (int i = 0; i < 14; i++)
+        iv[i] ^= session_salt[i];
+
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx)
+        return RTC_ERR_NOMEM;
+
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_128_ctr(), NULL, session_key, iv) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return RTC_ERR_SRTP;
+    }
+
+    int outl = 0;
+    EVP_EncryptUpdate(ctx, data, &outl, data, (int)len);
+    EVP_EncryptFinal_ex(ctx, data + outl, &outl);
+    EVP_CIPHER_CTX_free(ctx);
+
+    return RTC_OK;
+}
+
+int rtc_srtp_protect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
+    if (!ctx->initialized)
+        return RTC_ERR_SRTP;
+    if (*len < 8)
+        return RTC_ERR_INVALID; /* minimum: RTCP header (4) + SSRC (4) */
+
+    /* Parse SSRC from byte 4..7 of RTCP packet */
+    uint32_t ssrc =
+        ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) | ((uint32_t)buf[6] << 8) | buf[7];
+
+    uint32_t index = ctx->srtcp_index & 0x7FFFFFFFu;
+
+    /* Encrypt everything after the 8-byte header+SSRC prefix */
+    if (*len > 8) {
+        int rc = srtcp_aes_cm(ctx->rtcp_session_key, ctx->rtcp_session_salt, ssrc, index, buf + 8,
+                              *len - 8);
+        if (rc != RTC_OK)
+            return rc;
+    }
+
+    /* Append 4-byte SRTCP index with E-flag (bit 31 = 1 means encrypted) */
+    uint32_t e_index = index | 0x80000000u;
+    size_t off = *len;
+    buf[off + 0] = (e_index >> 24) & 0xFF;
+    buf[off + 1] = (e_index >> 16) & 0xFF;
+    buf[off + 2] = (e_index >> 8) & 0xFF;
+    buf[off + 3] = e_index & 0xFF;
+    size_t auth_len = *len + 4; /* RTCP packet + SRTCP index */
+
+    /* Compute auth tag: HMAC-SHA1 over (RTCP packet + SRTCP index) */
+    uint8_t hmac[20];
+    int rc =
+        srtp_hmac_sha1(ctx->rtcp_session_auth_key, 20, buf, auth_len, NULL, 0, hmac, sizeof(hmac));
+    if (rc != RTC_OK)
+        return rc;
+
+    /* Append truncated 80-bit auth tag */
+    memcpy(buf + auth_len, hmac, SRTP_AUTH_TAG_LEN);
+    *len = auth_len + SRTP_AUTH_TAG_LEN;
+
+    ctx->srtcp_index++;
+    return RTC_OK;
+}
+
+int rtc_srtp_unprotect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
+    if (!ctx->initialized)
+        return RTC_ERR_SRTP;
+    /* Minimum: 8 (header+SSRC) + 4 (SRTCP index) + 10 (auth tag) */
+    if (*len < 8 + 4 + SRTP_AUTH_TAG_LEN)
+        return RTC_ERR_INVALID;
+
+    size_t total = *len;
+    size_t auth_start = total - SRTP_AUTH_TAG_LEN;
+    uint8_t *tag = buf + auth_start;
+
+    /* SRTCP index is the 4 bytes before the auth tag */
+    size_t idx_start = auth_start - 4;
+    uint32_t e_index = ((uint32_t)buf[idx_start] << 24) | ((uint32_t)buf[idx_start + 1] << 16) |
+                       ((uint32_t)buf[idx_start + 2] << 8) | buf[idx_start + 3];
+    bool encrypted = (e_index & 0x80000000u) != 0;
+    uint32_t index = e_index & 0x7FFFFFFFu;
+
+    /* Verify auth tag over (RTCP packet + SRTCP index) */
+    size_t auth_input_len = auth_start; /* everything before the tag */
+    uint8_t hmac[20];
+    int rc = srtp_hmac_sha1(ctx->rtcp_session_auth_key, 20, buf, auth_input_len, NULL, 0, hmac,
+                            sizeof(hmac));
+    if (rc != RTC_OK)
+        return rc;
+
+    if (memcmp(hmac, tag, SRTP_AUTH_TAG_LEN) != 0) {
+        RTC_LOG_ERR("SRTCP: authentication failed");
+        return RTC_ERR_SRTP;
+    }
+
+    /* The plaintext RTCP packet length is everything before the SRTCP index */
+    size_t rtcp_len = idx_start;
+
+    /* Decrypt if E-flag set */
+    if (encrypted && rtcp_len > 8) {
+        uint32_t ssrc =
+            ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) | ((uint32_t)buf[6] << 8) | buf[7];
+        rc = srtcp_aes_cm(ctx->rtcp_session_key, ctx->rtcp_session_salt, ssrc, index, buf + 8,
+                          rtcp_len - 8);
+        if (rc != RTC_OK)
+            return rc;
+    }
+
+    *len = rtcp_len;
     return RTC_OK;
 }
 

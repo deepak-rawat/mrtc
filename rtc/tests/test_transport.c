@@ -287,6 +287,67 @@ TEST(transport_send_to_remote) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: RTCP classified separately from RTP                          */
+/* ------------------------------------------------------------------ */
+TEST(transport_classify_rtcp) {
+    rtc_transport_t t;
+    int rc = rtc_transport_init(&t);
+    ASSERT_EQ(rc, RTC_OK);
+    rtc_transport_set_recv_callback(&t, test_recv_callback, NULL);
+
+    rtc_addr_t self;
+    get_loopback_addr(&t, &self);
+
+    /* RTCP Sender Report: first byte 0x80 (V=2, P=0, RC=0), second byte 200 (SR) */
+    g_recv_count = 0;
+    uint8_t sr_pkt[28];
+    memset(sr_pkt, 0, sizeof(sr_pkt));
+    sr_pkt[0] = 0x80; /* version=2 */
+    sr_pkt[1] = 200;  /* PT = SR */
+    sr_pkt[2] = 0x00;
+    sr_pkt[3] = 0x06; /* length = 6 words */
+    rc = rtc_transport_send(&t, sr_pkt, sizeof(sr_pkt), &self);
+    ASSERT_EQ(rc, RTC_OK);
+
+    bool got = wait_for_recv(1, 2000);
+    ASSERT(got);
+    ASSERT_EQ((int)g_recv_type, (int)RTC_PKT_RTCP);
+    printf("    RTCP SR classified as RTC_PKT_RTCP\n");
+
+    /* RTCP Receiver Report: byte[1] = 201 */
+    g_recv_count = 0;
+    uint8_t rr_pkt[8];
+    memset(rr_pkt, 0, sizeof(rr_pkt));
+    rr_pkt[0] = 0x80;
+    rr_pkt[1] = 201; /* PT = RR */
+    rr_pkt[2] = 0x00;
+    rr_pkt[3] = 0x01;
+    rc = rtc_transport_send(&t, rr_pkt, sizeof(rr_pkt), &self);
+    ASSERT_EQ(rc, RTC_OK);
+
+    got = wait_for_recv(1, 2000);
+    ASSERT(got);
+    ASSERT_EQ((int)g_recv_type, (int)RTC_PKT_RTCP);
+    printf("    RTCP RR classified as RTC_PKT_RTCP\n");
+
+    /* Regular RTP (byte[1] = 96, PT < 200) should still be RTP */
+    g_recv_count = 0;
+    uint8_t rtp_pkt[12];
+    memset(rtp_pkt, 0, sizeof(rtp_pkt));
+    rtp_pkt[0] = 0x80; /* version=2 */
+    rtp_pkt[1] = 96;   /* PT = 96 (dynamic) */
+    rc = rtc_transport_send(&t, rtp_pkt, sizeof(rtp_pkt), &self);
+    ASSERT_EQ(rc, RTC_OK);
+
+    got = wait_for_recv(1, 2000);
+    ASSERT(got);
+    ASSERT_EQ((int)g_recv_type, (int)RTC_PKT_RTP);
+    printf("    RTP with PT=96 still classified as RTP\n");
+
+    rtc_transport_close(&t);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Transport Layer Tests\n");
@@ -303,6 +364,7 @@ int main(void) {
     RUN_TEST(transport_timer_fires);
     RUN_TEST(transport_timer_cancel);
     RUN_TEST(transport_send_to_remote);
+    RUN_TEST(transport_classify_rtcp);
 
     rtc_cond_destroy(&g_cond);
     rtc_mutex_destroy(&g_mutex);

@@ -16,23 +16,35 @@
 #define SRTP_MAX_PACKET   1500
 
 /* Key derivation labels (RFC 3711 section 4.3.1) */
-#define SRTP_LABEL_RTP_ENCRYPTION 0x00
-#define SRTP_LABEL_RTP_AUTH       0x01
-#define SRTP_LABEL_RTP_SALT       0x02
+#define SRTP_LABEL_RTP_ENCRYPTION  0x00
+#define SRTP_LABEL_RTP_AUTH        0x01
+#define SRTP_LABEL_RTP_SALT        0x02
+#define SRTP_LABEL_RTCP_ENCRYPTION 0x03
+#define SRTP_LABEL_RTCP_AUTH       0x04
+#define SRTP_LABEL_RTCP_SALT       0x05
 
 typedef struct {
     /* Master key + salt (from DTLS export) */
     uint8_t master_key[SRTP_MAX_KEY_LEN];
     uint8_t master_salt[SRTP_MAX_SALT_LEN];
 
-    /* Derived session keys */
+    /* Derived session keys (RTP) */
     uint8_t session_key[SRTP_MAX_KEY_LEN];
     uint8_t session_salt[SRTP_MAX_SALT_LEN];
     uint8_t session_auth_key[20]; /* HMAC-SHA1 key */
 
-    /* Rollover counter */
+    /* Derived session keys (RTCP) */
+    uint8_t rtcp_session_key[SRTP_MAX_KEY_LEN];
+    uint8_t rtcp_session_salt[SRTP_MAX_SALT_LEN];
+    uint8_t rtcp_session_auth_key[20];
+
+    /* Rollover counter (RTP) */
     uint32_t roc;
     uint16_t last_seq;
+
+    /* SRTCP index counter */
+    uint32_t srtcp_index;
+
     bool initialized;
 } rtc_srtp_ctx_t;
 
@@ -54,6 +66,20 @@ int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len);
  * Output: buf is overwritten with the plain RTP packet, *len updated.
  */
 int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len);
+
+/*
+ * Protect an RTCP packet in-place (SRTCP, RFC 3711 section 3.4).
+ * Encrypts everything after the first 8 bytes (header + SSRC).
+ * Appends 4-byte SRTCP index (with E-flag) + SRTP_AUTH_TAG_LEN auth tag.
+ * buf must have room for 4 + SRTP_AUTH_TAG_LEN extra bytes.
+ */
+int rtc_srtp_protect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len);
+
+/*
+ * Unprotect an SRTCP packet in-place.
+ * Verifies auth tag, removes SRTCP index + tag, decrypts body.
+ */
+int rtc_srtp_unprotect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len);
 
 /* Cleanup */
 void rtc_srtp_close(rtc_srtp_ctx_t *ctx);

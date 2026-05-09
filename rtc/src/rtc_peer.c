@@ -22,6 +22,7 @@
  */
 #include "rtc/rtc_peer.h"
 #include "rtc_rtp.h"
+#include "rtc_rtcp.h"
 #include "rtc_transport.h"
 #include "rtc_ice.h"
 #include "rtc_dtls.h"
@@ -45,6 +46,7 @@ struct rtc_rtp_sender {
     rtc_rtp_session_t rtp_session;
     rtc_srtp_ctx_t *srtp;
     void *transport;
+    rtc_rtcp_stats_t rtcp_stats;
     bool active;
 };
 
@@ -54,6 +56,7 @@ struct rtc_rtp_receiver {
     rtc_on_frame_fn on_frame;
     void *on_frame_user;
     uint32_t ssrc;
+    rtc_rtcp_stats_t rtcp_stats;
     bool active;
 };
 
@@ -121,10 +124,65 @@ struct rtc_peer_connection {
 
     /* Connection started flag */
     bool connect_started;
+
+    /* RTCP send timer */
+    rtc_timer_id_t rtcp_timer_id;
+
+    /* RTCP callback (fires on transport thread when RR is received) */
+    rtc_on_rtcp_rr_fn on_rtcp_rr;
+    void *on_rtcp_rr_user;
 };
 
 /* ---- Forward declarations ---- */
 static int peer_dc_send(const uint8_t *data, size_t len, void *user);
+static void peer_rtcp_timer(void *user);
+
+/* ---- RTCP periodic send timer (fires on transport thread every 5 seconds) ---- */
+
+#define RTCP_INTERVAL_MS 5000
+
+static void peer_rtcp_timer(void *user) {
+    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+    if (pc->connection_state != RTC_CONNECTION_CONNECTED)
+        return;
+
+    /* Build and send RTCP for each active transceiver */
+    for (int i = 0; i < pc->transceiver_count; i++) {
+        struct rtc_rtp_transceiver *t = &pc->transceivers[i];
+
+        /* Sender Report (if we're sending) */
+        if (t->sender.active && t->sender.rtcp_stats.packets_sent > 0) {
+            rtc_rtcp_packet_t pkt;
+            if (rtc_rtcp_build_sr(&pkt, &t->sender.rtcp_stats) == RTC_OK) {
+                uint8_t buf[RTCP_MAX_PACKET + 4 + SRTP_AUTH_TAG_LEN];
+                memcpy(buf, pkt.buf, pkt.buf_len);
+                size_t len = pkt.buf_len;
+                if (rtc_srtp_protect_rtcp(&pc->srtp_send, buf, &len) == RTC_OK) {
+                    rtc_transport_send_to_remote(&pc->transport, buf, len);
+                }
+            }
+            t->sender.rtcp_stats.last_report_time = rtc_time_ms();
+        }
+
+        /* Receiver Report (if we're receiving) */
+        if (t->receiver.active && t->receiver.rtcp_stats.packets_received > 0) {
+            rtc_rtcp_packet_t pkt;
+            if (rtc_rtcp_build_rr(&pkt, &t->receiver.rtcp_stats) == RTC_OK) {
+                uint8_t buf[RTCP_MAX_PACKET + 4 + SRTP_AUTH_TAG_LEN];
+                memcpy(buf, pkt.buf, pkt.buf_len);
+                size_t len = pkt.buf_len;
+                if (rtc_srtp_protect_rtcp(&pc->srtp_send, buf, &len) == RTC_OK) {
+                    rtc_transport_send_to_remote(&pc->transport, buf, len);
+                }
+            }
+            t->receiver.rtcp_stats.last_report_time = rtc_time_ms();
+        }
+    }
+
+    /* Re-arm timer */
+    pc->rtcp_timer_id = rtc_transport_add_timer(&pc->transport, rtc_time_ms() + RTCP_INTERVAL_MS,
+                                                peer_rtcp_timer, pc);
+}
 
 /* ---- State helpers ---- */
 
@@ -218,6 +276,10 @@ static void peer_complete_connection(rtc_peer_connection_t *pc) {
     peer_set_ice_connection(pc, RTC_ICE_CONNECTION_CONNECTED);
     peer_set_connection(pc, RTC_CONNECTION_CONNECTED);
     RTC_LOG_INFO("Peer: connected! Ready to send/receive media.");
+
+    /* Start periodic RTCP send timer */
+    pc->rtcp_timer_id = rtc_transport_add_timer(&pc->transport, rtc_time_ms() + RTCP_INTERVAL_MS,
+                                                peer_rtcp_timer, pc);
 }
 
 /* ---- DTLS retransmission timer (fires on transport thread) ---- */
@@ -327,14 +389,77 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                 if (rc != RTC_OK)
                     break;
 
-                /* Deliver to matching receiver */
+                /* Deliver to matching receiver and update RTCP stats */
                 for (int i = 0; i < pc->transceiver_count; i++) {
                     struct rtc_rtp_receiver *r = &pc->transceivers[i].receiver;
                     if (r->active && r->on_frame) {
+                        rtc_rtcp_stats_on_rtp_recv(&r->rtcp_stats, pkt.header.seq,
+                                                   pkt.header.timestamp, pkt.header.ssrc,
+                                                   r->codec.clock_rate);
                         r->on_frame(pkt.payload, pkt.payload_len, pkt.header.seq,
                                     pkt.header.timestamp, pkt.header.ssrc, pkt.header.marker,
                                     r->on_frame_user);
                         break; /* first matching receiver */
+                    }
+                }
+            }
+            break;
+
+        case RTC_PKT_RTCP:
+            if (pc->connection_state == RTC_CONNECTION_CONNECTED && len > 8) {
+                uint8_t buf[2048];
+                if (len > sizeof(buf))
+                    break;
+                memcpy(buf, data, len);
+
+                /* SRTCP unprotect */
+                size_t pkt_len = len;
+                int rc = rtc_srtp_unprotect_rtcp(&pc->srtp_recv, buf, &pkt_len);
+                if (rc != RTC_OK) {
+                    RTC_LOG_WARN("Peer: SRTCP unprotect failed");
+                    break;
+                }
+
+                /* Parse RTCP packet */
+                rtc_rtcp_packet_t rtcp;
+                rc = rtc_rtcp_parse(&rtcp, buf, pkt_len);
+                if (rc != RTC_OK)
+                    break;
+
+                if (rtcp.header.packet_type == RTCP_PT_SR) {
+                    /* Store last SR NTP for DLSR calculation in our receiver stats */
+                    uint32_t lsr = (rtcp.sr.ntp_sec & 0xFFFF) << 16 | (rtcp.sr.ntp_frac >> 16);
+                    for (int i = 0; i < pc->transceiver_count; i++) {
+                        struct rtc_rtp_receiver *r = &pc->transceivers[i].receiver;
+                        if (r->active) {
+                            r->rtcp_stats.last_sr_ntp = lsr;
+                            r->rtcp_stats.last_sr_recv_time = rtc_time_ms();
+                        }
+                    }
+                } else if (rtcp.header.packet_type == RTCP_PT_RR) {
+                    /* Extract feedback and notify callback */
+                    for (int i = 0; i < rtcp.report_count; i++) {
+                        const rtc_rtcp_rr_block_t *rr = &rtcp.reports[i];
+
+                        /* Compute RTT from delay_since_sr */
+                        int rtt_ms = 0;
+                        if (rr->last_sr != 0) {
+                            /* Get current NTP compact (middle 32 bits) */
+                            uint64_t now_ms = rtc_time_ms();
+                            uint32_t now_sec = (uint32_t)(now_ms / 1000);
+                            uint32_t now_frac = (uint32_t)((now_ms % 1000) * 4294967ULL);
+                            uint32_t now_compact = (now_sec & 0xFFFF) << 16 | (now_frac >> 16);
+                            /* RTT = now - last_sr - delay_since_sr (all in 1/65536 sec) */
+                            uint32_t rtt_ntp = now_compact - rr->last_sr - rr->delay_since_sr;
+                            rtt_ms = (int)((rtt_ntp * 1000ULL) >> 16);
+                            if (rtt_ms < 0)
+                                rtt_ms = 0;
+                        }
+
+                        if (pc->on_rtcp_rr) {
+                            pc->on_rtcp_rr(rr->fraction_lost, rtt_ms, rr->jitter,
+                                           pc->on_rtcp_rr_user);
+                        }
                     }
                 }
             }
@@ -563,11 +688,13 @@ rtc_rtp_sender_t *rtc_peer_connection_add_track(rtc_peer_connection_t *pc, rtc_k
     t->sender.kind = kind;
     t->sender.active = true;
     rtc_rtp_session_init(&t->sender.rtp_session, codec->payload_type, codec->clock_rate);
+    rtc_rtcp_stats_init(&t->sender.rtcp_stats, t->sender.rtp_session.ssrc);
 
     /* Receiver (activated when remote description arrives) */
     t->receiver.codec = *codec;
     t->receiver.kind = kind;
     t->receiver.active = false;
+    rtc_rtcp_stats_init(&t->receiver.rtcp_stats, t->sender.rtp_session.ssrc);
 
     pc->transceiver_count++;
     return &t->sender;
@@ -878,6 +1005,13 @@ void rtc_peer_connection_on_data_channel(rtc_peer_connection_t *pc, rtc_on_data_
         return;
     pc->on_data_channel = fn;
     pc->on_data_channel_user = user;
+}
+
+void rtc_peer_connection_on_rtcp_rr(rtc_peer_connection_t *pc, rtc_on_rtcp_rr_fn fn, void *user) {
+    if (!pc)
+        return;
+    pc->on_rtcp_rr = fn;
+    pc->on_rtcp_rr_user = user;
 }
 
 /* ---- State getters ---- */

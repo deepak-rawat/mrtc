@@ -133,4 +133,10 @@ int media_pipeline_set_debug(media_pipeline_t *p, const media_debug_config_t *cf
 const video_send_stats_t *media_pipeline_get_send_stats(media_pipeline_t *p, int index);
 const video_recv_stats_t *media_pipeline_get_recv_stats(media_pipeline_t *p, int index);
 
+/* ---- RTCP feedback ---- */
+
+/* Feed RTCP Receiver Report data into the rate controller.
+ * fraction_lost: 0-255, rtt_ms: round-trip time, jitter: interarrival jitter. */
+void media_pipeline_on_rtcp_rr(media_pipeline_t *p, int fraction_lost, int rtt_ms, int jitter);
+
 #endif /* MEDIA_PIPELINE_H */

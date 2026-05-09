@@ -12,6 +12,7 @@
 #include <rtc/rtc.h>
 #include "rtc_rtp.h"
 #include "rtc_srtp.h"
+#include "rtc_rtcp.h"
 #include "test_harness.h"
 
 /* Fixed test keys (deterministic) */
@@ -202,6 +203,91 @@ TEST(srtp_multiple_packets) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: SRTCP protect → unprotect round-trip                         */
+/* ------------------------------------------------------------------ */
+TEST(srtcp_roundtrip) {
+    rtc_srtp_ctx_t send_ctx, recv_ctx;
+    rtc_srtp_init(&send_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
+    rtc_srtp_init(&recv_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
+
+    /* Build a valid RTCP Sender Report using rtc_rtcp */
+    rtc_rtcp_stats_t stats;
+    rtc_rtcp_stats_init(&stats, 0xDEADBEEF);
+    for (int i = 0; i < 50; i++)
+        rtc_rtcp_stats_on_rtp_send(&stats, (uint32_t)(i * 960), 160);
+
+    rtc_rtcp_packet_t rtcp_pkt;
+    int rc = rtc_rtcp_build_sr(&rtcp_pkt, &stats);
+    ASSERT_EQ(rc, RTC_OK);
+
+    /* Save original for comparison */
+    uint8_t original[1500];
+    memcpy(original, rtcp_pkt.buf, rtcp_pkt.buf_len);
+    size_t original_len = rtcp_pkt.buf_len;
+
+    /* Protect */
+    uint8_t buf[1500];
+    memcpy(buf, rtcp_pkt.buf, rtcp_pkt.buf_len);
+    size_t len = rtcp_pkt.buf_len;
+    rc = rtc_srtp_protect_rtcp(&send_ctx, buf, &len);
+    ASSERT_EQ(rc, RTC_OK);
+
+    /* Should grow by 4 (SRTCP index) + 10 (auth tag) = 14 bytes */
+    ASSERT_EQ(len, original_len + 4 + SRTP_AUTH_TAG_LEN);
+
+    /* Unprotect */
+    rc = rtc_srtp_unprotect_rtcp(&recv_ctx, buf, &len);
+    ASSERT_EQ(rc, RTC_OK);
+
+    /* Should be back to original size */
+    ASSERT_EQ(len, original_len);
+
+    /* Contents should match original */
+    ASSERT_MEM_EQ(buf, original, original_len);
+
+    printf("    SRTCP round-trip: %zu -> %zu -> %zu bytes\n", original_len,
+           original_len + 4 + SRTP_AUTH_TAG_LEN, len);
+
+    rtc_srtp_close(&send_ctx);
+    rtc_srtp_close(&recv_ctx);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: SRTCP unprotect with wrong key fails                         */
+/* ------------------------------------------------------------------ */
+TEST(srtcp_wrong_key_fails) {
+    rtc_srtp_ctx_t send_ctx, bad_ctx;
+    rtc_srtp_init(&send_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
+
+    uint8_t bad_key[16] = {0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8,
+                           0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0};
+    rtc_srtp_init(&bad_ctx, bad_key, sizeof(bad_key), test_salt, sizeof(test_salt));
+
+    /* Build RTCP RR */
+    rtc_rtcp_stats_t stats;
+    rtc_rtcp_stats_init(&stats, 0x11111111);
+    for (uint16_t i = 0; i < 10; i++)
+        rtc_rtcp_stats_on_rtp_recv(&stats, i, i * 960, 0x22222222, 48000);
+
+    rtc_rtcp_packet_t rtcp_pkt;
+    rtc_rtcp_build_rr(&rtcp_pkt, &stats);
+
+    uint8_t buf[1500];
+    memcpy(buf, rtcp_pkt.buf, rtcp_pkt.buf_len);
+    size_t len = rtcp_pkt.buf_len;
+    rtc_srtp_protect_rtcp(&send_ctx, buf, &len);
+
+    /* Try to unprotect with wrong key */
+    int rc = rtc_srtp_unprotect_rtcp(&bad_ctx, buf, &len);
+    ASSERT(rc != RTC_OK);
+
+    printf("    SRTCP unprotect with wrong key: correctly rejected\n");
+
+    rtc_srtp_close(&send_ctx);
+    rtc_srtp_close(&bad_ctx);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  SRTP Component Tests\n");
@@ -215,6 +301,8 @@ int main(void) {
     RUN_TEST(srtp_roundtrip);
     RUN_TEST(srtp_wrong_key_fails);
     RUN_TEST(srtp_multiple_packets);
+    RUN_TEST(srtcp_roundtrip);
+    RUN_TEST(srtcp_wrong_key_fails);
 
     rtc_cleanup();
     TEST_SUMMARY();

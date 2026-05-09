@@ -214,6 +214,13 @@ static void on_dc_channel(rtc_data_channel_t *channel, void *user) {
         p->dc_open = true;
 }
 
+/* RTCP Receiver Report callback → feed rate controller */
+static void on_rtcp_rr(uint8_t fraction_lost, int rtt_ms, uint32_t jitter, void *user) {
+    conf_peer_t *cp = (conf_peer_t *)user;
+    if (cp->conf->pipeline)
+        media_pipeline_on_rtcp_rr(cp->conf->pipeline, (int)fraction_lost, rtt_ms, (int)jitter);
+}
+
 /* ---- Create peer connection ---- */
 
 static rtc_peer_connection_t *create_pc(conference_t *c, conf_peer_t *cp) {
@@ -232,6 +239,7 @@ static rtc_peer_connection_t *create_pc(conference_t *c, conf_peer_t *cp) {
     rtc_peer_connection_on_connection_state(pc, on_conn_state, cp);
     rtc_peer_connection_on_data_channel(pc, on_dc_channel, cp);
     rtc_peer_connection_on_track(pc, on_remote_track, cp);
+    rtc_peer_connection_on_rtcp_rr(pc, on_rtcp_rr, cp);
 
     /* Add video track (VP8) */
     rtc_codec_t vp8;
