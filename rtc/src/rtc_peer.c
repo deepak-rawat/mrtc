@@ -23,6 +23,7 @@
 #include "rtc/rtc_peer.h"
 #include "rtc_rtp.h"
 #include "rtc_rtcp.h"
+#include "rtc_rate_control.h"
 #include "rtc_transport.h"
 #include "rtc_ice.h"
 #include "rtc_dtls.h"
@@ -47,6 +48,7 @@ struct rtc_rtp_sender {
     rtc_srtp_ctx_t *srtp;
     void *transport;
     rtc_rtcp_stats_t rtcp_stats;
+    rtc_rate_controller_t *rate_ctrl; /* borrowed from peer, set after CONNECTED */
     bool active;
 };
 
@@ -127,6 +129,9 @@ struct rtc_peer_connection {
 
     /* RTCP send timer */
     rtc_timer_id_t rtcp_timer_id;
+
+    /* Rate controller (created on connection, fed by RTCP RR) */
+    rtc_rate_controller_t *rate_ctrl;
 
     /* RTCP callback (fires on transport thread when RR is received) */
     rtc_on_rtcp_rr_fn on_rtcp_rr;
@@ -260,6 +265,21 @@ static void peer_complete_connection(rtc_peer_connection_t *pc) {
             s->srtp = &pc->srtp_send;
             s->transport = &pc->transport;
         }
+    }
+
+    /* Create rate controller */
+    rtc_rate_control_config_t rc_cfg = {
+        .target_bitrate_kbps = 500,
+        .min_bitrate_kbps = 100,
+        .max_bitrate_kbps = 2500,
+    };
+    pc->rate_ctrl = rtc_rate_control_create(&rc_cfg);
+
+    /* Wire rate controller to video senders */
+    for (int i = 0; i < pc->transceiver_count; i++) {
+        struct rtc_rtp_sender *s = &pc->transceivers[i].sender;
+        if (s->active && s->kind == RTC_KIND_VIDEO)
+            s->rate_ctrl = pc->rate_ctrl;
     }
 
     /* Initialize data channel manager (if not already) and notify DTLS connected */
@@ -460,6 +480,12 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                             pc->on_rtcp_rr(rr->fraction_lost, rtt_ms, rr->jitter,
                                            pc->on_rtcp_rr_user);
                         }
+
+                        /* Feed rate controller directly */
+                        if (pc->rate_ctrl) {
+                            rtc_rate_control_on_rtcp_rr(pc->rate_ctrl, rr->fraction_lost,
+                                                        rtt_ms, (int)rr->jitter);
+                        }
                     }
                 }
             }
@@ -655,6 +681,10 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc) {
     rtc_dtls_close(&pc->dtls);
     rtc_ice_close(&pc->ice);
     rtc_transport_close(&pc->transport);
+    if (pc->rate_ctrl) {
+        rtc_rate_control_destroy(pc->rate_ctrl);
+        pc->rate_ctrl = NULL;
+    }
 
     pc->connection_state = RTC_CONNECTION_CLOSED;
     pc->signaling_state = RTC_SIGNALING_CLOSED;

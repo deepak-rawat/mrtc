@@ -7,6 +7,7 @@
 #include "rtc/rtc_track.h"
 #include "rtc_rtp.h"
 #include "rtc_rtcp.h"
+#include "rtc_rate_control.h"
 #include "rtc_transport.h"
 #include "rtc_srtp.h"
 
@@ -21,6 +22,7 @@ struct rtc_rtp_sender {
     rtc_srtp_ctx_t *srtp; /* borrowed from peer, set after CONNECTED */
     void *transport;      /* borrowed rtc_transport_t* for sendto */
     rtc_rtcp_stats_t rtcp_stats;
+    rtc_rate_controller_t *rate_ctrl; /* borrowed from peer, set after CONNECTED */
     bool active;
 };
 
@@ -78,6 +80,18 @@ const rtc_codec_t *rtc_rtp_sender_get_codec(const rtc_rtp_sender_t *sender) {
 
 rtc_kind_t rtc_rtp_sender_kind(const rtc_rtp_sender_t *sender) {
     return sender ? sender->kind : RTC_KIND_AUDIO;
+}
+
+int rtc_rtp_sender_get_target_bitrate(const rtc_rtp_sender_t *sender) {
+    if (!sender || !sender->rate_ctrl)
+        return 0;
+    return rtc_rate_control_get_bitrate(sender->rate_ctrl);
+}
+
+bool rtc_rtp_sender_should_keyframe(rtc_rtp_sender_t *sender) {
+    if (!sender || !sender->rate_ctrl)
+        return false;
+    return rtc_rate_control_should_keyframe(sender->rate_ctrl);
 }
 
 /* ---- RTCRtpReceiver ---- */

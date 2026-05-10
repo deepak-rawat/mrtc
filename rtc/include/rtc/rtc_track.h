@@ -56,6 +56,12 @@ const rtc_codec_t *rtc_rtp_sender_get_codec(const rtc_rtp_sender_t *sender);
 /* Get the media kind */
 rtc_kind_t rtc_rtp_sender_kind(const rtc_rtp_sender_t *sender);
 
+/* Get the target bitrate in kbps from the rate controller (0 if no rate control). */
+int rtc_rtp_sender_get_target_bitrate(const rtc_rtp_sender_t *sender);
+
+/* Returns true and clears if a keyframe was requested by rate control. */
+bool rtc_rtp_sender_should_keyframe(rtc_rtp_sender_t *sender);
+
 /* ---- RTCRtpReceiver ---- */
 
 /* Set callback for incoming decoded frames (fires on transport thread) */

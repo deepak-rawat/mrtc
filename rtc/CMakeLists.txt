@@ -10,6 +10,7 @@ set(LIB_SOURCES
     src/rtc_sdp.c
     src/rtc_rtp.c
     src/rtc_rtcp.c
+    src/rtc_rate_control.c
     src/rtc_track.c
     src/rtc_data_channel.c
     src/rtc_peer.c
@@ -27,7 +28,7 @@ mrtc_set_warnings(mrtc)
 # Tests (need access to internal headers for component-level testing)
 if(MRTC_BUILD_TESTS)
     set(TEST_NAMES test_stun test_rtp test_srtp test_dtls test_ice test_sdp test_transport test_peer
-                   test_sdp_video test_rtcp test_data_channel test_turn)
+                   test_sdp_video test_rtcp test_data_channel test_turn test_rate_control)
     foreach(test_name ${TEST_NAMES})
         add_executable(${test_name} tests/${test_name}.c)
         target_include_directories(${test_name} PRIVATE

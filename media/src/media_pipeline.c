@@ -9,7 +9,6 @@
 #include "video_dump.h"
 #include "video_debug.h"
 #include "vp8_packetizer.h"
-#include "rate_control.h"
 #include "jitter_buffer.h"
 #include <rtc/rtc_track.h>
 #include <stdio.h>
@@ -66,7 +65,6 @@ struct media_pipeline {
     media_stream_t recv[MP_MAX_RECV_STREAMS];
     int recv_count;
 
-    rate_controller_t *rate_ctrl; /* TODO: replace with rtc-layer BWE */
     mp_send_peer_t send_peers[MP_MAX_SEND_PEERS];
     int send_peer_count;
     media_renderer_t renderer;
@@ -128,14 +126,6 @@ media_pipeline_t *media_pipeline_create(const media_pipeline_config_t *cfg) {
         snprintf(p->default_audio_codec, sizeof(p->default_audio_codec), "%s",
                  cfg->default_audio_codec);
 
-    /* Shared rate controller */
-    rate_control_config_t rc_cfg = {
-        .target_bitrate_kbps = 500,
-        .min_bitrate_kbps = 100,
-        .max_bitrate_kbps = 2500,
-    };
-    p->rate_ctrl = rate_control_create(&rc_cfg);
-
     return p;
 }
 
@@ -146,8 +136,6 @@ void media_pipeline_destroy(media_pipeline_t *p) {
         stream_destroy(&p->send[i]);
     for (int i = 0; i < p->recv_count; i++)
         stream_destroy(&p->recv[i]);
-    if (p->rate_ctrl)
-        rate_control_destroy(p->rate_ctrl);
     if (p->dbg.send_dump)
         video_dump_close(p->dbg.send_dump);
     if (p->dbg.recv_dump)
@@ -318,12 +306,17 @@ static int push_video_to_stream(media_pipeline_t *p, media_send_stream_t *s,
     if (!s->has_encoder || !has_send_targets(p))
         return RTC_ERR_INVALID;
 
-    /* Rate control */
-    if (p->rate_ctrl) {
-        int br = rate_control_get_bitrate(p->rate_ctrl);
-        video_encoder_set_bitrate(&s->video_enc, br);
-        if (rate_control_should_keyframe(p->rate_ctrl))
+    /* Rate control: query first active video sender for target bitrate */
+    for (int peer = 0; peer < p->send_peer_count; peer++) {
+        mp_send_peer_t *sp = &p->send_peers[peer];
+        if (!sp->active || !sp->video_sender)
+            continue;
+        int br = rtc_rtp_sender_get_target_bitrate(sp->video_sender);
+        if (br > 0)
+            video_encoder_set_bitrate(&s->video_enc, br);
+        if (rtc_rtp_sender_should_keyframe(sp->video_sender))
             video_encoder_request_keyframe(&s->video_enc);
+        break; /* use first peer's rate control for encoder config */
     }
 
     /* Encode */
@@ -557,12 +550,4 @@ const video_recv_stats_t *media_pipeline_get_recv_stats(media_pipeline_t *p, int
     if (!p || index < 0 || index >= p->recv_count || !p->recv[index].is_video)
         return NULL;
     return &p->recv[index].recv_stats;
-}
-
-/* ---- RTCP feedback ---- */
-
-void media_pipeline_on_rtcp_rr(media_pipeline_t *p, int fraction_lost, int rtt_ms, int jitter) {
-    if (!p || !p->rate_ctrl)
-        return;
-    rate_control_on_rtcp_rr(p->rate_ctrl, fraction_lost, rtt_ms, jitter);
 }
