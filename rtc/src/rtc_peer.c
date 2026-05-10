@@ -132,10 +132,6 @@ struct rtc_peer_connection {
 
     /* Rate controller (created on connection, fed by RTCP RR) */
     rtc_rate_controller_t *rate_ctrl;
-
-    /* RTCP callback (fires on transport thread when RR is received) */
-    rtc_on_rtcp_rr_fn on_rtcp_rr;
-    void *on_rtcp_rr_user;
 };
 
 /* ---- Forward declarations ---- */
@@ -476,15 +472,10 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                                 rtt_ms = 0;
                         }
 
-                        if (pc->on_rtcp_rr) {
-                            pc->on_rtcp_rr(rr->fraction_lost, rtt_ms, rr->jitter,
-                                           pc->on_rtcp_rr_user);
-                        }
-
                         /* Feed rate controller directly */
                         if (pc->rate_ctrl) {
-                            rtc_rate_control_on_rtcp_rr(pc->rate_ctrl, rr->fraction_lost,
-                                                        rtt_ms, (int)rr->jitter);
+                            rtc_rate_control_on_rtcp_rr(pc->rate_ctrl, rr->fraction_lost, rtt_ms,
+                                                        (int)rr->jitter);
                         }
                     }
                 }
@@ -1035,13 +1026,6 @@ void rtc_peer_connection_on_data_channel(rtc_peer_connection_t *pc, rtc_on_data_
         return;
     pc->on_data_channel = fn;
     pc->on_data_channel_user = user;
-}
-
-void rtc_peer_connection_on_rtcp_rr(rtc_peer_connection_t *pc, rtc_on_rtcp_rr_fn fn, void *user) {
-    if (!pc)
-        return;
-    pc->on_rtcp_rr = fn;
-    pc->on_rtcp_rr_user = user;
 }
 
 /* ---- State getters ---- */

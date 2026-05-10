@@ -98,12 +98,6 @@ typedef void (*rtc_on_ice_candidate_fn)(const rtc_ice_candidate_desc_t *cand, vo
 typedef void (*rtc_on_track_fn)(rtc_rtp_receiver_t *receiver, void *user);
 typedef void (*rtc_on_data_channel_fn)(rtc_data_channel_t *channel, void *user);
 
-/* RTCP Receiver Report callback (fires on transport thread).
- * fraction_lost: 0-255 (0 = no loss, 255 = 100%).
- * rtt_ms: round-trip time in milliseconds (0 if unknown).
- * jitter: interarrival jitter in timestamp units. */
-typedef void (*rtc_on_rtcp_rr_fn)(uint8_t fraction_lost, int rtt_ms, uint32_t jitter, void *user);
-
 /* ---- Lifecycle ---- */
 
 /* Create a new peer connection (heap-allocated, opaque). Returns NULL on error. */
@@ -174,9 +168,6 @@ void rtc_peer_connection_on_ice_candidate(rtc_peer_connection_t *pc, rtc_on_ice_
 void rtc_peer_connection_on_track(rtc_peer_connection_t *pc, rtc_on_track_fn fn, void *user);
 void rtc_peer_connection_on_data_channel(rtc_peer_connection_t *pc, rtc_on_data_channel_fn fn,
                                          void *user);
-
-/* Set callback for incoming RTCP Receiver Reports. */
-void rtc_peer_connection_on_rtcp_rr(rtc_peer_connection_t *pc, rtc_on_rtcp_rr_fn fn, void *user);
 
 /* ---- State getters (safe to call from any thread) ---- */
 
