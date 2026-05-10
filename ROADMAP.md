@@ -81,6 +81,43 @@ tiled video grid, keyboard controls.
 | Rate control | Single rate controller shared by all video senders; media pipeline uses first peer's feedback only |
 | RTCP RR demux | Receiver Reports feed a single shared rate controller; should match RR `ssrc` to the corresponding sender's stats |
 
+### Known Bugs (by severity)
+
+#### Critical
+
+| Bug | Location | Description |
+|---|---|---|
+| SDP gen buffer overflow | `rtc_sdp.c` `sdp_write_media_section` | `*remain -= n` unsigned underflow wraps to `SIZE_MAX`, subsequent `snprintf` writes past `sdp->raw[8192]`. Remote-triggerable via many candidates/transceivers. |
+| SDP parse underflow | `rtc_sdp.c` `rtc_sdp_parse` | `vlen = line_len - prefix_len` underflows when `line_len < prefix_len`, causing massive `memcpy` overflow. Remote-triggerable via malformed SDP. |
+| TURN auth key truncation | `rtc_turn.c` / `turn_handler.c` | Binary MD5 `lt_key` passed as `const char*` to HMAC functions that call `strlen()`. Null bytes truncate key (~63% chance). Auth non-deterministically broken or weakened. |
+| No memory ordering | `rtc_peer.c` | `volatile` on `connection_state` etc. has no acquire/release semantics. On ARM, main thread can see `CONNECTED` but read stale SRTP context. |
+| Data channel ID 8-bit truncation | `rtc_data_channel.c` | `channel_id = data[0]` reads 1 byte but IDs are `uint16_t`. Channels ≥ 256 never receive messages. |
+
+#### High
+
+| Bug | Location | Description |
+|---|---|---|
+| SRTP no buffer size check | `rtc_srtp.c` | `protect` appends auth tag without verifying buffer capacity. API lacks `buflen` parameter. |
+| ICE/transport socket race | `rtc_ice.c` `rtc_ice_connect` | Synchronous `recvfrom()` on same socket transport thread polls. Either thread steals packets. |
+| Rate controller data race | `rtc_rate_control.c` | Written on transport thread, read on main thread, no mutex. Torn reads on multi-word fields. |
+| CRC32 table init race | `rtc_stun.c` | Global `crc32_table[]` first-init with no synchronization. Two threads → corrupted table → broken STUN FINGERPRINT. |
+| No SRTP replay protection | `rtc_srtp.c` | RFC 3711 requires replay list. Captured packets can be replayed. |
+| Destroy without close → UAF | `rtc_peer.c` `destroy` | `free(pc)` while transport thread still running → use-after-free. |
+| STUN IPv6 OOB read | `rtc_stun.c` | Checks `alen >= 8` but IPv6 mapped address needs 20 bytes. Reads 12 bytes past buffer. |
+
+#### Medium
+
+| Bug | Location | Description |
+|---|---|---|
+| Relay candidates labeled "host" | `rtc_sdp.c` | Missing `ICE_CANDIDATE_RELAY` case → defaults to "host". TURN relay broken with compliant peers. |
+| `select()` unsafe for fd ≥ 1024 | `rtc_ice.c` / `rtc_stun.c` | `FD_SET` on high fds overflows `fd_set` stack buffer on Linux. |
+| Signaling config shallow copy | `signaling_client.c` | String pointers from stack config become dangling after caller returns. |
+| Jitter buffer recursive pop | `jitter_buffer.c` | Up to 64 recursion levels skipping lost packets. Stack overflow risk. |
+| VP8 2-byte PictureID not handled | `vp8_packetizer.c` | RFC 7741 M-bit extension ignored. Breaks interop with extended PictureID peers. |
+| DTLS app data buffer too small | `rtc_peer.c` | 2048-byte `SSL_read` buffer vs 65535 max data channel message size. Large messages fragmented mid-message. |
+| TURN nonce never rotated | `turn_handler.c` | Single nonce for server lifetime. Enables replay attacks. |
+| RTCP loss calc ignores initial seq | `rtc_rtcp.c` | `packets_expected = highest_seq + 1` assumes seq started at 0. Wrong loss stats → wrong rate control. |
+
 ---
 
 ## Implementation Plan
