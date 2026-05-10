@@ -306,7 +306,12 @@ static int push_video_to_stream(media_pipeline_t *p, media_send_stream_t *s,
     if (!s->has_encoder || !has_send_targets(p))
         return RTC_ERR_INVALID;
 
-    /* Rate control: query first active video sender for target bitrate */
+    /* TODO: Rate control only reads first peer's feedback. With multiple
+     * peers at different network conditions (e.g. one on LTE, one on fiber),
+     * we ignore all but the first peer's bitrate/keyframe signals. Fix:
+     * aggregate across all peers — use the minimum target bitrate (encode
+     * for the weakest link) and OR together keyframe requests (any peer
+     * requesting a keyframe should trigger one). */
     for (int peer = 0; peer < p->send_peer_count; peer++) {
         mp_send_peer_t *sp = &p->send_peers[peer];
         if (!sp->active || !sp->video_sender)

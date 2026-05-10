@@ -132,6 +132,21 @@ struct rtc_peer_connection {
 
     /* Rate controller (created on connection, fed by RTCP RR) */
     rtc_rate_controller_t *rate_ctrl;
+
+    /* Fast SSRC → receiver cache (populated on first RTP packet per stream)
+     *
+     * TODO: Replace linear scan with a small hashmap for O(1) SSRC→receiver
+     * lookup. Currently O(n) where n = number of active streams (typically 2
+     * for audio+video). Acceptable today, but with simulcast or N-track
+     * conferencing n grows and this runs on every inbound RTP/RTCP packet.
+     * A uint32 open-addressing table with power-of-2 size and fibonacci
+     * hashing would be ideal — no allocations, cache-friendly, and O(1)
+     * amortised. */
+    struct {
+        uint32_t ssrc;
+        struct rtc_rtp_receiver *receiver;
+    } recv_cache[RTC_MAX_TRANSCEIVERS];
+    int recv_cache_count;
 };
 
 /* ---- Forward declarations ---- */
@@ -405,18 +420,40 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                 if (rc != RTC_OK)
                     break;
 
-                /* Deliver to matching receiver and update RTCP stats */
-                for (int i = 0; i < pc->transceiver_count; i++) {
-                    struct rtc_rtp_receiver *r = &pc->transceivers[i].receiver;
-                    if (r->active && r->on_frame) {
-                        rtc_rtcp_stats_on_rtp_recv(&r->rtcp_stats, pkt.header.seq,
-                                                   pkt.header.timestamp, pkt.header.ssrc,
-                                                   r->codec.clock_rate);
-                        r->on_frame(pkt.payload, pkt.payload_len, pkt.header.seq,
-                                    pkt.header.timestamp, pkt.header.ssrc, pkt.header.marker,
-                                    r->on_frame_user);
-                        break; /* first matching receiver */
+                /* Fast path: lookup receiver by SSRC cache */
+                // TODO: Use a hash map
+                struct rtc_rtp_receiver *r = NULL;
+                for (int i = 0; i < pc->recv_cache_count; i++) {
+                    if (pc->recv_cache[i].ssrc == pkt.header.ssrc) {
+                        r = pc->recv_cache[i].receiver;
+                        break;
                     }
+                }
+
+                /* Slow path: match by payload type on first packet per SSRC */
+                if (!r) {
+                    for (int i = 0; i < pc->transceiver_count; i++) {
+                        struct rtc_rtp_receiver *rx = &pc->transceivers[i].receiver;
+                        if (rx->active && rx->on_frame &&
+                            rx->codec.payload_type == pkt.header.payload_type) {
+                            r = rx;
+                            r->ssrc = pkt.header.ssrc;
+                            /* Add to cache */
+                            if (pc->recv_cache_count < RTC_MAX_TRANSCEIVERS) {
+                                pc->recv_cache[pc->recv_cache_count].ssrc = pkt.header.ssrc;
+                                pc->recv_cache[pc->recv_cache_count].receiver = r;
+                                pc->recv_cache_count++;
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                if (r) {
+                    rtc_rtcp_stats_on_rtp_recv(&r->rtcp_stats, pkt.header.seq, pkt.header.timestamp,
+                                               pkt.header.ssrc, r->codec.clock_rate);
+                    r->on_frame(pkt.payload, pkt.payload_len, pkt.header.seq, pkt.header.timestamp,
+                                pkt.header.ssrc, pkt.header.marker, r->on_frame_user);
                 }
             }
             break;
@@ -443,13 +480,14 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                     break;
 
                 if (rtcp.header.packet_type == RTCP_PT_SR) {
-                    /* Store last SR NTP for DLSR calculation in our receiver stats */
+                    /* Store last SR NTP for DLSR calculation in the matching receiver */
                     uint32_t lsr = (rtcp.sr.ntp_sec & 0xFFFF) << 16 | (rtcp.sr.ntp_frac >> 16);
-                    for (int i = 0; i < pc->transceiver_count; i++) {
-                        struct rtc_rtp_receiver *r = &pc->transceivers[i].receiver;
-                        if (r->active) {
-                            r->rtcp_stats.last_sr_ntp = lsr;
-                            r->rtcp_stats.last_sr_recv_time = rtc_time_ms();
+                    for (int i = 0; i < pc->recv_cache_count; i++) {
+                        if (pc->recv_cache[i].ssrc == rtcp.sender_ssrc) {
+                            pc->recv_cache[i].receiver->rtcp_stats.last_sr_ntp = lsr;
+                            pc->recv_cache[i].receiver->rtcp_stats.last_sr_recv_time =
+                                rtc_time_ms();
+                            break;
                         }
                     }
                 } else if (rtcp.header.packet_type == RTCP_PT_RR) {
@@ -472,7 +510,14 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                                 rtt_ms = 0;
                         }
 
-                        /* Feed rate controller directly */
+                        /* TODO: RTCP RR demux — rr->ssrc identifies which of
+                         * our senders is being reported on, but we feed a single
+                         * shared rate controller regardless. With audio+video
+                         * senders, an audio RR (low jitter, no loss) incorrectly
+                         * inflates the rate estimate used for video. Fix: match
+                         * rr->ssrc to the corresponding sender's rtcp_stats.ssrc
+                         * and give each sender (or at least each video sender)
+                         * its own rate controller. */
                         if (pc->rate_ctrl) {
                             rtc_rate_control_on_rtcp_rr(pc->rate_ctrl, rr->fraction_lost, rtt_ms,
                                                         (int)rr->jitter);

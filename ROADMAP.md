@@ -77,6 +77,9 @@ tiled video grid, keyboard controls.
 | Codec negotiation | Conference hardcodes VP8/Opus |
 | Mute | Only at conference level, not at sender level |
 | `on_track` | Passes `rtc_rtp_receiver_t*`, should pass `rtc_rtp_transceiver_t*` |
+| RTP demux | SSRC→receiver cache is O(n) linear scan; use a hashmap for O(1) |
+| Rate control | Single rate controller shared by all video senders; media pipeline uses first peer's feedback only |
+| RTCP RR demux | Receiver Reports feed a single shared rate controller; should match RR `ssrc` to the corresponding sender's stats |
 
 ---
 
