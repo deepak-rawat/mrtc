@@ -35,15 +35,17 @@ and pipeline orchestration — it depends on `rtc` and uses its public types dir
 ## Completed Work
 
 **Core RTC** — ICE (host + SRFLX candidates), DTLS 1.2 (OpenSSL), SRTP,
-RTP/RTCP SR/RR, SDP (multi-media), data channels, peer connection with
+RTP/RTCP SR/RR, SDP (multi-media), data channels (wire protocol with
+OPEN/ACK handshake, up to 16 concurrent channels), peer connection with
 automatic ICE→DTLS→SRTP on both descriptions set. STUN binding, TURN client
-(allocate, channel bind, channel data).
+(allocate, channel bind, channel data). AIMD rate control driven by RTCP RR.
 
 **Media** — VP8 encode/decode (libvpx), Opus encode/decode (libopus),
 VP8 RTP packetizer/depacketizer (RFC 7741), jitter buffer, AIMD rate control,
 multi-stream media pipeline with encode-once fan-out to N peers via typed
 `rtc_rtp_sender_t*`, opaque stream handles for O(1) dispatch, lazy recv stream
-registration.
+registration. Video debug utilities (IVF dump, frame checksum, PSNR), RTP
+sequence gap tracking.
 
 **Signaling** — WebSocket client/server (libwebsockets + cJSON), JSON protocol,
 meeting rooms, peer discovery, offer/answer/candidate relay.
@@ -56,9 +58,10 @@ Push raw frames, receive decoded frames via callbacks. Automatic peer
 connection lifecycle.
 
 **Application** — SDL3 video conference app with camera capture, mic input,
-tiled video grid, keyboard controls.
+tiled video grid, keyboard controls. Chat app (terminal) for text messaging
+over data channels.
 
-**Tests** — 18 test executables, 101 tests covering all components.
+**Tests** — 23 test executables, 140 tests covering all components.
 
 ---
 

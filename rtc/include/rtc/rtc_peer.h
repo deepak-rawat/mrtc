@@ -146,9 +146,11 @@ const rtc_desc_t *rtc_peer_connection_remote_desc(const rtc_peer_connection_t *p
 int rtc_peer_connection_add_ice_candidate(rtc_peer_connection_t *pc,
                                           const rtc_ice_candidate_desc_t *cand);
 
-/* ---- Data channels (stub — not yet implemented) ---- */
+/* ---- Data channels ---- */
 
-/* Create a data channel. Returns NULL (not implemented). */
+/* Create a data channel with the given label and options.
+ * Returns the channel, or NULL on error.
+ * The channel fires on_open once the DTLS connection is established. */
 rtc_data_channel_t *rtc_peer_connection_create_data_channel(rtc_peer_connection_t *pc,
                                                             const char *label,
                                                             const rtc_data_channel_init_t *opts);

@@ -159,11 +159,43 @@ Pipeline manages:
 
 **Renderer callbacks:** `on_video_frame(peer_id, label, frame)`, `on_audio_samples(peer_id, label, audio)`
 
-### Test Utilities (`test_pattern.c`, `test_tone.c`)
+**Debug/Stats API:**
+- `media_pipeline_set_debug(pipeline, cfg)` — configure IVF dumps, frame checksum, PSNR
+- `media_pipeline_get_send_stats(pipeline, stream)` — send-side counters
+- `media_pipeline_get_recv_stats(pipeline, stream)` — recv-side counters
 
-Generate synthetic media when no capture device is available:
-- **Test pattern:** color bars or gradient I420 frames
-- **Test tone:** 440Hz sine wave PCM samples
+### Video Debug (`video_debug.h/c`)
+
+Frame integrity checking via FNV-1a hash.
+
+- `video_frame_checksum(frame)` — returns deterministic 32-bit hash over Y plane. Detects stale/duplicate decoder output.
+
+### Video Dump (`video_dump.h/c`)
+
+IVF file writer for recording VP8 bitstreams.
+
+- `video_dump_open(path, codec, width, height, fps)` — creates IVF file with 32-byte header
+- `video_dump_write_frame(dump, data, len, timestamp)` — writes frame header + data
+- `video_dump_close(dump)` — patches frame count and closes file
+
+IVF format: `"DKIF"` magic + version + header size + fourcc + dimensions + fps + per-frame headers.
+
+### Video Stats (`video_stats.h/c`)
+
+Statistics tracking for send and receive video streams.
+
+**Send-side counters:** frames_encoded, frames_dropped, keyframes_encoded, bytes_encoded, packets_sent, bytes_sent, psnr_sum, psnr_measurements
+
+**Recv-side counters:** packets_received, bytes_received, frames_assembled, frames_decoded, frames_decode_failed, keyframes_decoded, bytes_decoded, frames_rendered, frames_dropped, rtp_seq_gaps, packets_missing, packets_reordered, packets_duplicate, depack_frames_dropped
+
+- `video_frame_psnr(original, decoded, width, height)` — Y-plane PSNR in dB (INFINITY if identical)
+
+### Test Utilities (`test_pattern.c/h`, `test_tone.c/h`)
+
+Generate synthetic media when no capture device is available. Part of the public library API (`media/include/media/`).
+
+- **Test pattern:** bouncing box I420 frames — `test_pattern_init()`, `test_pattern_next_frame()`
+- **Test tone:** 440Hz sine wave PCM samples — `test_tone_init()`, `test_tone_next_frame()`
 
 ## Dependencies
 
@@ -180,5 +212,7 @@ Generate synthetic media when no capture device is available:
 | `test_video_codec` | Encoder/decoder creation, encode/decode round-trip |
 | `test_audio_codec` | Opus encode/decode, sample rate handling |
 | `test_jitter_buffer` | Packet reordering, delay compensation, drop logic |
-| `test_rate_control` | AIMD algorithm, keyframe requests |
 | `test_media_pipeline` | Stream handles, send fan-out, recv routing, peer add/remove |
+| `test_video_stats` | Send/recv statistics tracking, PSNR calculation |
+| `test_video_dump` | IVF file creation, frame writing, round-trip |
+| `test_video_debug` | Frame checksum generation, determinism |

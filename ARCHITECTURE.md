@@ -44,12 +44,12 @@ All public API functions use the `rtc_` prefix.
 │   └── src/
 ├── rtc/                    # Core transport library (libmrtc)
 │   ├── include/rtc/        #   rtc_peer.h, rtc_track.h, rtc_sdp.h, rtc_stun.h
-│   ├── src/                #   rtc_rtp.h (private), ICE, DTLS, SRTP internals
-│   └── tests/              #   12 test executables
+│   ├── src/                #   rtc_rtp.h (private), ICE, DTLS, SRTP, rate control
+│   └── tests/              #   13 test executables
 ├── media/                  # Media library (libmrtc_media)
-│   ├── include/media/      #   media_pipeline.h, video_codec.h, audio_codec.h
-│   ├── src/                #   vp8_packetizer.h (private), jitter_buffer, rate_control
-│   └── tests/              #   6 test executables
+│   ├── include/media/      #   media_pipeline.h, video_codec.h, audio_codec.h, video_stats.h
+│   ├── src/                #   vp8_packetizer.h (private), jitter_buffer, video_debug/dump
+│   └── tests/              #   8 test executables
 ├── signaling/              # Signaling (libmrtc_signaling + server)
 │   ├── include/signaling/  #   signaling_client.h
 │   ├── src/                #   signaling_msg.h (private)

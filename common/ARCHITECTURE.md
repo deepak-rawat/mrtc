@@ -35,6 +35,11 @@ RTC_LOG_INFO("Info: %s", msg);
 RTC_LOG_DBG("Debug: %s", msg);
 ```
 
+Configuration:
+- `rtc_set_log_level(level)` — set minimum log level
+- `rtc_set_log_file(path)` — redirect output to file (in addition to stderr)
+- `rtc_log_close()` — close log file
+
 ## Design Decisions
 
 - **No allocator:** all structures are stack-allocated, users provide memory

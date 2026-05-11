@@ -76,7 +76,7 @@ cleanup
 ### Test Pattern / Tone Fallback
 
 When no camera or mic is available, generates:
-- Color bar test pattern (I420 frames)
+- Bouncing box test pattern (I420 frames)
 - 440Hz sine wave test tone (PCM samples)
 
 ## Controls

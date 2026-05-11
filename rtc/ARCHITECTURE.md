@@ -204,11 +204,25 @@ RTP sender/receiver per media line. Opaque types — internal structs in `rtc_tr
 
 ### Data Channels (`rtc_data_channel.h/c`)
 
-Text/binary message exchange over DTLS.
+Text/binary message exchange over DTLS. Fully functional with create, send, receive, and close.
 
 Wire format: `[1B channel_id] [1B msg_type] [2B length BE] [payload]`
 
-Message types: OPEN, ACK, DATA, CLOSE. Up to 16 concurrent channels. Manager handles handshake (OPEN/ACK) and dispatches via callbacks (on_open, on_message, on_close).
+Message types: OPEN, ACK, DATA, CLOSE. Up to 16 concurrent channels (`RTC_DC_MAX_CHANNELS`). Manager handles OPEN/ACK handshake and dispatches via callbacks (on_open, on_message, on_close). Channels can be created locally via `rtc_peer_connection_create_data_channel()` or received remotely via `on_data_channel` callback.
+
+Key functions: `rtc_data_channel_send()`, `rtc_data_channel_send_text()`, `rtc_data_channel_close()`
+
+### Rate Control (`rtc_rate_control.h/c`)
+
+AIMD (Additive Increase, Multiplicative Decrease) bitrate adaptation driven by RTCP Receiver Reports.
+
+- Loss < 2% → increase bitrate 5%
+- Loss > 5% → decrease bitrate 20%
+- RTT > 300ms → decrease bitrate 10%
+- Loss > 10% → request keyframe
+- Clamps to configurable [min, max] bitrate bounds
+
+Key functions: `rtc_rate_control_create()`, `rtc_rate_control_on_rtcp_rr()`, `rtc_rate_control_get_bitrate()`, `rtc_rate_control_should_keyframe()`
 
 ### Peer Connection (`rtc_peer.h/c`)
 
@@ -222,6 +236,7 @@ struct rtc_peer_connection {
     rtc_srtp_ctx_t srtp_send, srtp_recv;  // Encryption contexts
     rtc_rtp_transceiver_t transceivers[8]; // Media tracks
     rtc_dc_manager_t dc_manager;          // Data channels
+    rtc_rate_controller_t *rate_ctrl;     // AIMD rate control
     rtc_desc_t local_desc, remote_desc;
     volatile rtc_connection_state_t state;
 };
@@ -252,10 +267,16 @@ struct rtc_peer_connection {
 | `test_rtcp` | SR/RR build/parse, jitter statistics |
 | `test_data_channel` | Channel open/close, message send/recv |
 | `test_turn` | TURN allocation, ChannelData framing, credentials |
+| `test_rate_control` | AIMD algorithm, bitrate adaptation, keyframe requests |
 
 ## Known Limitations
 
-- No trickle ICE (all candidates gathered before offer)
+- No trickle ICE (all candidates gathered before offer; `add_ice_candidate()` is a stub)
 - TURN relay candidates not yet wired into ICE gathering
 - Always ICE-controlling role (no nomination negotiation)
-- No RTCP compound packets
+- No RTCP compound packets (single SR or RR per interval)
+- No RTCP feedback messages (NACK, PLI, FIR, REMB)
+- No SRTP replay protection
+- Single rate controller shared across all senders per peer
+- SSRC→receiver lookup is O(n) linear scan (should use hashmap)
+- `volatile` used instead of `_Atomic` for cross-thread state flags

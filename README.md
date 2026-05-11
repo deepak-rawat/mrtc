@@ -17,13 +17,13 @@ orchestration on top. All public API functions use the `rtc_` prefix.
 - **DTLS 1.2 + SRTP** — encrypted media (AES-128-CM, HMAC-SHA1-80)
 - **RTP/RTCP** — media packets, sender/receiver reports, jitter/loss stats
 - **SDP** — multi-media session description (audio + video + data channels)
-- **Data Channels** — message framing over DTLS
+- **Data Channels** — message framing over DTLS (OPEN/ACK handshake, up to 16 channels)
 - **Peer Connection** — high-level WebRTC API
 - **VP8** (libvpx) + **Opus** (libopus) — video/audio codecs with RTP packetization
 - **Media pipeline** — encode-once fan-out, jitter buffer, rate control
 - **Conference library** — multi-peer orchestration
 - **Signaling** — WebSocket client + server for meeting management
-- **Applications** — `chat` (terminal) and `conf_sdl` (SDL3 video conference)
+- **Applications** — `chat` (terminal text messaging) and `conf_sdl` (SDL3 video conference)
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for design details and project structure.
 See [ROADMAP.md](ROADMAP.md) for planned improvements.
@@ -38,7 +38,7 @@ See [ROADMAP.md](ROADMAP.md) for planned improvements.
 | **libvpx** | VP8 codec | media |
 | **libopus** | Opus codec | media |
 | **SDL3** | Camera, audio, graphics | app/conf_sdl |
-| **CMake** >= 3.10 | Build system | all |
+| **CMake** >= 3.14 | Build system | all |
 
 ## Building
 
@@ -67,7 +67,7 @@ mkdir build && cd build && cmake -G Ninja .. && ninja
 
 ## Tests
 
-20 executables, 119 tests. No external framework.
+23 executables, 140 tests. No external framework.
 
 ```bash
 # Run all tests (from build/)
