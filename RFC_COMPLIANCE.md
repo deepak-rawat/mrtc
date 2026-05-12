@@ -9,32 +9,38 @@ Status of each IETF RFC relevant to the WebRTC protocol stack as implemented in 
 
 ## Summary
 
-| RFC | Title | Status | Coverage |
-|-----|-------|--------|----------|
-| [RFC 3550](#rfc-3550--rtprtcp) | RTP / RTCP | ⚠️ Partial | ~50% |
-| [RFC 3711](#rfc-3711--srtp) | SRTP | ⚠️ Partial | ~75% |
-| [RFC 4566](#rfc-4566--sdp) | SDP | ⚠️ Partial | ~70% |
-| [RFC 4585](#rfc-4585--rtcp-feedback) | RTCP Feedback (NACK, PLI, FIR) | ❌ Not Impl | 0% |
-| [RFC 5109](#rfc-5109--ulpfec) | UlpFEC | ❌ Not Impl | 0% |
-| [RFC 5389](#rfc-5389--stun) | STUN | ✅ Implemented | ~95% |
-| [RFC 5764](#rfc-5764--dtls-srtp) | DTLS-SRTP | ✅ Implemented | ~95% |
-| [RFC 5766](#rfc-5766--turn) | TURN | ⚠️ Partial | ~50% |
-| [RFC 6347](#rfc-6347--dtls-12) | DTLS 1.2 | ✅ Implemented | ~95% |
-| [RFC 6455](#rfc-6455--websocket) | WebSocket (signaling) | ✅ Implemented | via libwebsockets |
-| [RFC 7587](#rfc-7587--opus-rtp) | Opus RTP Payload | ✅ Implemented | ~90% |
-| [RFC 7741](#rfc-7741--vp8-rtp) | VP8 RTP Payload | ⚠️ Partial | ~85% |
-| [RFC 7983](#rfc-7983--packet-demux) | Multiplexing STUN/DTLS/RTP | ✅ Implemented | 100% |
-| [RFC 8445](#rfc-8445--ice) | ICE | ⚠️ Partial | ~45% |
-| [RFC 8829](#rfc-8829--jsep) | JSEP (offer/answer model) | ⚠️ Partial | ~60% |
-| [RFC 8834](#rfc-8834--media-transport) | Media Transport over RTP | ⚠️ Partial | ~50% |
-| [RFC 8839](#rfc-8839--ice-sdp) | ICE SDP Attributes | ⚠️ Partial | ~60% |
-| [RFC 8888](#rfc-8888--transport-cc) | Transport-CC | ❌ Not Impl | 0% |
+| RFC | Title | Status | Coverage | Successor |
+|-----|-------|--------|----------|:---------:|
+| [RFC 3550](#rfc-3550--rtprtcp) | RTP / RTCP | ⚠️ Partial | ~50% | Updated by 10 RFCs |
+| [RFC 3711](#rfc-3711--srtp) | SRTP | ⚠️ Partial | ~75% | Updated by 6904, 8723 |
+| [RFC 4566](#rfc-4566--sdp) | SDP | ⚠️ Partial | ~70% | **Obsoleted by 8866** |
+| [RFC 4585](#rfc-4585--rtcp-feedback) | RTCP Feedback (NACK, PLI, FIR) | ❌ Not Impl | 0% | Updated by 5506, 8108 |
+| [RFC 5109](#rfc-5109--ulpfec) | UlpFEC | ❌ Not Impl | 0% | Current |
+| [RFC 5389](#rfc-5389--stun) | STUN | ✅ Implemented | ~95% | **Obsoleted by 8489** |
+| [RFC 5764](#rfc-5764--dtls-srtp) | DTLS-SRTP | ✅ Implemented | ~95% | Updated by 7983 |
+| [RFC 5766](#rfc-5766--turn) | TURN | ⚠️ Partial | ~50% | **Obsoleted by 8656** |
+| [RFC 6347](#rfc-6347--dtls-12) | DTLS 1.2 | ✅ Implemented | ~95% | **Obsoleted by 9147** |
+| [RFC 6455](#rfc-6455--websocket) | WebSocket (signaling) | ✅ Implemented | via libwebsockets | Updated by 8441 |
+| [RFC 7587](#rfc-7587--opus-rtp) | Opus RTP Payload | ✅ Implemented | ~90% | Current |
+| [RFC 7741](#rfc-7741--vp8-rtp) | VP8 RTP Payload | ⚠️ Partial | ~85% | Current |
+| [RFC 7983](#rfc-7983--packet-demux) | Multiplexing STUN/DTLS/RTP | ✅ Implemented | 100% | Current |
+| [RFC 8445](#rfc-8445--ice) | ICE | ⚠️ Partial | ~45% | Updated by 8863 |
+| [RFC 8829](#rfc-8829--jsep) | JSEP (offer/answer model) | ⚠️ Partial | ~60% | Current |
+| [RFC 8834](#rfc-8834--media-transport) | Media Transport over RTP | ⚠️ Partial | ~50% | Current |
+| [RFC 8839](#rfc-8839--ice-sdp) | ICE SDP Attributes | ⚠️ Partial | ~60% | Current |
+| [RFC 8888](#rfc-8888--transport-cc) | Transport-CC | ❌ Not Impl | 0% | Current |
 
 ---
 
 ## RFC 3550 — RTP/RTCP
 
 **"RTP: A Transport Protocol for Real-Time Applications"**
+
+> **Updated by:** RFC 5506 (reduced-size RTCP), RFC 5761 (RTP/RTCP mux on single port),
+> RFC 6051 (rapid RTP sync), RFC 6222/7022 (CNAME generation), RFC 7160 (multiple media types),
+> RFC 7164 (RTP/RTCP mux considerations), RFC 8083 (multimedia congestion feedback),
+> RFC 8108 (SSRC-specific RTCP), RFC 8860 (deprecates RTP/RTCP transport address pairing).
+> Still the base specification — not obsoleted.
 
 Files: `rtc/src/rtc_rtp.c`, `rtc/src/rtc_rtcp.c`, `rtc/include/rtc/rtc_rtp.h`, `rtc/src/rtc_rtcp.h`
 
@@ -87,6 +93,9 @@ Files: `rtc/src/rtc_rtp.c`, `rtc/src/rtc_rtcp.c`, `rtc/include/rtc/rtc_rtp.h`, `
 
 **"The Secure Real-time Transport Protocol"**
 
+> **Updated by:** RFC 6904 (encrypted SRTP header extensions), RFC 8723 (SRTP double encryption).
+> Still the base specification — not obsoleted.
+
 Files: `rtc/src/rtc_srtp.c`, `rtc/src/rtc_srtp.h`
 
 ### Implemented
@@ -121,6 +130,11 @@ Files: `rtc/src/rtc_srtp.c`, `rtc/src/rtc_srtp.h`
 ## RFC 4566 — SDP
 
 **"SDP: Session Description Protocol"**
+
+> ⚠️ **Obsoleted by RFC 8866** (January 2021). RFC 8866 is a clarification update with no
+> wire-format changes. Key differences: removes `k=` line entirely, clarifies `b=` semantics,
+> tightens ABNF grammar, mandates ICE-era usage patterns. Migration effort: **low** —
+> mrtc's minimal SDP subset is unaffected; simply update doc references.
 
 Files: `rtc/src/rtc_sdp.c`, `rtc/include/rtc/rtc_sdp.h`
 
@@ -176,6 +190,9 @@ Files: `rtc/src/rtc_sdp.c`, `rtc/include/rtc/rtc_sdp.h`
 
 **"Extended RTP Profile for RTCP-Based Feedback (RTP/AVPF)"**
 
+> **Updated by:** RFC 5506 (allows reduced-size RTCP-FB without compound), RFC 8108 (SSRC-specific attributes).
+> Still the base specification — not obsoleted.
+
 📋 **Planned for Phase 2** (see ROADMAP.md)
 
 | Feature | Status |
@@ -206,6 +223,11 @@ Files: `rtc/src/rtc_sdp.c`, `rtc/include/rtc/rtc_sdp.h`
 ## RFC 5389 — STUN
 
 **"Session Traversal Utilities for NAT"**
+
+> ⚠️ **Obsoleted by RFC 8489** (February 2020). Key changes: long-term auth mechanism v2
+> (SHA-256 + PASSWORD-ALGORITHMS/PASSWORD-ALGORITHM attributes), ALTERNATE-DOMAIN attribute,
+> STUN test vectors updated, nonce rotation required. Migration effort: **medium** —
+> current long-term auth (MD5) still works but new servers may require auth v2.
 
 Files: `rtc/src/rtc_stun.c`, `rtc/include/rtc/rtc_stun.h`
 
@@ -271,6 +293,9 @@ Files: `rtc/src/rtc_stun.c`, `rtc/include/rtc/rtc_stun.h`
 
 **"Datagram Transport Layer Security (DTLS) Extension to Establish Keys for the Secure Real-time Transport Protocol (SRTP)"**
 
+> **Updated by:** RFC 7983 (demux clarification — already implemented by mrtc).
+> Still the base specification — not obsoleted.
+
 Files: `rtc/src/rtc_dtls.c`, `rtc/src/rtc_dtls.h`
 
 ### Implemented
@@ -295,6 +320,11 @@ Files: `rtc/src/rtc_dtls.c`, `rtc/src/rtc_dtls.h`
 ## RFC 5766 — TURN
 
 **"Traversal Using Relays around NAT"**
+
+> ⚠️ **Obsoleted by RFC 8656** (February 2020). Key changes: TURN over TCP/TLS/DTLS transports,
+> dual-stack (IPv4+IPv6) allocation, REQUESTED-ADDRESS-FAMILY attribute, uses RFC 8489 auth.
+> Migration effort: **medium** — current UDP-only TURN client works but modern TURN servers
+> may require RFC 8489 long-term auth v2 and offer TURN-over-TLS.
 
 Files: `rtc/src/rtc_turn.c`, `rtc/include/rtc/rtc_turn.h`, `turn/turn_handler.c`, `turn/turn_server.c`
 
@@ -345,6 +375,11 @@ Files: `rtc/src/rtc_turn.c`, `rtc/include/rtc/rtc_turn.h`, `turn/turn_handler.c`
 
 **"Datagram Transport Layer Security Version 1.2"**
 
+> ⚠️ **Obsoleted by RFC 9147** (DTLS 1.3, April 2022). DTLS 1.3 aligns with TLS 1.3:
+> 0-RTT, encrypted handshake, removed static RSA/DH, unified record layer.
+> Migration effort: **high** — requires OpenSSL 3.2+ with DTLS 1.3 support (not yet widely
+> available). DTLS 1.2 remains valid and interoperable for WebRTC; browsers still support it.
+
 Files: `rtc/src/rtc_dtls.c`, `rtc/src/rtc_dtls.h`
 
 ### Implemented
@@ -374,6 +409,10 @@ Files: `rtc/src/rtc_dtls.c`, `rtc/src/rtc_dtls.h`
 ## RFC 6455 — WebSocket
 
 **"The WebSocket Protocol"**
+
+> **Updated by:** RFC 7936 (clarification), RFC 8307 (well-known URIs),
+> RFC 8441 (WebSocket bootstrapping over HTTP/2). Still the base specification.
+> Migration effort: **none** — handled by libwebsockets.
 
 Files: `signaling/src/signaling_client.c`, `signaling/server/signaling_server.c`
 
@@ -468,6 +507,11 @@ Files: `rtc/src/rtc_transport.c`
 ## RFC 8445 — ICE
 
 **"Interactive Connectivity Establishment"**
+
+> **Updated by:** RFC 8863 (Trickle ICE, January 2021). Defines incremental candidate
+> exchange during gathering. Migration effort: **medium** — requires implementing
+> `add_ice_candidate()` (currently a stub), SDP `a=ice-options:trickle`, and
+> `a=end-of-candidates` signaling.
 
 Files: `rtc/src/rtc_ice.c`, `rtc/src/rtc_ice.h`
 
@@ -613,25 +657,184 @@ Files: `rtc/src/rtc_sdp.c`
 
 ## Other Relevant Standards (Not Explicitly Referenced)
 
-| Standard | Topic | Status |
-|----------|-------|--------|
-| RFC 8831 | WebRTC Data Channels | ⚠️ Custom wire protocol over DTLS; not SCTP-based per spec |
-| RFC 4960 | SCTP | ❌ Not implemented (data channels use custom DTLS framing) |
-| RFC 8261 | SCTP over DTLS | ❌ Not implemented |
-| RFC 8826 | WebRTC Security Architecture | ⚠️ DTLS+SRTP used; no consent freshness, no SRTP replay protection |
-| RFC 7675 | STUN Consent Freshness | ❌ Not implemented |
-| RFC 3264 | SDP Offer/Answer Model | ⚠️ Basic offer/answer works; no renegotiation |
-| RFC 5245 | ICE (obsoleted by 8445) | N/A — Uses RFC 8445 |
+| Standard | Topic | Status | Successor |
+|----------|-------|--------|-----------|
+| RFC 8831 | WebRTC Data Channels | ⚠️ Custom wire protocol over DTLS; not SCTP-based per spec | Current |
+| RFC 4960 | SCTP | ❌ Not implemented (data channels use custom DTLS framing) | **Obsoleted by RFC 9260** |
+| RFC 8261 | SCTP over DTLS | ❌ Not implemented | Current |
+| RFC 8826 | WebRTC Security Architecture | ⚠️ DTLS+SRTP used; no consent freshness, no SRTP replay protection | Current |
+| RFC 7675 | STUN Consent Freshness | ❌ Not implemented | Current |
+| RFC 3264 | SDP Offer/Answer Model | ⚠️ Basic offer/answer works; no renegotiation | Updated by RFC 6157, 8843 |
+| RFC 5245 | ICE (obsoleted by 8445) | N/A — Uses RFC 8445 | Obsoleted by RFC 8445 |
 
 ---
 
-## Implementation Priority Recommendations
+## RFC Migration Plan
 
-Based on the ROADMAP and current gaps:
+Roadmap for updating mrtc code from current (older) RFC implementations to their
+successors, ordered by priority.
 
-1. **Phase 2 (RTCP Feedback)** — NACK, PLI, FIR, REMB are critical for video quality and interop with browsers.
-2. **Phase 3 (Bandwidth Estimation)** — Transport-CC and GCC needed for real-world network adaptation.
-3. **RFC 3711 Replay Protection** — Security-critical gap; should be addressed immediately.
-4. **RFC 8445 ICE Controlled Role** — Required for interop when peer is the offerer.
-5. **RFC 7741 2-byte PictureID** — Required for interop with Chrome/Firefox VP8 streams.
-6. **Phase 4 (FEC)** — Important for lossy networks.
+### Phase A: Critical Security & Interop (do first)
+
+#### A1 — SRTP Replay Protection (RFC 3711 §3.3.2)
+- **Why now:** Security-critical gap; captured packets can be replayed.
+- **Work:** Add 64-packet sliding window replay list in `rtc_srtp.c`. Check packet index against window before decryption.
+- **Files:** `rtc/src/rtc_srtp.c`, `rtc/src/rtc_srtp.h`
+- **Effort:** Small
+
+#### A2 — STUN → RFC 8489 Long-Term Auth v2
+- **Why now:** RFC 5389 is obsoleted. Modern TURN servers (coturn 4.6+) prefer SHA-256 auth. Current MD5 long-term auth has known weaknesses.
+- **Work:**
+  - Add `PASSWORD-ALGORITHMS` and `PASSWORD-ALGORITHM` attribute support in `rtc_stun.c`
+  - Implement SHA-256 based HMAC key derivation alongside MD5
+  - Add `USERHASH` attribute (optional, privacy feature)
+  - Support `NONCE` with `STUN-COOKIE` prefix for nonce rotation detection
+- **Files:** `rtc/src/rtc_stun.c`, `rtc/include/rtc/rtc_stun.h`
+- **Effort:** Medium
+
+#### A3 — TURN → RFC 8656
+- **Why now:** RFC 5766 is obsoleted. Depends on A2 (RFC 8489 auth).
+- **Work:**
+  - Add `REQUESTED-ADDRESS-FAMILY` attribute for dual-stack (IPv4+IPv6)
+  - Support `ADDITIONAL-ADDRESS-FAMILY` for dual allocation
+  - Wire TURN relay candidates into ICE gathering (`rtc_ice.c`)
+  - Add allocation/permission/channel refresh timers
+  - Fix TURN auth key truncation bug (pass `lt_key` as `uint8_t*` with explicit length, not `const char*`)
+- **Files:** `rtc/src/rtc_turn.c`, `rtc/include/rtc/rtc_turn.h`, `rtc/src/rtc_ice.c`, `turn/turn_handler.c`
+- **Effort:** Large
+
+### Phase B: RTCP & Feedback (aligns with ROADMAP Phase 2)
+
+#### B1 — RTCP Feedback: NACK/PLI/FIR/REMB (RFC 4585 + RFC 5506)
+- **Why now:** Required for video quality and browser interop.
+- **Work:**
+  - Implement Generic NACK (PT=205, FMT=1), PLI (PT=206, FMT=1), FIR (PT=206, FMT=4)
+  - Add `a=rtcp-fb:` SDP generation and parsing
+  - Support reduced-size RTCP (RFC 5506) — send FB without compound SR/RR+SDES
+  - Add NACK retransmit buffer (512 packets) in sender
+  - Wire PLI → `video_encoder_request_keyframe()`
+- **Files:** `rtc/src/rtc_rtcp.c`, `rtc/src/rtc_rtcp.h`, `rtc/src/rtc_peer.c`, `rtc/src/rtc_sdp.c`
+- **Effort:** Large
+
+#### B2 — RTCP Compound Packets & SDES CNAME (RFC 3550 §6.1 + RFC 7022)
+- **Why now:** Spec requires SR/RR+SDES in every compound packet. RFC 7022 updates CNAME generation.
+- **Work:**
+  - Generate compound RTCP (SR/RR + SDES CNAME) instead of bare SR/RR
+  - Generate CNAME per RFC 7022 (random, persistent per session)
+  - Implement bandwidth-adaptive RTCP interval (replace fixed 5s timer)
+- **Files:** `rtc/src/rtc_rtcp.c`, `rtc/src/rtc_peer.c`
+- **Effort:** Medium
+
+#### B3 — RTP/RTCP Mux Compliance (RFC 5761)
+- **Why now:** Already using single port, but should validate per RFC 5761 demux rules.
+- **Work:** Verify RTCP PT range demux in `rtc_transport.c` matches RFC 5761 §4. Already mostly done via RFC 7983.
+- **Files:** `rtc/src/rtc_transport.c`
+- **Effort:** Small (audit only)
+
+### Phase C: ICE Improvements
+
+#### C1 — Trickle ICE (RFC 8863)
+- **Why now:** All browsers use trickle ICE. Current all-in-SDP approach adds latency.
+- **Work:**
+  - Implement `rtc_peer_connection_add_ice_candidate()` (currently a stub)
+  - Send candidates as gathered via `on_ice_candidate` callback
+  - Add `a=ice-options:trickle` to SDP generation/parsing
+  - Add `a=end-of-candidates` signaling
+  - Handle dynamic checklist updates as remote candidates arrive
+- **Files:** `rtc/src/rtc_ice.c`, `rtc/src/rtc_peer.c`, `rtc/src/rtc_sdp.c`
+- **Effort:** Large
+
+#### C2 — ICE Controlled Role (RFC 8445 §7.3)
+- **Why now:** Required for interop when mrtc is the answerer.
+- **Work:**
+  - Add ICE-CONTROLLED attribute support (already defined in `rtc_stun.h`)
+  - Implement role determination from SDP offer/answer (offerer=controlling, answerer=controlled)
+  - Handle role conflict (tie-breaker comparison, 487 error)
+  - Implement regular nomination (controlled side waits for USE-CANDIDATE)
+- **Files:** `rtc/src/rtc_ice.c`, `rtc/src/rtc_peer.c`
+- **Effort:** Medium
+
+### Phase D: Bandwidth Estimation (aligns with ROADMAP Phase 3)
+
+#### D1 — RTP Header Extensions (RFC 8834, RFC 5285)
+- **Why now:** Required for transport-cc and abs-send-time.
+- **Work:**
+  - Implement one-byte header extension format (RFC 5285)
+  - Add `a=extmap:` SDP generation and parsing
+  - Support `abs-send-time`, `transport-cc` seq number, `mid`, `audio-level`
+- **Files:** `rtc/src/rtc_rtp.c`, `rtc/src/rtc_sdp.c`, `rtc/include/rtc/rtc_rtp.h`
+- **Effort:** Medium
+
+#### D2 — Transport-CC (RFC 8888)
+- **Why now:** Needed for delay-based bandwidth estimation.
+- **Work:**
+  - Sender: attach per-packet transport-wide sequence numbers via RTP header extension
+  - Receiver: track arrival times, build RTCP Transport Feedback packets
+  - Sender: compare send/recv deltas for delay-based estimation
+- **Files:** `rtc/src/rtc_rtcp.c`, `rtc/src/rtc_peer.c`, new `rtc/src/rtc_bwe.c`
+- **Effort:** Large
+
+#### D3 — GCC (Google Congestion Control)
+- **Why now:** Replace AIMD with proper delay-based + loss-based estimator.
+- **Work:** Implement GCC algorithm using Transport-CC feedback. Replace `rtc_rate_control.c`.
+- **Files:** new `rtc/src/rtc_bwe.c`, `rtc/src/rtc_rate_control.c`
+- **Effort:** Large
+
+### Phase E: SDP & Protocol Refresh (low urgency)
+
+#### E1 — SDP → RFC 8866
+- **Why now:** RFC 4566 is obsoleted, though changes are editorial.
+- **Work:** Audit SDP generation/parsing against RFC 8866 ABNF. Remove any `k=` line handling. Update doc references.
+- **Files:** `rtc/src/rtc_sdp.c`
+- **Effort:** Small
+
+#### E2 — SRTP Header Extension Encryption (RFC 6904)
+- **Why now:** Browsers encrypt `mid` and `audio-level` header extensions by default.
+- **Work:** After implementing header extensions (D1), add encryption for signaled extensions in SRTP protect/unprotect.
+- **Files:** `rtc/src/rtc_srtp.c`
+- **Effort:** Medium
+
+#### E3 — DTLS 1.3 (RFC 9147)
+- **Why now:** DTLS 1.2 remains interoperable; DTLS 1.3 is optional.
+- **Work:** Wait for OpenSSL DTLS 1.3 support to stabilize (OpenSSL 3.2+). Then update `rtc_dtls.c` to negotiate DTLS 1.3 when available, falling back to 1.2.
+- **Files:** `rtc/src/rtc_dtls.c`
+- **Effort:** Medium (mostly OpenSSL API changes)
+
+### Phase F: Forward Error Correction (aligns with ROADMAP Phase 4)
+
+#### F1 — UlpFEC (RFC 5109)
+- **Why now:** Important for lossy networks. No successor RFC — still current.
+- **Work:** XOR-based FEC encode/decode, SDP `a=rtpmap:XX ulpfec/90000` negotiation.
+- **Files:** new `rtc/src/rtc_fec.c`, `rtc/src/rtc_sdp.c`
+- **Effort:** Large
+
+### Migration Dependency Graph
+
+```
+A1 (SRTP replay)     ─── standalone, do first
+A2 (STUN→8489)       ─── standalone
+A3 (TURN→8656)       ─── depends on A2
+B1 (RTCP feedback)   ─── standalone
+B2 (RTCP compound)   ─── standalone
+B3 (RTP/RTCP mux)    ─── standalone (audit)
+C1 (Trickle ICE)     ─── standalone
+C2 (ICE controlled)  ─── standalone
+D1 (RTP extensions)  ─── prerequisite for D2, E2
+D2 (Transport-CC)    ─── depends on D1
+D3 (GCC)             ─── depends on D2
+E1 (SDP→8866)        ─── standalone
+E2 (SRTP hdr enc)    ─── depends on D1
+E3 (DTLS 1.3)        ─── standalone (wait for OpenSSL)
+F1 (UlpFEC)          ─── standalone
+```
+
+### Effort Summary
+
+| Phase | Items | Total Effort | Key Benefit |
+|-------|-------|-------------|-------------|
+| A | 3 | Small + Medium + Large | Security, modern TURN interop |
+| B | 3 | Large + Medium + Small | Video quality, spec compliance |
+| C | 2 | Large + Medium | Connection speed, browser interop |
+| D | 3 | Medium + Large + Large | Bandwidth adaptation |
+| E | 3 | Small + Medium + Medium | Spec freshness, header privacy |
+| F | 1 | Large | Loss resilience |
