@@ -142,40 +142,42 @@ int jitter_buffer_pop(jitter_buffer_t *jb, jitter_buffer_packet_t *out) {
 
     uint64_t now = rtc_time_ms();
 
-    /* Try next_seq first */
-    jb_slot_t *slot = (jb_slot_t *)rtc_u32_map_get(&jb->by_seq, (uint32_t)jb->next_seq);
-    if (slot) {
-        int age = (int)(now - slot->arrival_ms);
-        if (age < jb->target_delay_ms)
-            return -1; /* Not ready yet */
+    /* Loop instead of recursing: each "skip lost packet" round advances
+     * next_seq and retries from the top. */
+    for (;;) {
+        jb_slot_t *slot =
+            (jb_slot_t *)rtc_u32_map_get(&jb->by_seq, (uint32_t)jb->next_seq);
+        if (slot) {
+            int age = (int)(now - slot->arrival_ms);
+            if (age < jb->target_delay_ms)
+                return -1; /* Not ready yet */
 
-        rtc_u32_map_remove(&jb->by_seq, (uint32_t)jb->next_seq);
-        free(jb->last_popped);
-        jb->last_popped = slot;
+            rtc_u32_map_remove(&jb->by_seq, (uint32_t)jb->next_seq);
+            free(jb->last_popped);
+            jb->last_popped = slot;
 
-        out->data = slot->data;
-        out->len = slot->len;
-        out->timestamp = slot->timestamp;
-        out->seq = slot->seq;
-        out->marker = slot->marker;
+            out->data = slot->data;
+            out->len = slot->len;
+            out->timestamp = slot->timestamp;
+            out->seq = slot->seq;
+            out->marker = slot->marker;
 
-        jb->next_seq++;
-        return 0;
-    }
-
-    /* next_seq missing - check if the earliest available has aged out */
-    uint16_t earliest_seq = 0;
-    jb_slot_t *earliest = find_oldest(jb, &earliest_seq);
-    if (earliest) {
-        int age = (int)(now - earliest->arrival_ms);
-        if (age > jb->max_delay_ms) {
-            /* Skip lost packet(s), advance to earliest available */
-            jb->next_seq = earliest_seq;
-            return jitter_buffer_pop(jb, out);
+            jb->next_seq++;
+            return 0;
         }
-    }
 
-    return -1;
+        /* next_seq missing - check if the earliest available has aged out. */
+        uint16_t earliest_seq = 0;
+        jb_slot_t *earliest = find_oldest(jb, &earliest_seq);
+        if (!earliest)
+            return -1;
+        int age = (int)(now - earliest->arrival_ms);
+        if (age <= jb->max_delay_ms)
+            return -1;
+
+        /* Skip lost packet(s), advance to earliest and retry. */
+        jb->next_seq = earliest_seq;
+    }
 }
 
 int jitter_buffer_get_delay(jitter_buffer_t *jb) {
