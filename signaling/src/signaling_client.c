@@ -5,6 +5,7 @@
 #include "signaling/signaling_msg.h"
 #include <rtc/rtc_vec.h>
 #include <libwebsockets.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -14,8 +15,8 @@ struct signaling_client {
     struct lws_context *lws_ctx;
     struct lws *wsi;
     rtc_thread_t thread;
-    volatile bool running;
-    volatile bool connected;
+    _Atomic bool running;
+    _Atomic bool connected;
 
     /* Outgoing message queue (thread-safe via mutex). FIFO of char* (owned). */
     rtc_mutex_t queue_mutex;

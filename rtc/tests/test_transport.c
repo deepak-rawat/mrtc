@@ -12,6 +12,7 @@
 #include <rtc/rtc.h>
 #include "rtc_transport.h"
 #include "test_harness.h"
+#include <stdatomic.h>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -24,9 +25,9 @@
 /* ------------------------------------------------------------------ */
 /*  Shared test state for callbacks                                    */
 /* ------------------------------------------------------------------ */
-static volatile int g_recv_count;
-static volatile rtc_pkt_type_t g_recv_type;
-static volatile size_t g_recv_len;
+static _Atomic int g_recv_count;
+static _Atomic rtc_pkt_type_t g_recv_type;
+static _Atomic size_t g_recv_len;
 static uint8_t g_recv_buf[256];
 static rtc_mutex_t g_mutex;
 static rtc_cond_t g_cond;
@@ -61,7 +62,7 @@ static bool wait_for_recv(int target, int timeout_ms) {
     return true;
 }
 
-static volatile int g_timer_count;
+static _Atomic int g_timer_count;
 
 static void test_timer_callback(void *user) {
     (void)user;

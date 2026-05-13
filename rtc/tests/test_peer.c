@@ -11,6 +11,7 @@
  */
 #include <rtc/rtc.h>
 #include "test_harness.h"
+#include <stdatomic.h>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -192,8 +193,8 @@ TEST(peer_ice_candidates) {
 /* ------------------------------------------------------------------ */
 /*  Test: full offer/answer between two peers, auto-connect            */
 /* ------------------------------------------------------------------ */
-static volatile rtc_connection_state_t g_alice_state;
-static volatile rtc_connection_state_t g_bob_state;
+static _Atomic rtc_connection_state_t g_alice_state;
+static _Atomic rtc_connection_state_t g_bob_state;
 
 static void alice_on_conn(rtc_connection_state_t state, void *user) {
     (void)user;

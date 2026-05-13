@@ -12,6 +12,7 @@
 #include "rtc_ice.h"
 #include "rtc_transport.h"
 #include "test_harness.h"
+#include <stdatomic.h>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -109,15 +110,15 @@ TEST(ice_remote_credentials) {
 /* ------------------------------------------------------------------ */
 /*  Shared callback state for transport-based ICE tests                */
 /* ------------------------------------------------------------------ */
-static volatile int g_stun_recv_count;
+static _Atomic int g_stun_recv_count;
 static uint8_t g_stun_recv_buf[2048];
-static volatile size_t g_stun_recv_len;
+static _Atomic size_t g_stun_recv_len;
 static rtc_addr_t g_stun_recv_from;
 static rtc_mutex_t g_ice_mutex;
 static rtc_cond_t g_ice_cond;
-static volatile int g_data_recv_count;
+static _Atomic int g_data_recv_count;
 static uint8_t g_data_recv_buf[2048];
-static volatile size_t g_data_recv_len;
+static _Atomic size_t g_data_recv_len;
 
 /* Callback that forwards STUN to ICE and captures other packets */
 static rtc_ice_agent_t *g_stun_agent; /* agent to forward STUN to */

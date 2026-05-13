@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <signal.h>
 
-static volatile int interrupted = 0;
+static volatile sig_atomic_t interrupted = 0;
 static meeting_manager_t g_mgr;
 
 /* Per-connection data stored by libwebsockets */

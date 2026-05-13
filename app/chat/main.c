@@ -62,7 +62,7 @@ static peer_state_t g_peers[MAX_PEERS];
 static int g_peer_count = 0;
 static char g_my_id[SIG_MAX_PEER_ID];
 static const char *g_stun_ip = "stun.l.google.com";
-static volatile bool g_running = true;
+static bool g_running = true;
 
 /* ------------------------------------------------------------------ */
 /*  Peer state management                                              */

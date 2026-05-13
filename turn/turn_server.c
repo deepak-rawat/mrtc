@@ -10,7 +10,7 @@
 #include <string.h>
 #include <signal.h>
 
-static volatile int interrupted = 0;
+static volatile sig_atomic_t interrupted = 0;
 
 static void sigint_handler(int sig) {
     (void)sig;
