@@ -20,8 +20,15 @@ static void random_peer_id(char *buf, size_t len) {
 
 void meeting_manager_init(meeting_manager_t *mgr, meeting_send_fn send_fn, void *user) {
     memset(mgr, 0, sizeof(*mgr));
+    rtc_str_map_init(&mgr->name_index);
     mgr->send_fn = send_fn;
     mgr->send_user = user;
+}
+
+void meeting_manager_close(meeting_manager_t *mgr) {
+    if (!mgr)
+        return;
+    rtc_str_map_free(&mgr->name_index);
 }
 
 meeting_peer_t *meeting_peer_create(void *ws_handle) {
@@ -35,11 +42,7 @@ meeting_peer_t *meeting_peer_create(void *ws_handle) {
 }
 
 static meeting_t *find_meeting(meeting_manager_t *mgr, const char *name) {
-    for (int i = 0; i < MEETING_MAX_ROOMS; i++) {
-        if (mgr->meetings[i].active && strcmp(mgr->meetings[i].name, name) == 0)
-            return &mgr->meetings[i];
-    }
-    return NULL;
+    return (meeting_t *)rtc_str_map_get(&mgr->name_index, name);
 }
 
 static meeting_t *create_meeting(meeting_manager_t *mgr, const char *name) {
@@ -49,6 +52,11 @@ static meeting_t *create_meeting(meeting_manager_t *mgr, const char *name) {
             memset(m, 0, sizeof(*m));
             snprintf(m->name, sizeof(m->name), "%s", name);
             m->active = true;
+            /* Index by name (key borrows m->name; valid until meeting deactivates) */
+            if (rtc_str_map_set(&mgr->name_index, m->name, m) != RTC_OK) {
+                m->active = false;
+                return NULL;
+            }
             mgr->meeting_count++;
             return m;
         }
@@ -70,6 +78,7 @@ static void remove_peer_from_meeting(meeting_t *m, meeting_peer_t *peer) {
 
 static void maybe_destroy_meeting(meeting_manager_t *mgr, meeting_t *m) {
     if (m->peer_count == 0) {
+        rtc_str_map_remove(&mgr->name_index, m->name);
         m->active = false;
         mgr->meeting_count--;
     }

@@ -9,6 +9,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <rtc/rtc_str_map.h>
 
 #define MEETING_MAX_PEERS   8
 #define MEETING_MAX_NAME    64
@@ -35,12 +36,17 @@ typedef void (*meeting_send_fn)(meeting_peer_t *peer, const char *json, void *us
 typedef struct {
     meeting_t meetings[MEETING_MAX_ROOMS];
     int meeting_count;
+    rtc_str_map_t name_index; /* meeting name → meeting_t * (borrowed keys: point into
+                                 meeting_t.name) */
     meeting_send_fn send_fn;
     void *send_user;
 } meeting_manager_t;
 
 /* Initialize the meeting manager */
 void meeting_manager_init(meeting_manager_t *mgr, meeting_send_fn send_fn, void *user);
+
+/* Free resources held by the meeting manager. Does not free peers. */
+void meeting_manager_close(meeting_manager_t *mgr);
 
 /* Create a new peer (called on WS connect). Assigns random ID. */
 meeting_peer_t *meeting_peer_create(void *ws_handle);

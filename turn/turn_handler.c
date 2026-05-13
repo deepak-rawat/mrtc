@@ -190,6 +190,8 @@ static void handle_allocate(turn_server_t *ts, const rtc_stun_msg_t *msg, const 
     alloc->relay_addr.len = sizeof(relay_sin);
     alloc->lifetime = TURN_DEFAULT_LIFETIME;
     alloc->expires_ms = rtc_time_ms() + (uint64_t)alloc->lifetime * 1000;
+    rtc_vec_init(&alloc->channels, sizeof(turn_channel_t));
+    rtc_vec_init(&alloc->permissions, sizeof(turn_permission_t));
     ts->alloc_count++;
 
     /* Build success response */
@@ -265,6 +267,8 @@ static void handle_refresh(turn_server_t *ts, const rtc_stun_msg_t *msg, const u
     if (lifetime == 0) {
         /* Deallocate */
         rtc_close_socket(alloc->relay_sock);
+        rtc_vec_free(&alloc->channels);
+        rtc_vec_free(&alloc->permissions);
         alloc->active = false;
         ts->alloc_count--;
         RTC_LOG_INFO("TURN: allocation released by refresh(0)");
@@ -322,11 +326,8 @@ static void handle_create_permission(turn_server_t *ts, const rtc_stun_msg_t *ms
     peer.len = sizeof(struct sockaddr_in);
 
     /* Add permission */
-    if (alloc->permission_count < TURN_MAX_PERMISSIONS) {
-        alloc->permissions[alloc->permission_count].addr = peer;
-        alloc->permissions[alloc->permission_count].active = true;
-        alloc->permission_count++;
-    }
+    turn_permission_t perm = {.addr = peer, .active = true};
+    rtc_vec_push(&alloc->permissions, &perm);
 
     /* Success */
     rtc_stun_msg_t resp;
@@ -378,12 +379,8 @@ static void handle_channel_bind(turn_server_t *ts, const rtc_stun_msg_t *msg, co
     peer.len = sizeof(struct sockaddr_in);
 
     /* Store channel binding */
-    if (alloc->channel_count < TURN_MAX_CHANNELS) {
-        alloc->channels[alloc->channel_count].channel = channel;
-        alloc->channels[alloc->channel_count].peer_addr = peer;
-        alloc->channels[alloc->channel_count].active = true;
-        alloc->channel_count++;
-    }
+    turn_channel_t cb = {.channel = channel, .peer_addr = peer, .active = true};
+    rtc_vec_push(&alloc->channels, &cb);
 
     /* Success */
     rtc_stun_msg_t resp;
@@ -406,13 +403,16 @@ static void handle_channel_data(turn_server_t *ts, const uint8_t *data, size_t l
         return;
 
     /* Find channel binding → peer address */
-    for (int i = 0; i < alloc->channel_count; i++) {
-        if (alloc->channels[i].active && alloc->channels[i].channel == channel) {
+    size_t n_ch = rtc_vec_len(&alloc->channels);
+    for (size_t i = 0; i < n_ch; i++) {
+        turn_channel_t *ch = (turn_channel_t *)rtc_vec_at(&alloc->channels, i);
+        if (ch->active && ch->channel == channel) {
             /* Check permission */
             bool permitted = false;
-            for (int j = 0; j < alloc->permission_count; j++) {
-                if (alloc->permissions[j].active &&
-                    addr_ip_match(&alloc->permissions[j].addr, &alloc->channels[i].peer_addr)) {
+            size_t n_perm = rtc_vec_len(&alloc->permissions);
+            for (size_t j = 0; j < n_perm; j++) {
+                turn_permission_t *perm = (turn_permission_t *)rtc_vec_at(&alloc->permissions, j);
+                if (perm->active && addr_ip_match(&perm->addr, &ch->peer_addr)) {
                     permitted = true;
                     break;
                 }
@@ -422,8 +422,7 @@ static void handle_channel_data(turn_server_t *ts, const uint8_t *data, size_t l
 
             /* Forward via relay socket to peer */
             sendto(alloc->relay_sock, (const char *)payload, (int)payload_len, 0,
-                   (struct sockaddr *)&alloc->channels[i].peer_addr.addr,
-                   alloc->channels[i].peer_addr.len);
+                   (struct sockaddr *)&ch->peer_addr.addr, ch->peer_addr.len);
             return;
         }
     }
@@ -511,13 +510,15 @@ void turn_server_handle_packet(turn_server_t *ts, const uint8_t *data, size_t le
 void turn_server_relay_from_peer(turn_server_t *ts, turn_allocation_t *alloc, const uint8_t *data,
                                  size_t len, const rtc_addr_t *peer_from) {
     /* Find channel bound to this peer */
-    for (int i = 0; i < alloc->channel_count; i++) {
-        if (alloc->channels[i].active && addr_match(&alloc->channels[i].peer_addr, peer_from)) {
+    size_t n_ch = rtc_vec_len(&alloc->channels);
+    for (size_t i = 0; i < n_ch; i++) {
+        turn_channel_t *ch = (turn_channel_t *)rtc_vec_at(&alloc->channels, i);
+        if (ch->active && addr_match(&ch->peer_addr, peer_from)) {
             /* Wrap in ChannelData and send to client */
             uint8_t buf[2048];
             size_t frame_len;
-            if (rtc_turn_build_channel_data(buf, sizeof(buf), alloc->channels[i].channel, data, len,
-                                            &frame_len) == RTC_OK) {
+            if (rtc_turn_build_channel_data(buf, sizeof(buf), ch->channel, data, len, &frame_len) ==
+                RTC_OK) {
                 sendto(ts->listen_sock, (const char *)buf, (int)frame_len, 0,
                        (struct sockaddr *)&alloc->client_addr.addr, alloc->client_addr.len);
             }
@@ -531,6 +532,8 @@ void turn_server_expire(turn_server_t *ts) {
     for (int i = 0; i < TURN_MAX_ALLOCATIONS; i++) {
         if (ts->allocs[i].active && ts->allocs[i].expires_ms <= now) {
             rtc_close_socket(ts->allocs[i].relay_sock);
+            rtc_vec_free(&ts->allocs[i].channels);
+            rtc_vec_free(&ts->allocs[i].permissions);
             ts->allocs[i].active = false;
             ts->alloc_count--;
             RTC_LOG_INFO("TURN: allocation expired");
@@ -542,6 +545,8 @@ void turn_server_close(turn_server_t *ts) {
     for (int i = 0; i < TURN_MAX_ALLOCATIONS; i++) {
         if (ts->allocs[i].active) {
             rtc_close_socket(ts->allocs[i].relay_sock);
+            rtc_vec_free(&ts->allocs[i].channels);
+            rtc_vec_free(&ts->allocs[i].permissions);
             ts->allocs[i].active = false;
         }
     }

@@ -3,12 +3,11 @@
  */
 #include "signaling/signaling_client.h"
 #include "signaling/signaling_msg.h"
+#include <rtc/rtc_vec.h>
 #include <libwebsockets.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-
-#define SIG_CLIENT_MAX_QUEUE 64
 
 struct signaling_client {
     signaling_config_t cfg;
@@ -18,12 +17,9 @@ struct signaling_client {
     volatile bool running;
     volatile bool connected;
 
-    /* Outgoing message queue (thread-safe via mutex) */
+    /* Outgoing message queue (thread-safe via mutex). FIFO of char* (owned). */
     rtc_mutex_t queue_mutex;
-    char *queue[SIG_CLIENT_MAX_QUEUE];
-    int queue_head;
-    int queue_tail;
-    int queue_count;
+    rtc_vec_t queue;
 
     /* Parsed server URL */
     char host[128];
@@ -34,11 +30,8 @@ struct signaling_client {
 
 static void enqueue_msg(signaling_client_t *sc, char *json) {
     rtc_mutex_lock(&sc->queue_mutex);
-    if (sc->queue_count < SIG_CLIENT_MAX_QUEUE) {
-        sc->queue[sc->queue_tail] = json;
-        sc->queue_tail = (sc->queue_tail + 1) % SIG_CLIENT_MAX_QUEUE;
-        sc->queue_count++;
-    } else {
+    if (rtc_vec_push(&sc->queue, &json) != RTC_OK) {
+        RTC_LOG_WARN("signaling-client: dropping outbound message (alloc failure)");
         free(json);
     }
     rtc_mutex_unlock(&sc->queue_mutex);
@@ -51,11 +44,9 @@ static void enqueue_msg(signaling_client_t *sc, char *json) {
 static char *dequeue_msg(signaling_client_t *sc) {
     char *msg = NULL;
     rtc_mutex_lock(&sc->queue_mutex);
-    if (sc->queue_count > 0) {
-        msg = sc->queue[sc->queue_head];
-        sc->queue[sc->queue_head] = NULL;
-        sc->queue_head = (sc->queue_head + 1) % SIG_CLIENT_MAX_QUEUE;
-        sc->queue_count--;
+    if (rtc_vec_len(&sc->queue) > 0) {
+        msg = *(char **)rtc_vec_at(&sc->queue, 0);
+        rtc_vec_remove(&sc->queue, 0);
     }
     rtc_mutex_unlock(&sc->queue_mutex);
     return msg;
@@ -141,7 +132,7 @@ static int callback_client(struct lws *wsi, enum lws_callback_reasons reason, vo
             }
             /* Check if more messages pending */
             rtc_mutex_lock(&sc->queue_mutex);
-            int more = sc->queue_count;
+            size_t more = rtc_vec_len(&sc->queue);
             rtc_mutex_unlock(&sc->queue_mutex);
             if (more > 0)
                 lws_callback_on_writable(wsi);
@@ -255,6 +246,7 @@ signaling_client_t *signaling_create(const signaling_config_t *cfg) {
         return NULL;
     }
     rtc_mutex_init(&sc->queue_mutex);
+    rtc_vec_init(&sc->queue, sizeof(char *));
 
     return sc;
 }
@@ -335,11 +327,12 @@ void signaling_destroy(signaling_client_t *sc) {
 
     /* Free any remaining queued messages */
     rtc_mutex_lock(&sc->queue_mutex);
-    while (sc->queue_count > 0) {
-        free(sc->queue[sc->queue_head]);
-        sc->queue_head = (sc->queue_head + 1) % SIG_CLIENT_MAX_QUEUE;
-        sc->queue_count--;
+    size_t qn = rtc_vec_len(&sc->queue);
+    for (size_t i = 0; i < qn; i++) {
+        char *m = *(char **)rtc_vec_at(&sc->queue, i);
+        free(m);
     }
+    rtc_vec_free(&sc->queue);
     rtc_mutex_unlock(&sc->queue_mutex);
     rtc_mutex_destroy(&sc->queue_mutex);
 

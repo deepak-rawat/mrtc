@@ -8,6 +8,7 @@
 
 int ui_sdl3_init(ui_sdl3_t *ui, int win_w, int win_h) {
     memset(ui, 0, sizeof(*ui));
+    rtc_str_map_init_owned(&ui->tile_index);
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_CAMERA)) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
@@ -149,13 +150,15 @@ void ui_sdl3_update_preview(ui_sdl3_t *ui, const video_frame_t *frame) {
 
 /* ---- Tile management ---- */
 
+/* Build composite key "peer_id:label" into out (size must be >= 64+1+32+1). */
+static void ui_tile_key(char *out, size_t out_sz, const char *peer_id, const char *label) {
+    snprintf(out, out_sz, "%s:%s", peer_id, label);
+}
+
 static ui_tile_t *find_tile(ui_sdl3_t *ui, const char *peer_id, const char *label) {
-    for (int i = 0; i < ui->tile_count; i++) {
-        if (ui->tiles[i].active && strcmp(ui->tiles[i].peer_id, peer_id) == 0 &&
-            strcmp(ui->tiles[i].label, label) == 0)
-            return &ui->tiles[i];
-    }
-    return NULL;
+    char key[128];
+    ui_tile_key(key, sizeof(key), peer_id, label);
+    return (ui_tile_t *)rtc_str_map_get(&ui->tile_index, key);
 }
 
 static ui_tile_t *find_or_create_tile(ui_sdl3_t *ui, const char *peer_id, const char *label) {
@@ -170,6 +173,9 @@ static ui_tile_t *find_or_create_tile(ui_sdl3_t *ui, const char *peer_id, const 
     snprintf(t->peer_id, sizeof(t->peer_id), "%s", peer_id);
     snprintf(t->label, sizeof(t->label), "%s", label);
     t->active = true;
+    char key[128];
+    ui_tile_key(key, sizeof(key), peer_id, label);
+    rtc_str_map_set(&ui->tile_index, key, t);
     return t;
 }
 
@@ -379,6 +385,7 @@ void ui_sdl3_close(ui_sdl3_t *ui) {
             SDL_DestroyTexture(ui->tiles[i].texture);
         free(ui->tiles[i].pending_yuv);
     }
+    rtc_str_map_free(&ui->tile_index);
     if (ui->local_preview)
         SDL_DestroyTexture(ui->local_preview);
     if (ui->renderer)

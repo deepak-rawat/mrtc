@@ -272,7 +272,7 @@ TEST(dc_multiple_channels) {
 
     ASSERT_EQ(rtc_data_channel_state(ch1), RTC_DC_OPEN);
     ASSERT_EQ(rtc_data_channel_state(ch2), RTC_DC_OPEN);
-    ASSERT_EQ(mgr_b.channel_count, 2);
+    ASSERT_EQ((int)rtc_u32_map_len(&mgr_b.channels), 2);
 
     printf("    created 2 channels with IDs %u and %u\n", rtc_data_channel_id(ch1),
            rtc_data_channel_id(ch2));

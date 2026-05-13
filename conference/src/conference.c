@@ -6,6 +6,7 @@
  */
 #include "conference/conference.h"
 #include <rtc/rtc.h>
+#include <rtc/rtc_str_map.h>
 #include <media/media_pipeline.h>
 #include <signaling/signaling_client.h>
 
@@ -56,9 +57,11 @@ struct conference {
 
     conf_source_t sources[CONF_MAX_SOURCES];
     int source_count;
+    rtc_str_map_t source_index; /* label → conf_source_t * (borrowed keys) */
 
     conf_peer_t peers[CONF_MAX_PEERS];
     int peer_count;
+    rtc_str_map_t peer_index; /* peer_id → conf_peer_t * (borrowed keys) */
 
     media_pipeline_t *pipeline; /* shared: encode+fanout (send) + decode (recv) */
 };
@@ -66,17 +69,11 @@ struct conference {
 /* ---- Helpers ---- */
 
 static conf_source_t *find_source(conference_t *c, const char *label) {
-    for (int i = 0; i < c->source_count; i++)
-        if (c->sources[i].active && strcmp(c->sources[i].label, label) == 0)
-            return &c->sources[i];
-    return NULL;
+    return (conf_source_t *)rtc_str_map_get(&c->source_index, label);
 }
 
 static conf_peer_t *find_peer(conference_t *c, const char *peer_id) {
-    for (int i = 0; i < c->peer_count; i++)
-        if (c->peers[i].active && strcmp(c->peers[i].peer_id, peer_id) == 0)
-            return &c->peers[i];
-    return NULL;
+    return (conf_peer_t *)rtc_str_map_get(&c->peer_index, peer_id);
 }
 
 static conf_peer_t *alloc_peer(conference_t *c, const char *peer_id) {
@@ -91,12 +88,18 @@ static conf_peer_t *alloc_peer(conference_t *c, const char *peer_id) {
     snprintf(p->peer_id, sizeof(p->peer_id), "%s", peer_id);
     p->active = true;
     p->conf = c;
+    if (rtc_str_map_set(&c->peer_index, p->peer_id, p) != RTC_OK) {
+        p->active = false;
+        c->peer_count--;
+        return NULL;
+    }
     return p;
 }
 
 static void destroy_peer(conference_t *c, conf_peer_t *p) {
     if (!p->active)
         return;
+    rtc_str_map_remove(&c->peer_index, p->peer_id);
     /* Unregister from pipeline fan-out */
     if (c->pipeline)
         media_pipeline_remove_send_peer(c->pipeline, p->peer_id);
@@ -402,6 +405,8 @@ conference_t *conference_create(const conference_config_t *cfg) {
     if (!c)
         return NULL;
     c->cfg = *cfg;
+    rtc_str_map_init(&c->source_index);
+    rtc_str_map_init(&c->peer_index);
     /* Set defaults */
     if (!c->cfg.video_codec)
         c->cfg.video_codec = "VP8";
@@ -506,6 +511,7 @@ int conference_add_video_source(conference_t *c, const char *label, int width, i
         s->active = false;
         return RTC_ERR_GENERIC;
     }
+    rtc_str_map_set(&c->source_index, s->label, s);
     c->source_count++;
 
     RTC_LOG_INFO("Conference: added video source \"%s\" (%dx%d, %dfps, %dkbps)", label, width,
@@ -538,6 +544,7 @@ int conference_add_audio_source(conference_t *c, const char *label, int sample_r
         s->active = false;
         return RTC_ERR_GENERIC;
     }
+    rtc_str_map_set(&c->source_index, s->label, s);
     c->source_count++;
 
     RTC_LOG_INFO("Conference: added audio source \"%s\" (%dHz, %dch, %dbps)", label, sample_rate,
@@ -621,5 +628,7 @@ void conference_destroy(conference_t *c) {
     /* Destroy shared pipeline (owns all encoders/decoders) */
     if (c->pipeline)
         media_pipeline_destroy(c->pipeline);
+    rtc_str_map_free(&c->source_index);
+    rtc_str_map_free(&c->peer_index);
     free(c);
 }

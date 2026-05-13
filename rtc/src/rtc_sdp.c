@@ -5,51 +5,57 @@
  */
 #include "rtc/rtc_sdp.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-/* Helper: write a single media section */
-static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media_t *m,
-                                   const rtc_sdp_t *sdp) {
-    int n;
-
-    /* Media line */
-    if (m->media_type == RTC_MEDIA_AUDIO) {
-        n = snprintf(*p, *remain, "m=audio 9 UDP/TLS/RTP/SAVPF %d\r\n", m->payload_type);
-    } else if (m->media_type == RTC_MEDIA_VIDEO) {
-        n = snprintf(*p, *remain, "m=video 9 UDP/TLS/RTP/SAVPF %d\r\n", m->payload_type);
-    } else {
-        n = snprintf(*p, *remain, "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n");
+/*
+ * Safe write helper: snprintf into (*p, *remain), advance pointers on success.
+ * Returns RTC_OK on success, RTC_ERR_SDP if the buffer would overflow (in which
+ * case *p and *remain are left unchanged). This avoids the unsigned underflow
+ * that used to occur when a snprintf return value exceeded *remain and was
+ * subtracted blindly from it.
+ */
+static int sdp_writef(char **p, size_t *remain, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(*p, *remain, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= *remain) {
+        return RTC_ERR_SDP;
     }
     *p += n;
     *remain -= (size_t)n;
+    return RTC_OK;
+}
 
-    /* c= */
-    n = snprintf(*p, *remain, "c=IN IP4 0.0.0.0\r\n");
-    *p += n;
-    *remain -= (size_t)n;
+#define SDP_WRITE(p, r, ...)                         \
+    do {                                             \
+        int _rc = sdp_writef((p), (r), __VA_ARGS__); \
+        if (_rc != RTC_OK)                           \
+            return _rc;                              \
+    } while (0)
 
-    /* mid */
-    n = snprintf(*p, *remain, "a=mid:%d\r\n", m->mid_index);
-    *p += n;
-    *remain -= (size_t)n;
+/* Helper: write a single media section */
+static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media_t *m,
+                                   const rtc_sdp_t *sdp) {
+    /* Media line */
+    if (m->media_type == RTC_MEDIA_AUDIO) {
+        SDP_WRITE(p, remain, "m=audio 9 UDP/TLS/RTP/SAVPF %d\r\n", m->payload_type);
+    } else if (m->media_type == RTC_MEDIA_VIDEO) {
+        SDP_WRITE(p, remain, "m=video 9 UDP/TLS/RTP/SAVPF %d\r\n", m->payload_type);
+    } else {
+        SDP_WRITE(p, remain, "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n");
+    }
 
-    /* ICE credentials (per media section in BUNDLE) */
-    n = snprintf(*p, *remain, "a=ice-ufrag:%s\r\n", sdp->ice_ufrag);
-    *p += n;
-    *remain -= (size_t)n;
-    n = snprintf(*p, *remain, "a=ice-pwd:%s\r\n", sdp->ice_pwd);
-    *p += n;
-    *remain -= (size_t)n;
+    SDP_WRITE(p, remain, "c=IN IP4 0.0.0.0\r\n");
+    SDP_WRITE(p, remain, "a=mid:%d\r\n", m->mid_index);
+    SDP_WRITE(p, remain, "a=ice-ufrag:%s\r\n", sdp->ice_ufrag);
+    SDP_WRITE(p, remain, "a=ice-pwd:%s\r\n", sdp->ice_pwd);
+    SDP_WRITE(p, remain, "a=fingerprint:sha-256 %s\r\n", sdp->fingerprint);
 
-    /* DTLS fingerprint */
-    n = snprintf(*p, *remain, "a=fingerprint:sha-256 %s\r\n", sdp->fingerprint);
-    *p += n;
-    *remain -= (size_t)n;
-
-    /* Setup role */
     const char *setup_str;
     switch (sdp->setup) {
         case RTC_SETUP_ACTIVE:
@@ -62,39 +68,29 @@ static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media
             setup_str = "actpass";
             break;
     }
-    n = snprintf(*p, *remain, "a=setup:%s\r\n", setup_str);
-    *p += n;
-    *remain -= (size_t)n;
+    SDP_WRITE(p, remain, "a=setup:%s\r\n", setup_str);
 
     /* Direction (for RTP media) */
     if (m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) {
-        n = snprintf(*p, *remain, "a=sendrecv\r\n");
-        *p += n;
-        *remain -= (size_t)n;
-        n = snprintf(*p, *remain, "a=rtcp-mux\r\n");
-        *p += n;
-        *remain -= (size_t)n;
+        SDP_WRITE(p, remain, "a=sendrecv\r\n");
+        SDP_WRITE(p, remain, "a=rtcp-mux\r\n");
     }
 
     /* Codec (for audio/video) */
     if ((m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) &&
         m->codec_name[0]) {
         if (m->media_type == RTC_MEDIA_AUDIO && m->channels > 0) {
-            n = snprintf(*p, *remain, "a=rtpmap:%d %s/%d/%d\r\n", m->payload_type, m->codec_name,
-                         m->clockrate, m->channels);
+            SDP_WRITE(p, remain, "a=rtpmap:%d %s/%d/%d\r\n", m->payload_type, m->codec_name,
+                      m->clockrate, m->channels);
         } else {
-            n = snprintf(*p, *remain, "a=rtpmap:%d %s/%d\r\n", m->payload_type, m->codec_name,
-                         m->clockrate);
+            SDP_WRITE(p, remain, "a=rtpmap:%d %s/%d\r\n", m->payload_type, m->codec_name,
+                      m->clockrate);
         }
-        *p += n;
-        *remain -= (size_t)n;
     }
 
     /* Data channel attributes */
     if (m->media_type == RTC_MEDIA_APPLICATION) {
-        n = snprintf(*p, *remain, "a=sctp-port:5000\r\n");
-        *p += n;
-        *remain -= (size_t)n;
+        SDP_WRITE(p, remain, "a=sctp-port:5000\r\n");
     }
 
     return RTC_OK;
@@ -103,7 +99,6 @@ static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media
 int rtc_sdp_generate(rtc_sdp_t *sdp) {
     char *p = sdp->raw;
     size_t remain = sizeof(sdp->raw);
-    int n;
 
     /* Session ID (use timestamp if not set) */
     if (sdp->session_id[0] == '\0') {
@@ -111,25 +106,10 @@ int rtc_sdp_generate(rtc_sdp_t *sdp) {
                  (unsigned long long)rtc_time_ms());
     }
 
-    /* v= */
-    n = snprintf(p, remain, "v=0\r\n");
-    p += n;
-    remain -= (size_t)n;
-
-    /* o= */
-    n = snprintf(p, remain, "o=mrtc %s 1 IN IP4 0.0.0.0\r\n", sdp->session_id);
-    p += n;
-    remain -= (size_t)n;
-
-    /* s= */
-    n = snprintf(p, remain, "s=mrtc\r\n");
-    p += n;
-    remain -= (size_t)n;
-
-    /* t= */
-    n = snprintf(p, remain, "t=0 0\r\n");
-    p += n;
-    remain -= (size_t)n;
+    SDP_WRITE(&p, &remain, "v=0\r\n");
+    SDP_WRITE(&p, &remain, "o=mrtc %s 1 IN IP4 0.0.0.0\r\n", sdp->session_id);
+    SDP_WRITE(&p, &remain, "s=mrtc\r\n");
+    SDP_WRITE(&p, &remain, "t=0 0\r\n");
 
     /* Determine media count: use multi-media array if populated, else legacy single */
     int effective_media_count = sdp->media_count;
@@ -151,21 +131,17 @@ int rtc_sdp_generate(rtc_sdp_t *sdp) {
     }
 
     /* Bundle group */
-    n = snprintf(p, remain, "a=group:BUNDLE");
-    p += n;
-    remain -= (size_t)n;
+    SDP_WRITE(&p, &remain, "a=group:BUNDLE");
     for (int i = 0; i < effective_media_count; i++) {
-        n = snprintf(p, remain, " %d", effective_media[i].mid_index);
-        p += n;
-        remain -= (size_t)n;
+        SDP_WRITE(&p, &remain, " %d", effective_media[i].mid_index);
     }
-    n = snprintf(p, remain, "\r\n");
-    p += n;
-    remain -= (size_t)n;
+    SDP_WRITE(&p, &remain, "\r\n");
 
     /* Write each media section */
     for (int i = 0; i < effective_media_count; i++) {
-        sdp_write_media_section(&p, &remain, &effective_media[i], sdp);
+        int rc = sdp_write_media_section(&p, &remain, &effective_media[i], sdp);
+        if (rc != RTC_OK)
+            return rc;
     }
 
     /* Candidates (after all media sections — applies to BUNDLE) */
@@ -189,10 +165,8 @@ int rtc_sdp_generate(rtc_sdp_t *sdp) {
                 break;
         }
 
-        n = snprintf(p, remain, "a=candidate:%s %d udp %u %s %u typ %s\r\n", c->foundation,
-                     c->component, c->priority, ip, port, type_str);
-        p += n;
-        remain -= (size_t)n;
+        SDP_WRITE(&p, &remain, "a=candidate:%s %d udp %u %s %u typ %s\r\n", c->foundation,
+                  c->component, c->priority, ip, port, type_str);
     }
 
     sdp->raw_len = (size_t)(p - sdp->raw);
@@ -210,6 +184,17 @@ static const char *sdp_next_line(const char *p, const char *end) {
 
 static bool sdp_line_starts(const char *line, const char *prefix) {
     return strncmp(line, prefix, strlen(prefix)) == 0;
+}
+
+/*
+ * Length-aware prefix check: returns true only if the line is at least as long
+ * as the prefix and matches it. This avoids the underflow that occurs when a
+ * caller subtracts strlen(prefix) from line_len without first verifying that
+ * line_len >= strlen(prefix).
+ */
+static bool sdp_line_starts_n(const char *line, size_t line_len, const char *prefix) {
+    size_t plen = strlen(prefix);
+    return line_len >= plen && strncmp(line, prefix, plen) == 0;
 }
 
 int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
@@ -282,7 +267,7 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
         }
 
         /* ICE ufrag */
-        if (sdp_line_starts(line, "a=ice-ufrag:")) {
+        if (sdp_line_starts_n(line, line_len, "a=ice-ufrag:")) {
             const char *val = line + 12;
             size_t vlen = line_len - 12;
             if (vlen >= ICE_UFRAG_LEN)
@@ -292,7 +277,7 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
         }
 
         /* ICE pwd */
-        if (sdp_line_starts(line, "a=ice-pwd:")) {
+        if (sdp_line_starts_n(line, line_len, "a=ice-pwd:")) {
             const char *val = line + 10;
             size_t vlen = line_len - 10;
             if (vlen >= ICE_PWD_LEN)
@@ -302,7 +287,7 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
         }
 
         /* Fingerprint */
-        if (sdp_line_starts(line, "a=fingerprint:sha-256 ")) {
+        if (sdp_line_starts_n(line, line_len, "a=fingerprint:sha-256 ")) {
             const char *val = line + 22;
             size_t vlen = line_len - 22;
             if (vlen >= sizeof(sdp->fingerprint))

@@ -65,11 +65,7 @@ static int dc_send_message(rtc_data_channel_t *dc, uint8_t msg_type, const uint8
 }
 
 static rtc_data_channel_t *dc_find_by_id(rtc_dc_manager_t *mgr, uint16_t id) {
-    for (int i = 0; i < mgr->channel_count; i++) {
-        if (mgr->channels[i] && mgr->channels[i]->id == id)
-            return mgr->channels[i];
-    }
-    return NULL;
+    return (rtc_data_channel_t *)rtc_u32_map_get(&mgr->channels, (uint32_t)id);
 }
 
 /* ---------- Data Channel API ---------- */
@@ -144,6 +140,8 @@ int rtc_dc_manager_init(rtc_dc_manager_t *mgr, rtc_dc_send_fn send_fn, void *sen
     if (!mgr)
         return RTC_ERR_INVALID;
     memset(mgr, 0, sizeof(*mgr));
+    if (rtc_u32_map_init(&mgr->channels) != RTC_OK)
+        return RTC_ERR_NOMEM;
     mgr->send_fn = send_fn;
     mgr->send_user = send_user;
     mgr->next_id = 0; /* even IDs for offerer, odd for answerer (simplified) */
@@ -152,7 +150,7 @@ int rtc_dc_manager_init(rtc_dc_manager_t *mgr, rtc_dc_send_fn send_fn, void *sen
 
 rtc_data_channel_t *rtc_dc_manager_create_channel(rtc_dc_manager_t *mgr, const char *label,
                                                   const rtc_data_channel_init_t *opts) {
-    if (!mgr || mgr->channel_count >= RTC_DC_MAX_CHANNELS)
+    if (!mgr || rtc_u32_map_len(&mgr->channels) >= RTC_DC_MAX_CHANNELS)
         return NULL;
 
     rtc_data_channel_t *dc = (rtc_data_channel_t *)calloc(1, sizeof(*dc));
@@ -178,7 +176,10 @@ rtc_data_channel_t *rtc_dc_manager_create_channel(rtc_dc_manager_t *mgr, const c
     dc->locally_created = true;
     dc->manager = mgr;
 
-    mgr->channels[mgr->channel_count++] = dc;
+    if (rtc_u32_map_set(&mgr->channels, (uint32_t)dc->id, dc) != RTC_OK) {
+        free(dc);
+        return NULL;
+    }
 
     RTC_LOG_INFO("Data channel created: label=\"%s\" id=%u", dc->label, dc->id);
 
@@ -203,8 +204,11 @@ int rtc_dc_manager_on_dtls_connected(rtc_dc_manager_t *mgr) {
     mgr->dtls_connected = true;
 
     /* Send OPEN for all pending locally-created channels */
-    for (int i = 0; i < mgr->channel_count; i++) {
-        rtc_data_channel_t *dc = mgr->channels[i];
+    rtc_u32_map_iter_t it = {0};
+    uint32_t id;
+    void *val;
+    while (rtc_u32_map_next(&mgr->channels, &it, &id, &val)) {
+        rtc_data_channel_t *dc = (rtc_data_channel_t *)val;
         if (dc && dc->locally_created && dc->state == RTC_DC_CONNECTING) {
             dc_send_message(dc, RTC_DC_MSG_OPEN, (const uint8_t *)dc->label, strlen(dc->label));
         }
@@ -241,7 +245,7 @@ int rtc_dc_manager_recv(rtc_dc_manager_t *mgr, const uint8_t *data, size_t len) 
                     dc->on_open(dc->on_open_user);
             } else {
                 /* Create new channel for remote peer */
-                if (mgr->channel_count >= RTC_DC_MAX_CHANNELS)
+                if (rtc_u32_map_len(&mgr->channels) >= RTC_DC_MAX_CHANNELS)
                     return RTC_ERR_NOMEM;
 
                 dc = (rtc_data_channel_t *)calloc(1, sizeof(*dc));
@@ -262,7 +266,10 @@ int rtc_dc_manager_recv(rtc_dc_manager_t *mgr, const uint8_t *data, size_t len) 
                     dc->label[llen] = '\0';
                 }
 
-                mgr->channels[mgr->channel_count++] = dc;
+                if (rtc_u32_map_set(&mgr->channels, (uint32_t)dc->id, dc) != RTC_OK) {
+                    free(dc);
+                    return RTC_ERR_NOMEM;
+                }
 
                 /* Send ACK */
                 dc_send_message(dc, RTC_DC_MSG_ACK, NULL, 0);
@@ -318,13 +325,16 @@ int rtc_dc_manager_recv(rtc_dc_manager_t *mgr, const uint8_t *data, size_t len) 
 void rtc_dc_manager_close(rtc_dc_manager_t *mgr) {
     if (!mgr)
         return;
-    for (int i = 0; i < mgr->channel_count; i++) {
-        if (mgr->channels[i]) {
-            mgr->channels[i]->state = RTC_DC_CLOSED;
-            free(mgr->channels[i]);
-            mgr->channels[i] = NULL;
+    rtc_u32_map_iter_t it = {0};
+    uint32_t id;
+    void *val;
+    while (rtc_u32_map_next(&mgr->channels, &it, &id, &val)) {
+        rtc_data_channel_t *dc = (rtc_data_channel_t *)val;
+        if (dc) {
+            dc->state = RTC_DC_CLOSED;
+            free(dc);
         }
     }
-    mgr->channel_count = 0;
+    rtc_u32_map_free(&mgr->channels);
     mgr->dtls_connected = false;
 }

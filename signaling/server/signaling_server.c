@@ -216,6 +216,7 @@ int main(int argc, char *argv[]) {
     }
 
     lws_context_destroy(ctx);
+    meeting_manager_close(&g_mgr);
     fprintf(stderr, "Signaling server stopped\n");
     return 0;
 }

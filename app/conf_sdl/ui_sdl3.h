@@ -7,6 +7,7 @@
 #include <SDL3/SDL.h>
 #include <media/video_codec.h>
 #include <media/audio_codec.h>
+#include <rtc/rtc_str_map.h>
 #include <stdbool.h>
 
 #define UI_MAX_TILES 16
@@ -40,6 +41,7 @@ typedef struct {
     /* Tiles */
     ui_tile_t tiles[UI_MAX_TILES];
     int tile_count;
+    rtc_str_map_t tile_index; /* "peer_id:label" → ui_tile_t * (owned keys) */
 
     /* Local preview */
     SDL_Texture *local_preview;

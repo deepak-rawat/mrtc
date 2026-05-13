@@ -6,10 +6,9 @@
 
 #include <rtc/rtc_common.h>
 #include <rtc/rtc_stun.h>
+#include <rtc/rtc_vec.h>
 
 #define TURN_MAX_ALLOCATIONS  64
-#define TURN_MAX_CHANNELS     8
-#define TURN_MAX_PERMISSIONS  16
 #define TURN_DEFAULT_LIFETIME 600 /* 10 minutes */
 
 typedef struct {
@@ -31,10 +30,8 @@ typedef struct {
     uint32_t lifetime;
     uint64_t expires_ms; /* rtc_time_ms() deadline */
 
-    turn_channel_t channels[TURN_MAX_CHANNELS];
-    int channel_count;
-    turn_permission_t permissions[TURN_MAX_PERMISSIONS];
-    int permission_count;
+    rtc_vec_t channels;    /* turn_channel_t */
+    rtc_vec_t permissions; /* turn_permission_t */
 } turn_allocation_t;
 
 typedef struct {

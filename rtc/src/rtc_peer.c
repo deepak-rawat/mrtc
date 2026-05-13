@@ -21,6 +21,7 @@
  * calling sender_send, providing a happens-before guarantee.
  */
 #include "rtc/rtc_peer.h"
+#include "rtc/rtc_u32_map.h"
 #include "rtc_rtp.h"
 #include "rtc_rtcp.h"
 #include "rtc_rate_control.h"
@@ -133,20 +134,9 @@ struct rtc_peer_connection {
     /* Rate controller (created on connection, fed by RTCP RR) */
     rtc_rate_controller_t *rate_ctrl;
 
-    /* Fast SSRC → receiver cache (populated on first RTP packet per stream)
-     *
-     * TODO: Replace linear scan with a small hashmap for O(1) SSRC→receiver
-     * lookup. Currently O(n) where n = number of active streams (typically 2
-     * for audio+video). Acceptable today, but with simulcast or N-track
-     * conferencing n grows and this runs on every inbound RTP/RTCP packet.
-     * A uint32 open-addressing table with power-of-2 size and fibonacci
-     * hashing would be ideal — no allocations, cache-friendly, and O(1)
-     * amortised. */
-    struct {
-        uint32_t ssrc;
-        struct rtc_rtp_receiver *receiver;
-    } recv_cache[RTC_MAX_TRANSCEIVERS];
-    int recv_cache_count;
+    /* Fast SSRC → receiver lookup (populated on first RTP packet per stream).
+     * Hot path: O(1) average via rtc_u32_map (Fibonacci hash + linear probing). */
+    rtc_u32_map_t recv_map;
 };
 
 /* ---- Forward declarations ---- */
@@ -420,15 +410,9 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                 if (rc != RTC_OK)
                     break;
 
-                /* Fast path: lookup receiver by SSRC cache */
-                // TODO: Use a hash map
-                struct rtc_rtp_receiver *r = NULL;
-                for (int i = 0; i < pc->recv_cache_count; i++) {
-                    if (pc->recv_cache[i].ssrc == pkt.header.ssrc) {
-                        r = pc->recv_cache[i].receiver;
-                        break;
-                    }
-                }
+                /* Fast path: O(1) SSRC → receiver lookup */
+                struct rtc_rtp_receiver *r =
+                    (struct rtc_rtp_receiver *)rtc_u32_map_get(&pc->recv_map, pkt.header.ssrc);
 
                 /* Slow path: match by payload type on first packet per SSRC */
                 if (!r) {
@@ -438,12 +422,7 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                             rx->codec.payload_type == pkt.header.payload_type) {
                             r = rx;
                             r->ssrc = pkt.header.ssrc;
-                            /* Add to cache */
-                            if (pc->recv_cache_count < RTC_MAX_TRANSCEIVERS) {
-                                pc->recv_cache[pc->recv_cache_count].ssrc = pkt.header.ssrc;
-                                pc->recv_cache[pc->recv_cache_count].receiver = r;
-                                pc->recv_cache_count++;
-                            }
+                            rtc_u32_map_set(&pc->recv_map, pkt.header.ssrc, r);
                             break;
                         }
                     }
@@ -482,13 +461,11 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                 if (rtcp.header.packet_type == RTCP_PT_SR) {
                     /* Store last SR NTP for DLSR calculation in the matching receiver */
                     uint32_t lsr = (rtcp.sr.ntp_sec & 0xFFFF) << 16 | (rtcp.sr.ntp_frac >> 16);
-                    for (int i = 0; i < pc->recv_cache_count; i++) {
-                        if (pc->recv_cache[i].ssrc == rtcp.sender_ssrc) {
-                            pc->recv_cache[i].receiver->rtcp_stats.last_sr_ntp = lsr;
-                            pc->recv_cache[i].receiver->rtcp_stats.last_sr_recv_time =
-                                rtc_time_ms();
-                            break;
-                        }
+                    struct rtc_rtp_receiver *r =
+                        (struct rtc_rtp_receiver *)rtc_u32_map_get(&pc->recv_map, rtcp.sender_ssrc);
+                    if (r) {
+                        r->rtcp_stats.last_sr_ntp = lsr;
+                        r->rtcp_stats.last_sr_recv_time = rtc_time_ms();
                     }
                 } else if (rtcp.header.packet_type == RTCP_PT_RR) {
                     /* Extract feedback and notify callback */
@@ -681,6 +658,13 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
         return NULL;
     }
 
+    /* Initialize SSRC → receiver lookup map */
+    if (rtc_u32_map_init(&pc->recv_map) != RTC_OK) {
+        rtc_transport_close(&pc->transport);
+        free(pc);
+        return NULL;
+    }
+
     /* Register recv callback */
     rtc_transport_set_recv_callback(&pc->transport, peer_transport_recv, pc);
 
@@ -717,6 +701,7 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc) {
     rtc_dtls_close(&pc->dtls);
     rtc_ice_close(&pc->ice);
     rtc_transport_close(&pc->transport);
+    rtc_u32_map_free(&pc->recv_map);
     if (pc->rate_ctrl) {
         rtc_rate_control_destroy(pc->rate_ctrl);
         pc->rate_ctrl = NULL;
