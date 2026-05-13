@@ -260,7 +260,7 @@ TEST(dtls_srtp_e2e) {
     memcpy(buf, pkt.buf, pkt.buf_len);
     size_t len = pkt.buf_len;
 
-    int rc = rtc_srtp_protect(&client_send, buf, &len);
+    int rc = rtc_srtp_protect(&client_send, buf, &len, sizeof(buf));
     ASSERT_EQ(rc, RTC_OK);
 
     rc = rtc_srtp_unprotect(&server_recv, buf, &len);

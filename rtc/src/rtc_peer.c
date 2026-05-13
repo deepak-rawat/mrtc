@@ -168,7 +168,7 @@ static void peer_rtcp_timer(void *user) {
                 uint8_t buf[RTCP_MAX_PACKET + 4 + SRTP_AUTH_TAG_LEN];
                 memcpy(buf, pkt.buf, pkt.buf_len);
                 size_t len = pkt.buf_len;
-                if (rtc_srtp_protect_rtcp(&pc->srtp_send, buf, &len) == RTC_OK) {
+                if (rtc_srtp_protect_rtcp(&pc->srtp_send, buf, &len, sizeof(buf)) == RTC_OK) {
                     rtc_transport_send_to_remote(&pc->transport, buf, len);
                 }
             }
@@ -182,7 +182,7 @@ static void peer_rtcp_timer(void *user) {
                 uint8_t buf[RTCP_MAX_PACKET + 4 + SRTP_AUTH_TAG_LEN];
                 memcpy(buf, pkt.buf, pkt.buf_len);
                 size_t len = pkt.buf_len;
-                if (rtc_srtp_protect_rtcp(&pc->srtp_send, buf, &len) == RTC_OK) {
+                if (rtc_srtp_protect_rtcp(&pc->srtp_send, buf, &len, sizeof(buf)) == RTC_OK) {
                     rtc_transport_send_to_remote(&pc->transport, buf, len);
                 }
             }

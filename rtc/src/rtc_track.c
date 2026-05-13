@@ -65,7 +65,7 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
 
     /* SRTP protect (sender SRTP ctx only touched from main thread) */
     size_t pkt_len = pkt.buf_len;
-    rc = rtc_srtp_protect(sender->srtp, pkt.buf, &pkt_len);
+    rc = rtc_srtp_protect(sender->srtp, pkt.buf, &pkt_len, sizeof(pkt.buf));
     if (rc != RTC_OK)
         return rc;
 

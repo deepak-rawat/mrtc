@@ -41,6 +41,64 @@ static int srtp_hmac_sha1(const uint8_t *key, size_t key_len, const uint8_t *dat
 }
 
 /*
+ * Replay window check (RFC 3711 §3.3.2).
+ * `index` is the packet's reconstructed 48-bit RTP index (ROC<<16 | seq) or
+ * 31-bit SRTCP index. Returns RTC_OK if the packet is fresh (and updates the
+ * window on success); RTC_ERR_SRTP for duplicate or too-old packets.
+ * Must be called AFTER auth-tag verification to avoid spoofed-replay DoS.
+ */
+static int srtp_replay_check(rtc_srtp_replay_t *r, uint64_t index) {
+    if (!r->initialized) {
+        r->initialized = true;
+        r->highest_index = index;
+        r->window[0] = 1ULL; /* bit 0 = highest */
+        r->window[1] = 0;
+        return RTC_OK;
+    }
+
+    if (index > r->highest_index) {
+        /* New highest: shift window left by delta, set new bit 0 */
+        uint64_t delta = index - r->highest_index;
+        if (delta >= SRTP_REPLAY_WINDOW_SIZE) {
+            /* Big jump — clear the whole window. */
+            r->window[0] = 1ULL;
+            r->window[1] = 0;
+        } else if (delta >= 64) {
+            r->window[1] = r->window[0] << (delta - 64);
+            r->window[0] = 0;
+            r->window[0] |= 1ULL;
+        } else {
+            /* delta in [1,63] */
+            uint64_t hi_shift =
+                (r->window[1] << delta) | (delta == 0 ? 0 : (r->window[0] >> (64 - delta)));
+            r->window[1] = hi_shift;
+            r->window[0] = (r->window[0] << delta) | 1ULL;
+        }
+        r->highest_index = index;
+        return RTC_OK;
+    }
+
+    /* index <= highest_index: check if within window */
+    uint64_t delta = r->highest_index - index;
+    if (delta >= SRTP_REPLAY_WINDOW_SIZE) {
+        RTC_LOG_WARN("SRTP: packet too old (delta=%llu) — replay rejected",
+                     (unsigned long long)delta);
+        return RTC_ERR_SRTP;
+    }
+
+    uint64_t bit_index = delta;
+    uint64_t mask = 1ULL << (bit_index & 63);
+    uint64_t *word = &r->window[bit_index >> 6];
+    if (*word & mask) {
+        RTC_LOG_WARN("SRTP: duplicate packet (index=%llu) — replay rejected",
+                     (unsigned long long)index);
+        return RTC_ERR_SRTP;
+    }
+    *word |= mask;
+    return RTC_OK;
+}
+
+/*
  * SRTP Key Derivation Function (RFC 3711, Section 4.3.1)
  *
  * derived_key = AES-CM(master_key, master_salt XOR (label << 48))
@@ -193,11 +251,14 @@ static int srtp_aes_cm(const uint8_t *session_key, const uint8_t *session_salt, 
     return RTC_OK;
 }
 
-int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
+int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_cap) {
     if (!ctx->initialized)
         return RTC_ERR_SRTP;
     if (*len < 12)
         return RTC_ERR_INVALID; /* minimum RTP header */
+    /* Ensure room to append 80-bit auth tag without writing past buf_cap. */
+    if (*len > buf_cap || buf_cap - *len < SRTP_AUTH_TAG_LEN)
+        return RTC_ERR_NOMEM;
 
     /* Parse RTP header for SSRC and sequence number */
     uint16_t seq = ((uint16_t)buf[2] << 8) | buf[3];
@@ -287,6 +348,13 @@ int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
         return RTC_ERR_SRTP;
     }
 
+    /* Replay check (RFC 3711 §3.3.2) — after auth verify to avoid spoofed
+     * replay rejection. Packet index = (ROC << 16) | seq. */
+    uint64_t pkt_index = ((uint64_t)roc << 16) | seq;
+    int replay_rc = srtp_replay_check(&ctx->rtp_replay, pkt_index);
+    if (replay_rc != RTC_OK)
+        return replay_rc;
+
     /* Determine header length */
     size_t hdr_len = 12;
     uint8_t cc = buf[0] & 0x0F;
@@ -359,11 +427,14 @@ static int srtcp_aes_cm(const uint8_t *session_key, const uint8_t *session_salt,
     return RTC_OK;
 }
 
-int rtc_srtp_protect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
+int rtc_srtp_protect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_cap) {
     if (!ctx->initialized)
         return RTC_ERR_SRTP;
     if (*len < 8)
         return RTC_ERR_INVALID; /* minimum: RTCP header (4) + SSRC (4) */
+    /* SRTCP appends 4-byte index + 10-byte auth tag. */
+    if (*len > buf_cap || buf_cap - *len < 4 + SRTP_AUTH_TAG_LEN)
+        return RTC_ERR_NOMEM;
 
     /* Parse SSRC from byte 4..7 of RTCP packet */
     uint32_t ssrc =
@@ -433,6 +504,11 @@ int rtc_srtp_unprotect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
         RTC_LOG_ERR("SRTCP: authentication failed");
         return RTC_ERR_SRTP;
     }
+
+    /* Replay check (RFC 3711 §3.3.2) — after auth verify. */
+    int replay_rc = srtp_replay_check(&ctx->rtcp_replay, (uint64_t)index);
+    if (replay_rc != RTC_OK)
+        return replay_rc;
 
     /* The plaintext RTCP packet length is everything before the SRTCP index */
     size_t rtcp_len = idx_start;

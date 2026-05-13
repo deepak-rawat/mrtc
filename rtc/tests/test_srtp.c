@@ -67,7 +67,7 @@ TEST(srtp_protect_encrypts) {
 
     /* Protect in-place */
     size_t srtp_len = pkt.buf_len;
-    int rc = rtc_srtp_protect(&ctx, pkt.buf, &srtp_len);
+    int rc = rtc_srtp_protect(&ctx, pkt.buf, &srtp_len, sizeof(pkt.buf));
     ASSERT_EQ(rc, RTC_OK);
 
     /* Length should grow by auth tag (10 bytes) */
@@ -114,7 +114,7 @@ TEST(srtp_roundtrip) {
     memcpy(buf, pkt.buf, pkt.buf_len);
     size_t len = pkt.buf_len;
 
-    int rc = rtc_srtp_protect(&send_ctx, buf, &len);
+    int rc = rtc_srtp_protect(&send_ctx, buf, &len, sizeof(buf));
     ASSERT_EQ(rc, RTC_OK);
 
     /* Unprotect */
@@ -153,7 +153,7 @@ TEST(srtp_wrong_key_fails) {
     uint8_t buf[1500];
     memcpy(buf, pkt.buf, pkt.buf_len);
     size_t len = pkt.buf_len;
-    rtc_srtp_protect(&send_ctx, buf, &len);
+    rtc_srtp_protect(&send_ctx, buf, &len, sizeof(buf));
 
     /* Try to unprotect with wrong key */
     int rc = rtc_srtp_unprotect(&bad_ctx, buf, &len);
@@ -185,7 +185,7 @@ TEST(srtp_multiple_packets) {
         memcpy(buf, pkt.buf, pkt.buf_len);
         size_t len = pkt.buf_len;
 
-        int rc = rtc_srtp_protect(&send_ctx, buf, &len);
+        int rc = rtc_srtp_protect(&send_ctx, buf, &len, sizeof(buf));
         ASSERT_EQ(rc, RTC_OK);
 
         rc = rtc_srtp_unprotect(&recv_ctx, buf, &len);
@@ -229,7 +229,7 @@ TEST(srtcp_roundtrip) {
     uint8_t buf[1500];
     memcpy(buf, rtcp_pkt.buf, rtcp_pkt.buf_len);
     size_t len = rtcp_pkt.buf_len;
-    rc = rtc_srtp_protect_rtcp(&send_ctx, buf, &len);
+    rc = rtc_srtp_protect_rtcp(&send_ctx, buf, &len, sizeof(buf));
     ASSERT_EQ(rc, RTC_OK);
 
     /* Should grow by 4 (SRTCP index) + 10 (auth tag) = 14 bytes */
@@ -275,7 +275,7 @@ TEST(srtcp_wrong_key_fails) {
     uint8_t buf[1500];
     memcpy(buf, rtcp_pkt.buf, rtcp_pkt.buf_len);
     size_t len = rtcp_pkt.buf_len;
-    rtc_srtp_protect_rtcp(&send_ctx, buf, &len);
+    rtc_srtp_protect_rtcp(&send_ctx, buf, &len, sizeof(buf));
 
     /* Try to unprotect with wrong key */
     int rc = rtc_srtp_unprotect_rtcp(&bad_ctx, buf, &len);
@@ -285,6 +285,83 @@ TEST(srtcp_wrong_key_fails) {
 
     rtc_srtp_close(&send_ctx);
     rtc_srtp_close(&bad_ctx);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: replay protection rejects duplicate SRTP packets             */
+/* ------------------------------------------------------------------ */
+TEST(srtp_replay_rejected) {
+    rtc_srtp_ctx_t send_ctx, recv_ctx;
+    rtc_srtp_init(&send_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
+    rtc_srtp_init(&recv_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
+
+    /* Build, protect once */
+    uint8_t payload[] = "replay me";
+    rtc_rtp_packet_t pkt;
+    rtc_rtp_build(&pkt, 111, 100, 0, 0xCAFEBABE, false, payload, sizeof(payload) - 1);
+
+    uint8_t buf[1500];
+    memcpy(buf, pkt.buf, pkt.buf_len);
+    size_t len = pkt.buf_len;
+    int rc = rtc_srtp_protect(&send_ctx, buf, &len, sizeof(buf));
+    ASSERT_EQ(rc, RTC_OK);
+
+    /* Keep a copy of the SRTP-protected packet for replay */
+    uint8_t replay_buf[1500];
+    memcpy(replay_buf, buf, len);
+    size_t replay_len = len;
+
+    /* First unprotect succeeds */
+    rc = rtc_srtp_unprotect(&recv_ctx, buf, &len);
+    ASSERT_EQ(rc, RTC_OK);
+
+    /* Replay the SAME bytes — should be rejected by replay window */
+    rc = rtc_srtp_unprotect(&recv_ctx, replay_buf, &replay_len);
+    ASSERT(rc != RTC_OK);
+
+    printf("    SRTP replay correctly rejected\n");
+
+    rtc_srtp_close(&send_ctx);
+    rtc_srtp_close(&recv_ctx);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: replay protection rejects duplicate SRTCP packets            */
+/* ------------------------------------------------------------------ */
+TEST(srtcp_replay_rejected) {
+    rtc_srtp_ctx_t send_ctx, recv_ctx;
+    rtc_srtp_init(&send_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
+    rtc_srtp_init(&recv_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
+
+    rtc_rtcp_stats_t stats;
+    rtc_rtcp_stats_init(&stats, 0xFEEDFACE);
+    for (int i = 0; i < 5; i++)
+        rtc_rtcp_stats_on_rtp_send(&stats, (uint32_t)(i * 960), 100);
+
+    rtc_rtcp_packet_t rtcp_pkt;
+    int rc = rtc_rtcp_build_sr(&rtcp_pkt, &stats);
+    ASSERT_EQ(rc, RTC_OK);
+
+    uint8_t buf[1500];
+    memcpy(buf, rtcp_pkt.buf, rtcp_pkt.buf_len);
+    size_t len = rtcp_pkt.buf_len;
+    rc = rtc_srtp_protect_rtcp(&send_ctx, buf, &len, sizeof(buf));
+    ASSERT_EQ(rc, RTC_OK);
+
+    uint8_t replay_buf[1500];
+    memcpy(replay_buf, buf, len);
+    size_t replay_len = len;
+
+    rc = rtc_srtp_unprotect_rtcp(&recv_ctx, buf, &len);
+    ASSERT_EQ(rc, RTC_OK);
+
+    rc = rtc_srtp_unprotect_rtcp(&recv_ctx, replay_buf, &replay_len);
+    ASSERT(rc != RTC_OK);
+
+    printf("    SRTCP replay correctly rejected\n");
+
+    rtc_srtp_close(&send_ctx);
+    rtc_srtp_close(&recv_ctx);
 }
 
 /* ------------------------------------------------------------------ */
@@ -303,6 +380,8 @@ int main(void) {
     RUN_TEST(srtp_multiple_packets);
     RUN_TEST(srtcp_roundtrip);
     RUN_TEST(srtcp_wrong_key_fails);
+    RUN_TEST(srtp_replay_rejected);
+    RUN_TEST(srtcp_replay_rejected);
 
     rtc_cleanup();
     TEST_SUMMARY();
