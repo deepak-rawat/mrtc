@@ -303,6 +303,54 @@ TEST(dc_send_before_open) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: 16-bit channel ID round-trips (regression for 8-bit truncation) */
+/* ------------------------------------------------------------------ */
+TEST(dc_large_channel_id) {
+    reset_globals();
+    rtc_dc_manager_t mgr_a, mgr_b;
+    g_peer_a = &mgr_a;
+    g_peer_b = &mgr_b;
+
+    rtc_dc_manager_init(&mgr_a, loopback_send_a, NULL);
+    rtc_dc_manager_init(&mgr_b, loopback_send_b, NULL);
+    rtc_dc_manager_on_channel(&mgr_b, on_remote_channel, NULL);
+
+    /* Force a negotiated channel ID well past the 8-bit boundary. */
+    rtc_data_channel_init_t opts = {.ordered = true,
+                                    .max_retransmits = -1,
+                                    .max_packet_life = -1,
+                                    .protocol = "",
+                                    .negotiated = true,
+                                    .id = 0x1234};
+    rtc_data_channel_t *dc_a = rtc_dc_manager_create_channel(&mgr_a, "wide", &opts);
+    ASSERT(dc_a != NULL);
+    ASSERT_EQ(rtc_data_channel_id(dc_a), 0x1234);
+
+    rtc_data_channel_on_open(dc_a, on_open, NULL);
+    rtc_dc_manager_on_dtls_connected(&mgr_a);
+
+    /* The OPEN message must carry the full 16-bit ID; if the wire format
+     * truncated to 8 bits, B would create a channel with id 0x34 and the
+     * ACK would never match A's pending channel. */
+    ASSERT_EQ(rtc_data_channel_state(dc_a), RTC_DC_OPEN);
+    ASSERT(g_remote_channel != NULL);
+    ASSERT_EQ(rtc_data_channel_id(g_remote_channel), 0x1234);
+
+    /* Data round-trip on the high-id channel */
+    rtc_data_channel_on_message(g_remote_channel, on_message, NULL);
+    uint8_t payload[] = {0x55, 0xAA, 0x55, 0xAA};
+    int rc = rtc_data_channel_send(dc_a, payload, sizeof(payload));
+    ASSERT_EQ(rc, RTC_OK);
+    ASSERT_EQ(g_last_msg_len, sizeof(payload));
+    ASSERT_MEM_EQ(g_last_msg, payload, sizeof(payload));
+
+    printf("    16-bit channel id 0x%04x round-trip OK\n", rtc_data_channel_id(dc_a));
+
+    rtc_dc_manager_close(&mgr_a);
+    rtc_dc_manager_close(&mgr_b);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Data Channel Tests\n");
@@ -318,6 +366,7 @@ int main(void) {
     RUN_TEST(dc_close);
     RUN_TEST(dc_multiple_channels);
     RUN_TEST(dc_send_before_open);
+    RUN_TEST(dc_large_channel_id);
 
     rtc_cleanup();
     TEST_SUMMARY();

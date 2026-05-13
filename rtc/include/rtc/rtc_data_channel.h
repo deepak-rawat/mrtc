@@ -6,7 +6,8 @@
  * DTLS application data path.
  *
  * Wire format (each message):
- *   [1 byte: channel_id] [1 byte: msg_type] [2 bytes: length (BE)] [payload]
+ *   [2 bytes: channel_id (BE)] [1 byte: msg_type] [1 byte: reserved (0)]
+ *   [2 bytes: length (BE)] [payload]
  *
  * Channel negotiation uses a simple open/ack handshake.
  */
@@ -19,7 +20,7 @@
 #define RTC_DC_MAX_CHANNELS 16
 #define RTC_DC_MAX_LABEL    128
 #define RTC_DC_MAX_MSG_SIZE 65535
-#define RTC_DC_HEADER_SIZE  4
+#define RTC_DC_HEADER_SIZE  6
 
 /* Internal message types for channel protocol */
 #define RTC_DC_MSG_OPEN  0x01

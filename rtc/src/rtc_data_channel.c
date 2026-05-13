@@ -43,10 +43,18 @@ static int dc_send_message(rtc_data_channel_t *dc, uint8_t msg_type, const uint8
         return RTC_ERR_INVALID;
 
     uint8_t header[RTC_DC_HEADER_SIZE];
-    header[0] = (uint8_t)(dc->id & 0xFF);
-    header[1] = msg_type;
-    header[2] = (uint8_t)((len >> 8) & 0xFF);
-    header[3] = (uint8_t)(len & 0xFF);
+    /* Wire format:
+     *   [0-1] channel_id (BE u16)
+     *   [2]   msg_type
+     *   [3]   reserved (0)
+     *   [4-5] payload length (BE u16)
+     */
+    header[0] = (uint8_t)((dc->id >> 8) & 0xFF);
+    header[1] = (uint8_t)(dc->id & 0xFF);
+    header[2] = msg_type;
+    header[3] = 0;
+    header[4] = (uint8_t)((len >> 8) & 0xFF);
+    header[5] = (uint8_t)(len & 0xFF);
 
     /* Send header + payload as one message.
      * For simplicity, copy into a single buffer. */
@@ -223,9 +231,10 @@ int rtc_dc_manager_recv(rtc_dc_manager_t *mgr, const uint8_t *data, size_t len) 
     if (len < RTC_DC_HEADER_SIZE)
         return RTC_ERR_INVALID;
 
-    uint16_t channel_id = data[0];
-    uint8_t msg_type = data[1];
-    uint16_t payload_len = (uint16_t)((uint16_t)data[2] << 8 | data[3]);
+    uint16_t channel_id = (uint16_t)((uint16_t)data[0] << 8 | data[1]);
+    uint8_t msg_type = data[2];
+    /* data[3] is reserved */
+    uint16_t payload_len = (uint16_t)((uint16_t)data[4] << 8 | data[5]);
 
     if (RTC_DC_HEADER_SIZE + payload_len > len)
         return RTC_ERR_INVALID;
