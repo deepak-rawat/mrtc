@@ -85,8 +85,9 @@ static void send_error(turn_server_t *ts, uint16_t method, const uint8_t txn_id[
     memcpy(resp.buf + pos, err, 4);
     pos += 4;
 
-    if (error_code == 401) {
-        /* Add REALM */
+    if (error_code == 401 || error_code == 438) {
+        /* RFC 8489 §10.2.2: 438 STALE_NONCE MUST include REALM and NONCE
+         * so the client can authenticate its next request. */
         size_t rlen = strlen(ts->realm);
         write_u16(resp.buf + pos, STUN_ATTR_REALM);
         pos += 2;
@@ -113,28 +114,50 @@ static void send_error(turn_server_t *ts, uint16_t method, const uint8_t txn_id[
     send_response(ts, resp.buf, resp.buf_len, to);
 }
 
+/* Rotate the server nonce when it exceeds TURN_NONCE_LIFETIME_MS. Subsequent
+ * requests carrying the old nonce will be rejected with 438 STALE_NONCE. */
+static void refresh_nonce_if_stale(turn_server_t *ts) {
+    uint64_t now = rtc_time_ms();
+    if (now - ts->nonce_generated_ms >= TURN_NONCE_LIFETIME_MS) {
+        rtc_random_string(ts->nonce, sizeof(ts->nonce));
+        ts->nonce_generated_ms = now;
+    }
+}
+
 /* Verify long-term credentials on a request */
 static int verify_credentials(turn_server_t *ts, const rtc_stun_msg_t *msg, const uint8_t *raw,
                               size_t raw_len) {
     uint16_t ulen;
     const uint8_t *uval = rtc_stun_find_attr(msg, STUN_ATTR_USERNAME, &ulen);
     if (!uval)
-        return -1;
+        return 401;
 
     /* Check username matches */
     if (ulen != strlen(ts->username) || memcmp(uval, ts->username, ulen) != 0)
-        return -1;
+        return 401;
+
+    /* Check NONCE matches current server nonce (RFC 8489 §9.2). */
+    uint16_t nlen;
+    const uint8_t *nval = rtc_stun_find_attr(msg, STUN_ATTR_NONCE, &nlen);
+    if (!nval)
+        return 401;
+    size_t cur_nlen = strlen(ts->nonce);
+    if (nlen != cur_nlen || memcmp(nval, ts->nonce, nlen) != 0)
+        return 438;
 
     /* Verify MESSAGE-INTEGRITY with long-term key.  lt_key is 16 raw bytes
      * of MD5(user:realm:pass) — may contain NUL, so use the byte-key variant. */
-    return rtc_stun_verify_integrity_key(raw, raw_len, ts->lt_key, sizeof(ts->lt_key));
+    if (rtc_stun_verify_integrity_key(raw, raw_len, ts->lt_key, sizeof(ts->lt_key)) != RTC_OK)
+        return 401;
+    return RTC_OK;
 }
 
 static void handle_allocate(turn_server_t *ts, const rtc_stun_msg_t *msg, const uint8_t *raw,
                             size_t raw_len, const rtc_addr_t *from) {
     /* Check credentials */
-    if (verify_credentials(ts, msg, raw, raw_len) != RTC_OK) {
-        send_error(ts, STUN_METHOD_ALLOCATE, msg->txn_id, 401, from);
+    int auth_err = verify_credentials(ts, msg, raw, raw_len);
+    if (auth_err != RTC_OK) {
+        send_error(ts, STUN_METHOD_ALLOCATE, msg->txn_id, auth_err, from);
         return;
     }
 
@@ -251,8 +274,9 @@ static void handle_allocate(turn_server_t *ts, const rtc_stun_msg_t *msg, const 
 
 static void handle_refresh(turn_server_t *ts, const rtc_stun_msg_t *msg, const uint8_t *raw,
                            size_t raw_len, const rtc_addr_t *from) {
-    if (verify_credentials(ts, msg, raw, raw_len) != RTC_OK) {
-        send_error(ts, STUN_METHOD_REFRESH, msg->txn_id, 401, from);
+    int auth_err = verify_credentials(ts, msg, raw, raw_len);
+    if (auth_err != RTC_OK) {
+        send_error(ts, STUN_METHOD_REFRESH, msg->txn_id, auth_err, from);
         return;
     }
 
@@ -295,8 +319,9 @@ static void handle_refresh(turn_server_t *ts, const rtc_stun_msg_t *msg, const u
 
 static void handle_create_permission(turn_server_t *ts, const rtc_stun_msg_t *msg,
                                      const uint8_t *raw, size_t raw_len, const rtc_addr_t *from) {
-    if (verify_credentials(ts, msg, raw, raw_len) != RTC_OK) {
-        send_error(ts, STUN_METHOD_CREATE_PERM, msg->txn_id, 401, from);
+    int auth_err = verify_credentials(ts, msg, raw, raw_len);
+    if (auth_err != RTC_OK) {
+        send_error(ts, STUN_METHOD_CREATE_PERM, msg->txn_id, auth_err, from);
         return;
     }
 
@@ -339,8 +364,9 @@ static void handle_create_permission(turn_server_t *ts, const rtc_stun_msg_t *ms
 
 static void handle_channel_bind(turn_server_t *ts, const rtc_stun_msg_t *msg, const uint8_t *raw,
                                 size_t raw_len, const rtc_addr_t *from) {
-    if (verify_credentials(ts, msg, raw, raw_len) != RTC_OK) {
-        send_error(ts, STUN_METHOD_CHANNEL_BIND, msg->txn_id, 401, from);
+    int auth_err = verify_credentials(ts, msg, raw, raw_len);
+    if (auth_err != RTC_OK) {
+        send_error(ts, STUN_METHOD_CHANNEL_BIND, msg->txn_id, auth_err, from);
         return;
     }
 
@@ -444,6 +470,7 @@ int turn_server_init(turn_server_t *ts, const char *public_ip, uint16_t port, co
 
     /* Generate nonce */
     rtc_random_string(ts->nonce, sizeof(ts->nonce));
+    ts->nonce_generated_ms = rtc_time_ms();
 
     /* Create listen socket */
     ts->listen_sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -481,6 +508,9 @@ void turn_server_handle_packet(turn_server_t *ts, const uint8_t *data, size_t le
     /* STUN message */
     if (len < STUN_HEADER_SIZE)
         return;
+
+    /* Rotate the server nonce when it gets too old. */
+    refresh_nonce_if_stale(ts);
 
     rtc_stun_msg_t msg;
     if (rtc_stun_parse(&msg, data, len) != RTC_OK)

@@ -11,6 +11,10 @@
 #define TURN_MAX_ALLOCATIONS  64
 #define TURN_DEFAULT_LIFETIME 600 /* 10 minutes */
 
+/* Nonce lifetime (RFC 8489 §9.2 recommends rotation). Clients that send
+ * an expired nonce receive 438 STALE_NONCE with a fresh REALM/NONCE pair. */
+#define TURN_NONCE_LIFETIME_MS (3600u * 1000u) /* 1 hour */
+
 typedef struct {
     uint16_t channel;
     rtc_addr_t peer_addr;
@@ -41,6 +45,7 @@ typedef struct {
     const char *public_ip;
     uint8_t lt_key[16]; /* MD5(username:realm:password) */
     char nonce[64];
+    uint64_t nonce_generated_ms;
 
     rtc_socket_t listen_sock;
     turn_allocation_t allocs[TURN_MAX_ALLOCATIONS];
