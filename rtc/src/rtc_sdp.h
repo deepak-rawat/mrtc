@@ -12,6 +12,7 @@
 
 #include "rtc_common.h"
 #include "rtc_vec.h"
+#include "rtc/rtc_peer.h" /* SDP_MAX_SIZE, rtc_sdp_type_t (public surface) */
 
 /* ICE candidate types (shared with ICE agent internals) */
 #define ICE_MAX_CANDIDATES 16
@@ -32,14 +33,7 @@ typedef struct {
     char foundation[8];
 } rtc_ice_candidate_t;
 
-#define SDP_MAX_SIZE  8192
 #define SDP_MAX_MEDIA 4
-
-typedef enum {
-    RTC_SDP_OFFER,
-    RTC_SDP_ANSWER,
-    RTC_SDP_PRANSWER,
-} rtc_sdp_type_t;
 
 typedef enum {
     RTC_MEDIA_AUDIO,

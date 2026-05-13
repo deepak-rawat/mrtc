@@ -10,7 +10,6 @@
 
 /* ---- Public API headers ---- */
 #include "rtc_common.h"
-#include "rtc_sdp.h"
 #include "rtc_track.h"
 #include "rtc_data_channel.h"
 #include "rtc_peer.h"

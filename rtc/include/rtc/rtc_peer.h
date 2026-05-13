@@ -17,9 +17,20 @@
 #define RTC_PEER_H
 
 #include "rtc_common.h"
-#include "rtc_sdp.h"
 #include "rtc_track.h"
 #include "rtc_data_channel.h"
+
+/* ---- SDP minimal public surface ----
+ * The full SDP parser (rtc_sdp.h) is internal to the rtc library. Public
+ * callers only need the wire-size cap and the offer/answer enum used in
+ * rtc_desc_t. */
+#define SDP_MAX_SIZE 8192
+
+typedef enum {
+    RTC_SDP_OFFER,
+    RTC_SDP_ANSWER,
+    RTC_SDP_PRANSWER,
+} rtc_sdp_type_t;
 
 /* ---- Opaque peer connection ---- */
 typedef struct rtc_peer_connection rtc_peer_connection_t;

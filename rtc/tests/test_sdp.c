@@ -10,6 +10,7 @@
  *   6. SDP with multiple candidates
  */
 #include <rtc/rtc.h>
+#include "rtc_sdp.h"
 #include "test_harness.h"
 
 /* ------------------------------------------------------------------ */

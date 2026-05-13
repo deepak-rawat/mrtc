@@ -30,6 +30,7 @@
 #include "rtc_ice.h"
 #include "rtc_dtls.h"
 #include "rtc_srtp.h"
+#include "rtc_sdp.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
