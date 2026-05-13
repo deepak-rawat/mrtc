@@ -14,6 +14,8 @@
 #include "rtc_common.h"
 #include "rtc_poller.h"
 
+#include <stdatomic.h>
+
 #define RTC_TRANSPORT_MAX_TIMERS 16
 #define RTC_TRANSPORT_BUF_SIZE   2048
 
@@ -55,7 +57,7 @@ typedef struct rtc_transport {
 
     /* Thread */
     rtc_thread_t thread;
-    volatile bool running;
+    _Atomic bool running; /* set false from any thread to stop poller loop */
     rtc_mutex_t mutex;
 
     /* Packet callback */

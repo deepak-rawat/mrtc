@@ -238,7 +238,7 @@ struct rtc_peer_connection {
     rtc_dc_manager_t dc_manager;          // Data channels
     rtc_rate_controller_t *rate_ctrl;     // AIMD rate control
     rtc_desc_t local_desc, remote_desc;
-    volatile rtc_connection_state_t state;
+    _Atomic rtc_connection_state_t state;
 };
 ```
 
@@ -248,7 +248,9 @@ struct rtc_peer_connection {
 
 - **Main thread:** API calls, frame capture, UI rendering
 - **Transport thread:** protocol state machine, socket I/O, packet callbacks
-- Peer connection uses volatile state flags for cross-thread observation
+- Peer connection uses C11 `_Atomic` state flags for cross-thread observation
+  (plain reads/writes are seq_cst, giving acquire/release publication of any
+  protocol state written before the state transition).
 - Transport mutex protects timer queue + callback registration
 
 ## Tests
@@ -279,4 +281,3 @@ struct rtc_peer_connection {
 - No SRTP replay protection
 - Single rate controller shared across all senders per peer
 - SSRC→receiver lookup is O(n) linear scan (should use hashmap)
-- `volatile` used instead of `_Atomic` for cross-thread state flags

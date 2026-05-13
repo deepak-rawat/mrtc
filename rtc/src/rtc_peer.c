@@ -17,8 +17,9 @@
  *
  * The SRTP send context is initialized on the transport thread but used
  * from the main thread (via rtc_rtp_sender_send). This is safe because
- * the main thread observes RTC_CONNECTION_CONNECTED (volatile) before
- * calling sender_send, providing a happens-before guarantee.
+ * the main thread observes RTC_CONNECTION_CONNECTED before calling
+ * sender_send, providing a happens-before guarantee via the _Atomic
+ * connection_state (sequentially-consistent on plain read/write).
  */
 #include "rtc/rtc_peer.h"
 #include "rtc/rtc_u32_map.h"
@@ -30,6 +31,7 @@
 #include "rtc_dtls.h"
 #include "rtc_srtp.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -99,11 +101,14 @@ struct rtc_peer_connection {
     rtc_sdp_t local_sdp; /* parsed internal SDP */
     rtc_sdp_t remote_sdp;
 
-    /* States (written on transport thread, read from any thread) */
-    volatile rtc_signaling_state_t signaling_state;
-    volatile rtc_ice_gathering_state_t ice_gathering_state;
-    volatile rtc_ice_connection_state_t ice_connection_state;
-    volatile rtc_connection_state_t connection_state;
+    /* States: _Atomic so cross-thread reads/writes carry full memory ordering.
+     * Written on transport thread, read from any thread.  Plain C11 reads
+     * and assignments on _Atomic types are seq_cst, which is sufficient to
+     * publish protocol state (e.g. srtp_send) alongside CONNECTED. */
+    _Atomic rtc_signaling_state_t signaling_state;
+    _Atomic rtc_ice_gathering_state_t ice_gathering_state;
+    _Atomic rtc_ice_connection_state_t ice_connection_state;
+    _Atomic rtc_connection_state_t connection_state;
 
     /* Callbacks (set from main thread before connect, read on transport thread) */
     rtc_on_signaling_state_fn on_signaling_state;
