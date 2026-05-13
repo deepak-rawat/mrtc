@@ -16,23 +16,35 @@
 #include <string.h>
 
 /* ---- Per-stream state ---- */
-/* media_send_stream_t is the public opaque handle (for send streams).
-   media_recv_stream_t is the public opaque handle (for recv streams).
-   Both share the same underlying struct layout. */
-typedef struct media_send_stream {
+/* media_send_stream_t and media_recv_stream_t are the public opaque handles.
+ * Their layouts diverge: send streams hold only encoder state (~14 KB),
+ * recv streams hold the decoder + VP8 reassembly buffer + jitter buffer
+ * (~270 KB dominated by the depacketizer). Keeping them split saves the
+ * unused side per stream. */
+struct media_send_stream {
     char label[MP_LABEL_SIZE];
-    char peer_id[MP_LABEL_SIZE]; /* recv only */
     uint32_t ssrc;
     bool is_video;
     bool active;
 
-    /* Encode side (send streams) */
+    /* Encode side */
     video_encoder_t video_enc;
     audio_encoder_t audio_enc;
     bool has_encoder;
     uint8_t audio_out[4000];
 
-    /* Decode side (recv streams) */
+    /* Debug stats */
+    video_send_stats_t send_stats;
+};
+
+struct media_recv_stream {
+    char label[MP_LABEL_SIZE];
+    char peer_id[MP_LABEL_SIZE];
+    uint32_t ssrc;
+    bool is_video;
+    bool active;
+
+    /* Decode side */
     video_decoder_t video_dec;
     audio_decoder_t audio_dec;
     rtc_vp8_depacketizer_t vp8_depack;
@@ -40,14 +52,7 @@ typedef struct media_send_stream {
     bool has_decoder;
 
     /* Debug stats */
-    video_send_stats_t send_stats;
     video_recv_stats_t recv_stats;
-} media_stream_t;
-
-/* media_recv_stream_t is the same layout, defined for opaque pointer compatibility.
-   We cast between media_stream_t* and media_recv_stream_t* internally. */
-struct media_recv_stream {
-    char _opaque;
 };
 
 /* ---- Per-peer send target ---- */
@@ -62,7 +67,7 @@ struct media_pipeline {
     media_send_stream_t send[MP_MAX_SEND_STREAMS];
     int send_count;
 
-    media_stream_t recv[MP_MAX_RECV_STREAMS];
+    media_recv_stream_t recv[MP_MAX_RECV_STREAMS];
     int recv_count;
 
     mp_send_peer_t send_peers[MP_MAX_SEND_PEERS];
@@ -83,14 +88,14 @@ struct media_pipeline {
 
 /* ---- Helpers ---- */
 
-static media_stream_t *find_recv_by_ssrc(media_pipeline_t *p, uint32_t ssrc) {
+static media_recv_stream_t *find_recv_by_ssrc(media_pipeline_t *p, uint32_t ssrc) {
     for (int i = 0; i < p->recv_count; i++)
         if (p->recv[i].active && p->recv[i].ssrc == ssrc)
             return &p->recv[i];
     return NULL;
 }
 
-static void stream_destroy(media_stream_t *s) {
+static void send_stream_destroy(media_send_stream_t *s) {
     if (!s->active)
         return;
     if (s->has_encoder) {
@@ -99,6 +104,12 @@ static void stream_destroy(media_stream_t *s) {
         else
             audio_encoder_destroy(&s->audio_enc);
     }
+    s->active = false;
+}
+
+static void recv_stream_destroy(media_recv_stream_t *s) {
+    if (!s->active)
+        return;
     if (s->has_decoder) {
         if (s->is_video)
             video_decoder_destroy(&s->video_dec);
@@ -133,9 +144,9 @@ void media_pipeline_destroy(media_pipeline_t *p) {
     if (!p)
         return;
     for (int i = 0; i < p->send_count; i++)
-        stream_destroy(&p->send[i]);
+        send_stream_destroy(&p->send[i]);
     for (int i = 0; i < p->recv_count; i++)
-        stream_destroy(&p->recv[i]);
+        recv_stream_destroy(&p->recv[i]);
     if (p->dbg.send_dump)
         video_dump_close(p->dbg.send_dump);
     if (p->dbg.recv_dump)
@@ -238,11 +249,11 @@ media_recv_stream_t *media_pipeline_add_recv_stream(media_pipeline_t *p, const c
         return NULL;
 
     /* Check for duplicate SSRC — return existing handle */
-    media_stream_t *existing = find_recv_by_ssrc(p, ssrc);
+    media_recv_stream_t *existing = find_recv_by_ssrc(p, ssrc);
     if (existing)
-        return (media_recv_stream_t *)existing;
+        return existing;
 
-    media_stream_t *s = &p->recv[p->recv_count];
+    media_recv_stream_t *s = &p->recv[p->recv_count];
     memset(s, 0, sizeof(*s));
     snprintf(s->label, MP_LABEL_SIZE, "%s", label);
     snprintf(s->peer_id, MP_LABEL_SIZE, "%s", peer_id);
@@ -273,13 +284,13 @@ media_recv_stream_t *media_pipeline_add_recv_stream(media_pipeline_t *p, const c
     p->recv_count++;
     RTC_LOG_INFO("Pipeline: added recv stream \"%s\" from %s (ssrc=0x%08X, video=%d)", label,
                  peer_id, ssrc, is_video);
-    return (media_recv_stream_t *)s;
+    return s;
 }
 
 void media_pipeline_remove_recv_stream(media_pipeline_t *p, uint32_t ssrc) {
     for (int i = 0; i < p->recv_count; i++) {
         if (p->recv[i].active && p->recv[i].ssrc == ssrc) {
-            stream_destroy(&p->recv[i]);
+            recv_stream_destroy(&p->recv[i]);
             return;
         }
     }
@@ -288,7 +299,7 @@ void media_pipeline_remove_recv_stream(media_pipeline_t *p, uint32_t ssrc) {
 void media_pipeline_remove_peer(media_pipeline_t *p, const char *peer_id) {
     for (int i = 0; i < p->recv_count; i++) {
         if (p->recv[i].active && strcmp(p->recv[i].peer_id, peer_id) == 0)
-            stream_destroy(&p->recv[i]);
+            recv_stream_destroy(&p->recv[i]);
     }
 }
 
@@ -404,7 +415,7 @@ int media_pipeline_push_audio(media_pipeline_t *p, media_send_stream_t *stream,
 
 /* ---- Recv path ---- */
 
-static void recv_video_on_stream(media_pipeline_t *p, media_stream_t *s, const uint8_t *data,
+static void recv_video_on_stream(media_pipeline_t *p, media_recv_stream_t *s, const uint8_t *data,
                                  int len, uint16_t seq, uint32_t timestamp, bool marker) {
     s->recv_stats.packets_received++;
     s->recv_stats.bytes_received += (uint64_t)len;
@@ -479,7 +490,7 @@ static void recv_video_on_stream(media_pipeline_t *p, media_stream_t *s, const u
     }
 }
 
-static void recv_audio_on_stream(media_pipeline_t *p, media_stream_t *s, const uint8_t *data,
+static void recv_audio_on_stream(media_pipeline_t *p, media_recv_stream_t *s, const uint8_t *data,
                                  int len, uint16_t seq, uint32_t timestamp) {
     jitter_buffer_push(s->jb, data, len, seq, timestamp, false);
 
@@ -498,7 +509,7 @@ int media_pipeline_recv_rtp(media_pipeline_t *p, media_recv_stream_t *stream, co
     if (!p || !stream)
         return RTC_ERR_INVALID;
 
-    media_stream_t *s = (media_stream_t *)stream;
+    media_recv_stream_t *s = stream;
     if (!s->active)
         return RTC_ERR_INVALID;
 
