@@ -4,6 +4,7 @@
 #ifndef RTC_RATE_CONTROL_H
 #define RTC_RATE_CONTROL_H
 
+#include <stdatomic.h>
 #include <stdbool.h>
 
 typedef struct {
@@ -13,10 +14,15 @@ typedef struct {
 } rtc_rate_control_config_t;
 
 typedef struct rtc_rate_controller {
-    int current_bitrate_kbps;
+    /* current_bitrate is written by the transport thread (on RTCP RR) and read
+     * by the media thread (encoder bitrate query). Made _Atomic to avoid torn
+     * reads / lost updates. min/max are immutable after create. */
+    _Atomic int current_bitrate_kbps;
     int min_bitrate_kbps;
     int max_bitrate_kbps;
-    bool keyframe_requested;
+    /* keyframe_requested is set by transport thread, test-and-cleared by
+     * encoder thread. */
+    _Atomic bool keyframe_requested;
 } rtc_rate_controller_t;
 
 rtc_rate_controller_t *rtc_rate_control_create(const rtc_rate_control_config_t *cfg);
