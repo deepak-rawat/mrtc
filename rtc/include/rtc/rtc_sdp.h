@@ -11,6 +11,7 @@
 #define RTC_SDP_H
 
 #include "rtc_common.h"
+#include "rtc_vec.h"
 
 /* ICE candidate types (shared with ICE agent internals) */
 #define ICE_MAX_CANDIDATES 16
@@ -31,9 +32,8 @@ typedef struct {
     char foundation[8];
 } rtc_ice_candidate_t;
 
-#define SDP_MAX_SIZE       8192
-#define SDP_MAX_CANDIDATES 16
-#define SDP_MAX_MEDIA      4
+#define SDP_MAX_SIZE  8192
+#define SDP_MAX_MEDIA 4
 
 typedef enum {
     RTC_SDP_OFFER,
@@ -85,9 +85,10 @@ typedef struct {
     char fingerprint[96];
     rtc_setup_role_t setup;
 
-    /* Candidates */
-    rtc_ice_candidate_t candidates[SDP_MAX_CANDIDATES];
-    int candidate_count;
+    /* Candidates (rtc_ice_candidate_t). Lazy-initialised on first add;
+     * memset(&sdp, 0, sizeof(sdp)) is a valid empty state. Use
+     * rtc_sdp_close() to release. */
+    rtc_vec_t candidates;
 
     /* Session-level */
     char session_id[32];
@@ -105,5 +106,17 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len);
 
 /* Pretty-print SDP to stdout */
 void rtc_sdp_print(const rtc_sdp_t *sdp);
+
+/* Release any heap-allocated resources owned by sdp (currently the
+ * candidates vector). Safe on zero-initialised structs. After this,
+ * the struct is reset to an empty valid state. */
+void rtc_sdp_close(rtc_sdp_t *sdp);
+
+/* Append a candidate. Lazy-initialises the underlying vector. */
+int rtc_sdp_add_candidate(rtc_sdp_t *sdp, const rtc_ice_candidate_t *c);
+
+/* Candidate accessors. */
+size_t rtc_sdp_candidate_count(const rtc_sdp_t *sdp);
+const rtc_ice_candidate_t *rtc_sdp_get_candidate(const rtc_sdp_t *sdp, size_t idx);
 
 #endif /* RTC_SDP_H */

@@ -5,6 +5,7 @@
 #define MEDIA_JITTER_BUFFER_H
 
 #include <rtc/rtc_common.h>
+#include <rtc/rtc_u32_map.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -15,19 +16,16 @@ typedef struct {
     int max_delay_ms;    /* Max before drop: 500ms */
 } jitter_buffer_config_t;
 
-typedef struct {
-    uint8_t data[2048];
-    int len;
-    uint16_t seq;
-    uint32_t timestamp;
-    bool marker; /* Last fragment of frame */
-    bool used;
-    uint64_t arrival_ms; /* rtc_time_ms() when pushed */
-} jb_slot_t;
+/* Opaque slot type (defined in jitter_buffer.c) */
+typedef struct jb_slot jb_slot_t;
 
 typedef struct jitter_buffer {
-    jb_slot_t slots[JB_MAX_PACKETS];
-    int count;
+    /* Map of (uint32_t)seq -> jb_slot_t* (heap-allocated, owned) */
+    rtc_u32_map_t by_seq;
+    /* Slot owned by the last successful pop; freed on next pop or destroy.
+     * Keeps the popped payload valid for the caller until the next call. */
+    jb_slot_t *last_popped;
+
     uint16_t next_seq; /* Next expected sequence number */
     bool started;
 

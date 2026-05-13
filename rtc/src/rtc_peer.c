@@ -547,9 +547,9 @@ static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
     memcpy(sdp->fingerprint, pc->dtls.local_fingerprint, sizeof(sdp->fingerprint));
 
     /* Candidates */
-    sdp->candidate_count = pc->ice.local_candidate_count;
-    for (int i = 0; i < sdp->candidate_count && i < SDP_MAX_CANDIDATES; i++)
-        sdp->candidates[i] = pc->ice.local_candidates[i];
+    for (int i = 0; i < pc->ice.local_candidate_count; i++) {
+        rtc_sdp_add_candidate(sdp, &pc->ice.local_candidates[i]);
+    }
 
     /* Build multi-media descriptions from transceivers */
     sdp->media_count = 0;
@@ -702,6 +702,8 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc) {
     rtc_ice_close(&pc->ice);
     rtc_transport_close(&pc->transport);
     rtc_u32_map_free(&pc->recv_map);
+    rtc_sdp_close(&pc->local_sdp);
+    rtc_sdp_close(&pc->remote_sdp);
     if (pc->rate_ctrl) {
         rtc_rate_control_destroy(pc->rate_ctrl);
         pc->rate_ctrl = NULL;
@@ -793,7 +795,8 @@ int rtc_peer_connection_create_offer(rtc_peer_connection_t *pc, rtc_desc_t *desc
     memcpy(desc->sdp, sdp.raw, sdp.raw_len);
     desc->sdp_len = sdp.raw_len;
 
-    /* Store internal SDP for later use */
+    /* Store internal SDP for later use (transfer ownership of candidates vec) */
+    rtc_sdp_close(&pc->local_sdp);
     pc->local_sdp = sdp;
 
     return RTC_OK;
@@ -829,6 +832,7 @@ int rtc_peer_connection_create_answer(rtc_peer_connection_t *pc, rtc_desc_t *des
     memcpy(desc->sdp, sdp.raw, sdp.raw_len);
     desc->sdp_len = sdp.raw_len;
 
+    rtc_sdp_close(&pc->local_sdp);
     pc->local_sdp = sdp;
 
     return RTC_OK;
@@ -896,8 +900,11 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
     rtc_sdp_t sdp;
     memset(&sdp, 0, sizeof(sdp));
     int rc = rtc_sdp_parse(&sdp, desc->sdp, desc->sdp_len);
-    if (rc != RTC_OK)
+    if (rc != RTC_OK) {
+        rtc_sdp_close(&sdp);
         return rc;
+    }
+    rtc_sdp_close(&pc->remote_sdp);
     pc->remote_sdp = sdp;
 
     /* Set remote ICE credentials */
@@ -906,8 +913,10 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
         return rc;
 
     /* Add remote candidates */
-    for (int i = 0; i < sdp.candidate_count; i++) {
-        rc = rtc_ice_add_remote_candidate(&pc->ice, &sdp.candidates[i]);
+    size_t ncand = rtc_sdp_candidate_count(&sdp);
+    for (size_t i = 0; i < ncand; i++) {
+        const rtc_ice_candidate_t *c = rtc_sdp_get_candidate(&sdp, i);
+        rc = rtc_ice_add_remote_candidate(&pc->ice, c);
         if (rc != RTC_OK)
             return rc;
     }
@@ -942,7 +951,7 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
     /* Try to start connection if both descriptions set */
     peer_try_connect(pc);
 
-    RTC_LOG_INFO("Remote description set (%d candidates)", sdp.candidate_count);
+    RTC_LOG_INFO("Remote description set (%zu candidates)", rtc_sdp_candidate_count(&sdp));
     return RTC_OK;
 }
 

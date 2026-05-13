@@ -145,8 +145,10 @@ int rtc_sdp_generate(rtc_sdp_t *sdp) {
     }
 
     /* Candidates (after all media sections — applies to BUNDLE) */
-    for (int i = 0; i < sdp->candidate_count; i++) {
-        const rtc_ice_candidate_t *c = &sdp->candidates[i];
+    size_t ncand = rtc_vec_len(&sdp->candidates);
+    for (size_t i = 0; i < ncand; i++) {
+        const rtc_ice_candidate_t *c =
+            (const rtc_ice_candidate_t *)rtc_vec_at(&sdp->candidates, i);
         char ip[64];
         uint16_t port;
         if (rtc_addr_to_string(&c->addr, ip, sizeof(ip), &port) != RTC_OK)
@@ -205,7 +207,13 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
     sdp->raw[len] = '\0';
     sdp->raw_len = len;
 
-    sdp->candidate_count = 0;
+    /* Reset candidate list (lazy-init compatible). */
+    if (sdp->candidates.elem_size == 0) {
+        if (rtc_vec_init(&sdp->candidates, sizeof(rtc_ice_candidate_t)) != RTC_OK)
+            return RTC_ERR_NOMEM;
+    } else {
+        rtc_vec_clear(&sdp->candidates);
+    }
     sdp->media_count = 0;
 
     const char *p = text;
@@ -347,8 +355,9 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
         }
 
         /* Candidate */
-        if (sdp_line_starts(line, "a=candidate:") && sdp->candidate_count < SDP_MAX_CANDIDATES) {
-            rtc_ice_candidate_t *c = &sdp->candidates[sdp->candidate_count];
+        if (sdp_line_starts(line, "a=candidate:")) {
+            rtc_ice_candidate_t c;
+            memset(&c, 0, sizeof(c));
             char foundation[8] = {0}, transport[8] = {0}, type_str[8] = {0};
             char ip[64] = {0};
             int component = 0;
@@ -359,19 +368,19 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
                                 &component, transport, &priority, ip, &port, type_str);
 
             if (parsed >= 7) {
-                memcpy(c->foundation, foundation, sizeof(c->foundation));
-                c->component = component;
-                c->priority = priority;
+                memcpy(c.foundation, foundation, sizeof(c.foundation));
+                c.component = component;
+                c.priority = priority;
 
                 if (strcmp(type_str, "host") == 0)
-                    c->type = ICE_CANDIDATE_HOST;
+                    c.type = ICE_CANDIDATE_HOST;
                 else if (strcmp(type_str, "srflx") == 0)
-                    c->type = ICE_CANDIDATE_SRFLX;
+                    c.type = ICE_CANDIDATE_SRFLX;
                 else
-                    c->type = ICE_CANDIDATE_HOST;
+                    c.type = ICE_CANDIDATE_HOST;
 
-                rtc_addr_from_string(&c->addr, ip, (uint16_t)port);
-                sdp->candidate_count++;
+                rtc_addr_from_string(&c.addr, ip, (uint16_t)port);
+                rtc_vec_push(&sdp->candidates, &c);
             }
         }
 
@@ -387,4 +396,33 @@ void rtc_sdp_print(const rtc_sdp_t *sdp) {
                                                                : "pranswer");
     printf("%.*s", (int)sdp->raw_len, sdp->raw);
     printf("=== END SDP ===\n");
+}
+
+void rtc_sdp_close(rtc_sdp_t *sdp) {
+    if (!sdp)
+        return;
+    rtc_vec_free(&sdp->candidates);
+}
+
+int rtc_sdp_add_candidate(rtc_sdp_t *sdp, const rtc_ice_candidate_t *c) {
+    if (!sdp || !c)
+        return RTC_ERR_INVALID;
+    if (sdp->candidates.elem_size == 0) {
+        rtc_err_t r = rtc_vec_init(&sdp->candidates, sizeof(rtc_ice_candidate_t));
+        if (r != RTC_OK)
+            return r;
+    }
+    return rtc_vec_push(&sdp->candidates, c);
+}
+
+size_t rtc_sdp_candidate_count(const rtc_sdp_t *sdp) {
+    if (!sdp)
+        return 0;
+    return rtc_vec_len(&sdp->candidates);
+}
+
+const rtc_ice_candidate_t *rtc_sdp_get_candidate(const rtc_sdp_t *sdp, size_t idx) {
+    if (!sdp)
+        return NULL;
+    return (const rtc_ice_candidate_t *)rtc_vec_at(&sdp->candidates, idx);
 }

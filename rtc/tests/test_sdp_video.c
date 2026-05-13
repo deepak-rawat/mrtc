@@ -76,7 +76,7 @@ TEST(sdp_parse_video) {
     ASSERT_EQ(sdp.payload_type, 96);
     ASSERT_EQ(sdp.clockrate, 90000);
     ASSERT_STR_EQ(sdp.codec_name, "VP8");
-    ASSERT_EQ(sdp.candidate_count, 1);
+    ASSERT_EQ((int)rtc_sdp_candidate_count(&sdp), 1);
 
     /* Multi-media array should also have the video */
     ASSERT_EQ(sdp.media_count, 1);
@@ -124,12 +124,13 @@ TEST(sdp_generate_multi_media) {
     sdp.media_count = 3;
 
     /* Add a candidate */
-    sdp.candidate_count = 1;
-    sdp.candidates[0].type = ICE_CANDIDATE_HOST;
-    sdp.candidates[0].component = 1;
-    sdp.candidates[0].priority = 2130706431;
-    strcpy(sdp.candidates[0].foundation, "H0");
-    rtc_addr_from_string(&sdp.candidates[0].addr, "192.168.1.50", 9000);
+    rtc_ice_candidate_t vcand = {0};
+    vcand.type = ICE_CANDIDATE_HOST;
+    vcand.component = 1;
+    vcand.priority = 2130706431;
+    strcpy(vcand.foundation, "H0");
+    rtc_addr_from_string(&vcand.addr, "192.168.1.50", 9000);
+    rtc_sdp_add_candidate(&sdp, &vcand);
 
     int rc = rtc_sdp_generate(&sdp);
     ASSERT_EQ(rc, RTC_OK);
@@ -216,7 +217,7 @@ TEST(sdp_parse_multi_media) {
     ASSERT_EQ(sdp.media[2].media_type, RTC_MEDIA_APPLICATION);
 
     /* Candidates */
-    ASSERT_EQ(sdp.candidate_count, 1);
+    ASSERT_EQ((int)rtc_sdp_candidate_count(&sdp), 1);
 
     printf("    parsed %d media lines: audio, video, application\n", sdp.media_count);
 }
@@ -251,12 +252,13 @@ TEST(sdp_multi_media_roundtrip) {
 
     orig.media_count = 2;
 
-    orig.candidate_count = 1;
-    orig.candidates[0].type = ICE_CANDIDATE_HOST;
-    orig.candidates[0].component = 1;
-    orig.candidates[0].priority = 2130706431;
-    strcpy(orig.candidates[0].foundation, "H0");
-    rtc_addr_from_string(&orig.candidates[0].addr, "172.16.0.10", 7000);
+    rtc_ice_candidate_t rtcand = {0};
+    rtcand.type = ICE_CANDIDATE_HOST;
+    rtcand.component = 1;
+    rtcand.priority = 2130706431;
+    strcpy(rtcand.foundation, "H0");
+    rtc_addr_from_string(&rtcand.addr, "172.16.0.10", 7000);
+    rtc_sdp_add_candidate(&orig, &rtcand);
 
     int rc = rtc_sdp_generate(&orig);
     ASSERT_EQ(rc, RTC_OK);
@@ -280,14 +282,17 @@ TEST(sdp_multi_media_roundtrip) {
     ASSERT_EQ(parsed.media[1].clockrate, 90000);
 
     /* Candidate survived */
-    ASSERT_EQ(parsed.candidate_count, 1);
+    ASSERT_EQ((int)rtc_sdp_candidate_count(&parsed), 1);
     char ip[64];
     uint16_t port;
-    rtc_addr_to_string(&parsed.candidates[0].addr, ip, sizeof(ip), &port);
+    const rtc_ice_candidate_t *pc0 = rtc_sdp_get_candidate(&parsed, 0);
+    rtc_addr_to_string(&pc0->addr, ip, sizeof(ip), &port);
     ASSERT_STR_EQ(ip, "172.16.0.10");
     ASSERT_EQ(port, 7000);
 
     printf("    round-trip: 2 media lines preserved\n");
+    rtc_sdp_close(&orig);
+    rtc_sdp_close(&parsed);
 }
 
 /* ------------------------------------------------------------------ */

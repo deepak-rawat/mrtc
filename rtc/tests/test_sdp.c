@@ -32,12 +32,13 @@ TEST(sdp_generate_audio_offer) {
                             "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99");
 
     /* Add a candidate */
-    sdp.candidate_count = 1;
-    sdp.candidates[0].type = ICE_CANDIDATE_HOST;
-    sdp.candidates[0].component = 1;
-    sdp.candidates[0].priority = 2130706431;
-    strcpy(sdp.candidates[0].foundation, "H0");
-    rtc_addr_from_string(&sdp.candidates[0].addr, "192.168.1.100", 5000);
+    rtc_ice_candidate_t cand0 = {0};
+    cand0.type = ICE_CANDIDATE_HOST;
+    cand0.component = 1;
+    cand0.priority = 2130706431;
+    strcpy(cand0.foundation, "H0");
+    rtc_addr_from_string(&cand0.addr, "192.168.1.100", 5000);
+    rtc_sdp_add_candidate(&sdp, &cand0);
 
     int rc = rtc_sdp_generate(&sdp);
     ASSERT_EQ(rc, RTC_OK);
@@ -58,6 +59,7 @@ TEST(sdp_generate_audio_offer) {
 
     printf("    generated %zu bytes of SDP:\n", sdp.raw_len);
     printf("    %.60s...\n", sdp.raw);
+    rtc_sdp_close(&sdp);
 }
 
 /* ------------------------------------------------------------------ */
@@ -83,6 +85,7 @@ TEST(sdp_generate_data_channel) {
     ASSERT(strstr(sdp.raw, "a=sctp-port:5000") != NULL);
 
     printf("    data channel SDP: %zu bytes\n", sdp.raw_len);
+    rtc_sdp_close(&sdp);
 }
 
 /* ------------------------------------------------------------------ */
@@ -123,23 +126,26 @@ TEST(sdp_parse) {
     ASSERT_STR_EQ(sdp.codec_name, "opus");
 
     /* Candidates */
-    ASSERT_EQ(sdp.candidate_count, 2);
+    ASSERT_EQ((int)rtc_sdp_candidate_count(&sdp), 2);
 
-    ASSERT_EQ(sdp.candidates[0].type, ICE_CANDIDATE_HOST);
-    ASSERT_EQ(sdp.candidates[0].priority, 2130706431);
+    const rtc_ice_candidate_t *c0 = rtc_sdp_get_candidate(&sdp, 0);
+    ASSERT_EQ(c0->type, ICE_CANDIDATE_HOST);
+    ASSERT_EQ(c0->priority, 2130706431);
     char ip[64];
     uint16_t port;
-    rtc_addr_to_string(&sdp.candidates[0].addr, ip, sizeof(ip), &port);
+    rtc_addr_to_string(&c0->addr, ip, sizeof(ip), &port);
     ASSERT_STR_EQ(ip, "10.0.0.1");
     ASSERT_EQ(port, 5000);
 
-    ASSERT_EQ(sdp.candidates[1].type, ICE_CANDIDATE_SRFLX);
-    rtc_addr_to_string(&sdp.candidates[1].addr, ip, sizeof(ip), &port);
+    const rtc_ice_candidate_t *c1 = rtc_sdp_get_candidate(&sdp, 1);
+    ASSERT_EQ(c1->type, ICE_CANDIDATE_SRFLX);
+    rtc_addr_to_string(&c1->addr, ip, sizeof(ip), &port);
     ASSERT_STR_EQ(ip, "203.0.113.5");
     ASSERT_EQ(port, 6000);
 
-    printf("    parsed: ufrag=%s codec=%s/%d/%d candidates=%d\n", sdp.ice_ufrag, sdp.codec_name,
-           sdp.clockrate, sdp.channels, sdp.candidate_count);
+    printf("    parsed: ufrag=%s codec=%s/%d/%d candidates=%zu\n", sdp.ice_ufrag, sdp.codec_name,
+           sdp.clockrate, sdp.channels, rtc_sdp_candidate_count(&sdp));
+    rtc_sdp_close(&sdp);
 }
 
 /* ------------------------------------------------------------------ */
@@ -162,18 +168,21 @@ TEST(sdp_roundtrip) {
                              "11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00");
 
     /* Two candidates */
-    orig.candidate_count = 2;
-    orig.candidates[0].type = ICE_CANDIDATE_HOST;
-    orig.candidates[0].component = 1;
-    orig.candidates[0].priority = 2130706431;
-    strcpy(orig.candidates[0].foundation, "H0");
-    rtc_addr_from_string(&orig.candidates[0].addr, "192.168.1.50", 12345);
+    rtc_ice_candidate_t cand0 = {0};
+    cand0.type = ICE_CANDIDATE_HOST;
+    cand0.component = 1;
+    cand0.priority = 2130706431;
+    strcpy(cand0.foundation, "H0");
+    rtc_addr_from_string(&cand0.addr, "192.168.1.50", 12345);
+    rtc_sdp_add_candidate(&orig, &cand0);
 
-    orig.candidates[1].type = ICE_CANDIDATE_SRFLX;
-    orig.candidates[1].component = 1;
-    orig.candidates[1].priority = 1694498815;
-    strcpy(orig.candidates[1].foundation, "S1");
-    rtc_addr_from_string(&orig.candidates[1].addr, "8.8.8.8", 54321);
+    rtc_ice_candidate_t cand1 = {0};
+    cand1.type = ICE_CANDIDATE_SRFLX;
+    cand1.component = 1;
+    cand1.priority = 1694498815;
+    strcpy(cand1.foundation, "S1");
+    rtc_addr_from_string(&cand1.addr, "8.8.8.8", 54321);
+    rtc_sdp_add_candidate(&orig, &cand1);
 
     /* Generate */
     int rc = rtc_sdp_generate(&orig);
@@ -194,20 +203,24 @@ TEST(sdp_roundtrip) {
     ASSERT_EQ(parsed.clockrate, 8000);
     ASSERT_EQ(parsed.channels, 1);
     ASSERT_STR_EQ(parsed.codec_name, "PCMA");
-    ASSERT_EQ(parsed.candidate_count, 2);
+    ASSERT_EQ((int)rtc_sdp_candidate_count(&parsed), 2);
 
     /* Verify candidate IPs survived round-trip */
     char ip[64];
     uint16_t port;
-    rtc_addr_to_string(&parsed.candidates[0].addr, ip, sizeof(ip), &port);
+    const rtc_ice_candidate_t *pc0 = rtc_sdp_get_candidate(&parsed, 0);
+    rtc_addr_to_string(&pc0->addr, ip, sizeof(ip), &port);
     ASSERT_STR_EQ(ip, "192.168.1.50");
     ASSERT_EQ(port, 12345);
 
-    rtc_addr_to_string(&parsed.candidates[1].addr, ip, sizeof(ip), &port);
+    const rtc_ice_candidate_t *pc1 = rtc_sdp_get_candidate(&parsed, 1);
+    rtc_addr_to_string(&pc1->addr, ip, sizeof(ip), &port);
     ASSERT_STR_EQ(ip, "8.8.8.8");
     ASSERT_EQ(port, 54321);
 
     printf("    round-trip: all fields preserved (2 candidates)\n");
+    rtc_sdp_close(&orig);
+    rtc_sdp_close(&parsed);
 }
 
 /* ------------------------------------------------------------------ */
@@ -230,16 +243,16 @@ TEST(sdp_many_candidates) {
                             "FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF");
 
     /* Add 8 candidates */
-    sdp.candidate_count = 8;
     for (int i = 0; i < 8; i++) {
-        sdp.candidates[i].type = (i % 2 == 0) ? ICE_CANDIDATE_HOST : ICE_CANDIDATE_SRFLX;
-        sdp.candidates[i].component = 1;
-        sdp.candidates[i].priority = (uint32_t)(2130706431 - i * 1000);
-        snprintf(sdp.candidates[i].foundation, sizeof(sdp.candidates[i].foundation), "%c%d",
-                 (i % 2 == 0) ? 'H' : 'S', i);
+        rtc_ice_candidate_t c = {0};
+        c.type = (i % 2 == 0) ? ICE_CANDIDATE_HOST : ICE_CANDIDATE_SRFLX;
+        c.component = 1;
+        c.priority = (uint32_t)(2130706431 - i * 1000);
+        snprintf(c.foundation, sizeof(c.foundation), "%c%d", (i % 2 == 0) ? 'H' : 'S', i);
         char ip[32];
         snprintf(ip, sizeof(ip), "10.0.%d.%d", i / 256, i % 256);
-        rtc_addr_from_string(&sdp.candidates[i].addr, ip, (uint16_t)(5000 + i));
+        rtc_addr_from_string(&c.addr, ip, (uint16_t)(5000 + i));
+        rtc_sdp_add_candidate(&sdp, &c);
     }
 
     int rc = rtc_sdp_generate(&sdp);
@@ -250,9 +263,11 @@ TEST(sdp_many_candidates) {
     memset(&parsed, 0, sizeof(parsed));
     rc = rtc_sdp_parse(&parsed, sdp.raw, sdp.raw_len);
     ASSERT_EQ(rc, RTC_OK);
-    ASSERT_EQ(parsed.candidate_count, 8);
+    ASSERT_EQ((int)rtc_sdp_candidate_count(&parsed), 8);
 
     printf("    8 candidates: generate -> parse preserved all\n");
+    rtc_sdp_close(&sdp);
+    rtc_sdp_close(&parsed);
 }
 
 /* ------------------------------------------------------------------ */
