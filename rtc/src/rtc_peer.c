@@ -142,6 +142,12 @@ struct rtc_peer_connection {
     /* Fast SSRC → receiver lookup (populated on first RTP packet per stream).
      * Hot path: O(1) average via rtc_u32_map (Fibonacci hash + linear probing). */
     rtc_u32_map_t recv_map;
+
+    /* DTLS application-data receive buffer. Sized to the max DTLS record
+     * payload (64 KiB) so a single SCTP/data-channel chunk can never be
+     * truncated. Heap-allocated to keep struct rtc_peer_connection small. */
+    uint8_t *app_buf;
+    size_t app_buf_cap;
 };
 
 /* ---- Forward declarations ---- */
@@ -427,10 +433,10 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
             }
             /* Check for DTLS application data (data channel messages) */
             if (pc->dtls.state == RTC_DTLS_STATE_CONNECTED) {
-                uint8_t app_buf[2048];
                 int app_len;
-                while ((app_len = SSL_read(pc->dtls.ssl, app_buf, sizeof(app_buf))) > 0) {
-                    rtc_dc_manager_recv(&pc->dc_manager, app_buf, (size_t)app_len);
+                while ((app_len = SSL_read(pc->dtls.ssl, pc->app_buf,
+                                           (int)pc->app_buf_cap)) > 0) {
+                    rtc_dc_manager_recv(&pc->dc_manager, pc->app_buf, (size_t)app_len);
                 }
             }
             break;
@@ -690,6 +696,14 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
     pc->ice_connection_state = RTC_ICE_CONNECTION_NEW;
     pc->connection_state = RTC_CONNECTION_NEW;
 
+    /* Allocate DTLS app-data scratch buffer (64 KiB = max DTLS record payload). */
+    pc->app_buf_cap = 65536;
+    pc->app_buf = (uint8_t *)malloc(pc->app_buf_cap);
+    if (!pc->app_buf) {
+        free(pc);
+        return NULL;
+    }
+
     /* Extract STUN server from config */
     if (config && config->ice_server_count > 0 && config->ice_servers[0].url_count > 0 &&
         config->ice_servers[0].urls[0]) {
@@ -700,6 +714,7 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
     /* Initialize transport (socket + thread) */
     int rc = rtc_transport_init(&pc->transport);
     if (rc != RTC_OK) {
+        free(pc->app_buf);
         free(pc);
         return NULL;
     }
@@ -707,6 +722,7 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
     /* Initialize SSRC → receiver lookup map */
     if (rtc_u32_map_init(&pc->recv_map) != RTC_OK) {
         rtc_transport_close(&pc->transport);
+        free(pc->app_buf);
         free(pc);
         return NULL;
     }
@@ -719,6 +735,7 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
                       pc->stun_port);
     if (rc != RTC_OK) {
         rtc_transport_close(&pc->transport);
+        free(pc->app_buf);
         free(pc);
         return NULL;
     }
@@ -727,6 +744,7 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
     rc = rtc_dtls_init(&pc->dtls, RTC_DTLS_ROLE_CLIENT, peer_dtls_send, pc);
     if (rc != RTC_OK) {
         rtc_transport_close(&pc->transport);
+        free(pc->app_buf);
         free(pc);
         return NULL;
     }
@@ -771,6 +789,7 @@ void rtc_peer_connection_destroy(rtc_peer_connection_t *pc) {
         RTC_LOG_WARN("rtc_peer_connection_destroy called without prior close");
         rtc_peer_connection_close(pc);
     }
+    free(pc->app_buf);
     free(pc);
 }
 
