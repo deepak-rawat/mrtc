@@ -367,8 +367,7 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
         if (sdp_line_starts(line, "a=ssrc:") && current_media >= 0 &&
             current_media < sdp->media_count) {
             unsigned long ssrc_val = 0;
-            if (sscanf(line, "a=ssrc:%lu", &ssrc_val) == 1 &&
-                sdp->media[current_media].ssrc == 0) {
+            if (sscanf(line, "a=ssrc:%lu", &ssrc_val) == 1 && sdp->media[current_media].ssrc == 0) {
                 sdp->media[current_media].ssrc = (uint32_t)ssrc_val;
             }
         }
