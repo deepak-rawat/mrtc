@@ -55,6 +55,12 @@ typedef struct {
     /* Controlling / controlled */
     bool controlling;
     uint64_t tie_breaker;
+
+    /* Async connectivity-check state (set by rtc_ice_connect /
+     * rtc_ice_send_check, read by rtc_ice_handle_stun on BINDING_RESPONSE). */
+    uint8_t last_txn_id[STUN_TXN_ID_SIZE];
+    uint64_t check_deadline_ms; /* overall deadline (rtc_time_ms) */
+    int check_round;            /* round-robin index across remote candidates */
 } rtc_ice_agent_t;
 
 /* Initialize an ICE agent with a borrowed transport, generate ufrag/pwd */
@@ -70,8 +76,24 @@ int rtc_ice_set_remote_credentials(rtc_ice_agent_t *agent, const char *ufrag, co
 /* Add a remote candidate */
 int rtc_ice_add_remote_candidate(rtc_ice_agent_t *agent, const rtc_ice_candidate_t *cand);
 
-/* Perform connectivity checks (simplified: try each pair, first success wins) */
+/*
+ * Kick off connectivity checks (non-blocking).
+ * Sends the first STUN binding request and sets state to CHECKING. The caller
+ * is responsible for scheduling periodic rtc_ice_send_check() retries (e.g.
+ * via rtc_transport_add_timer) until state transitions to CONNECTED or
+ * rtc_ice_check_deadline_passed() returns true.
+ *
+ * STUN binding responses are processed asynchronously through the transport's
+ * recv callback dispatching to rtc_ice_handle_stun().
+ */
 int rtc_ice_connect(rtc_ice_agent_t *agent);
+
+/* Send the next round-robin connectivity check. Returns RTC_ERR_ICE if no
+ * remote candidates or state is not CHECKING. */
+int rtc_ice_send_check(rtc_ice_agent_t *agent);
+
+/* True if the overall ICE deadline set by rtc_ice_connect has elapsed. */
+bool rtc_ice_check_deadline_passed(const rtc_ice_agent_t *agent);
 
 /*
  * Handle an incoming STUN packet (called by transport's recv callback).

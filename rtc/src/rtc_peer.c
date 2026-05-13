@@ -323,29 +323,19 @@ static void peer_dtls_retransmit_timer(void *user) {
 
 /* ---- Connect timer (fires on transport thread) ---- */
 
-static void peer_connect_timer(void *user) {
-    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+#define PEER_ICE_CHECK_INTERVAL_MS 250
 
-    peer_set_connection(pc, RTC_CONNECTION_CONNECTING);
-    peer_set_ice_connection(pc, RTC_ICE_CONNECTION_CHECKING);
+/* Forward decl: timer that polls ICE state until connected/failed and then
+ * advances to DTLS. Replaces the old synchronous select+recvfrom in
+ * rtc_ice_connect that stole non-STUN packets from the transport classifier. */
+static void peer_ice_check_timer(void *user);
 
-    /* Step 1: ICE connectivity check (blocks transport thread with own select loop) */
-    RTC_LOG_INFO("Peer: starting ICE connectivity checks...");
-    int rc = rtc_ice_connect(&pc->ice);
-    if (rc != RTC_OK) {
-        RTC_LOG_ERR("Peer: ICE connect failed (rc=%d)", rc);
-        peer_set_ice_connection(pc, RTC_ICE_CONNECTION_FAILED);
-        peer_set_connection(pc, RTC_CONNECTION_FAILED);
-        return;
-    }
-
-    /* Step 2: Start DTLS handshake
-     * Only the DTLS client initiates. The server waits for ClientHello
-     * which arrives via the transport recv callback. */
+/* Kick off DTLS handshake — extracted from the old peer_connect_timer body. */
+static void peer_start_dtls(rtc_peer_connection_t *pc) {
     RTC_LOG_INFO("Peer: starting DTLS handshake (role=%s)...",
                  pc->dtls.role == RTC_DTLS_ROLE_CLIENT ? "client" : "server");
     if (pc->dtls.role == RTC_DTLS_ROLE_CLIENT) {
-        rc = rtc_dtls_handshake(&pc->dtls);
+        int rc = rtc_dtls_handshake(&pc->dtls);
         if (rc != RTC_OK && pc->dtls.state == RTC_DTLS_STATE_FAILED) {
             peer_set_connection(pc, RTC_CONNECTION_FAILED);
             return;
@@ -357,9 +347,60 @@ static void peer_connect_timer(void *user) {
 
     /* Schedule DTLS retransmission timer (fires every 1s until handshake completes) */
     rtc_transport_add_timer(&pc->transport, rtc_time_ms() + 1000, peer_dtls_retransmit_timer, pc);
+}
 
-    /* DTLS completion is handled in the recv callback when DTLS packets arrive.
-     * The transport thread resumes its normal poller loop now. */
+static void peer_ice_check_timer(void *user) {
+    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+
+    if (pc->connection_state == RTC_CONNECTION_CLOSED ||
+        pc->connection_state == RTC_CONNECTION_FAILED)
+        return;
+
+    /* Success path — ICE has flipped to CONNECTED via rtc_ice_handle_stun
+     * on the transport thread (same thread, no race). */
+    if (pc->ice.state == ICE_STATE_CONNECTED) {
+        peer_set_ice_connection(pc, RTC_ICE_CONNECTION_CONNECTED);
+        peer_start_dtls(pc);
+        return;
+    }
+
+    /* Failure path */
+    if (pc->ice.state == ICE_STATE_FAILED || rtc_ice_check_deadline_passed(&pc->ice)) {
+        pc->ice.state = ICE_STATE_FAILED;
+        RTC_LOG_ERR("Peer: ICE connectivity checks failed");
+        peer_set_ice_connection(pc, RTC_ICE_CONNECTION_FAILED);
+        peer_set_connection(pc, RTC_CONNECTION_FAILED);
+        return;
+    }
+
+    /* Still checking — send another binding request and re-arm. */
+    rtc_ice_send_check(&pc->ice);
+    rtc_transport_add_timer(&pc->transport, rtc_time_ms() + PEER_ICE_CHECK_INTERVAL_MS,
+                            peer_ice_check_timer, pc);
+}
+
+static void peer_connect_timer(void *user) {
+    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+
+    peer_set_connection(pc, RTC_CONNECTION_CONNECTING);
+    peer_set_ice_connection(pc, RTC_ICE_CONNECTION_CHECKING);
+
+    /* Kick off ICE connectivity checks asynchronously. rtc_ice_connect sends
+     * the first STUN binding request and returns; binding responses arrive
+     * via the transport's recv callback (which routes to rtc_ice_handle_stun),
+     * so the transport thread can resume normal packet classification. */
+    RTC_LOG_INFO("Peer: starting ICE connectivity checks...");
+    int rc = rtc_ice_connect(&pc->ice);
+    if (rc != RTC_OK) {
+        RTC_LOG_ERR("Peer: ICE connect failed to start (rc=%d)", rc);
+        peer_set_ice_connection(pc, RTC_ICE_CONNECTION_FAILED);
+        peer_set_connection(pc, RTC_CONNECTION_FAILED);
+        return;
+    }
+
+    /* Poll ICE state every PEER_ICE_CHECK_INTERVAL_MS until CONNECTED or timeout. */
+    rtc_transport_add_timer(&pc->transport, rtc_time_ms() + PEER_ICE_CHECK_INTERVAL_MS,
+                            peer_ice_check_timer, pc);
 }
 
 /* ---- Transport recv callback (fires on transport thread) ---- */
@@ -721,6 +762,15 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc) {
 }
 
 void rtc_peer_connection_destroy(rtc_peer_connection_t *pc) {
+    if (!pc)
+        return;
+    /* Defensive: if the caller forgot to close, the transport thread is still
+     * running and reads pc->* on packet receive — freeing now is a UAF. Close
+     * first; close() is idempotent on CLOSED state. */
+    if (pc->connection_state != RTC_CONNECTION_CLOSED) {
+        RTC_LOG_WARN("rtc_peer_connection_destroy called without prior close");
+        rtc_peer_connection_close(pc);
+    }
     free(pc);
 }
 

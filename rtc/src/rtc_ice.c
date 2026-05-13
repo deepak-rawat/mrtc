@@ -287,130 +287,67 @@ static void ice_send_binding_response(rtc_transport_t *transport, const uint8_t 
     rtc_transport_send(transport, resp, pos, from);
 }
 
-int rtc_ice_connect(rtc_ice_agent_t *agent) {
-    agent->state = ICE_STATE_CHECKING;
-    RTC_LOG_INFO("ICE: starting connectivity checks (%d remote candidates)",
-                 agent->remote_candidate_count);
+int rtc_ice_send_check(rtc_ice_agent_t *agent) {
+    if (agent->state != ICE_STATE_CHECKING)
+        return RTC_ERR_ICE;
+    if (agent->remote_candidate_count == 0)
+        return RTC_ERR_ICE;
 
-    /* Build the STUN username: remote_ufrag:local_ufrag */
+    int r = agent->check_round % agent->remote_candidate_count;
+    rtc_ice_candidate_t *remote = &agent->remote_candidates[r];
+
+    char ip[64];
+    uint16_t port;
+    rtc_addr_to_string(&remote->addr, ip, sizeof(ip), &port);
+    if (agent->check_round < agent->remote_candidate_count)
+        RTC_LOG_INFO("ICE: checking pair -> %s:%u", ip, port);
+    else
+        RTC_LOG_DBG("ICE: retry check -> %s:%u (round %d)", ip, port, agent->check_round);
+
+    /* Build STUN Binding Request with ICE attributes */
     char username[ICE_UFRAG_LEN * 2 + 2];
     snprintf(username, sizeof(username), "%s:%s", agent->remote_ufrag, agent->ufrag);
 
-    rtc_socket_t sock = rtc_transport_get_socket(agent->transport);
-
-    /*
-     * Retry loop: send STUN checks in round-robin across remote candidates.
-     * Handle incoming STUN Binding Requests from the peer (respond to them).
-     * 30-second overall timeout, 500ms per attempt.
-     *
-     * During ICE connect we do synchronous recv on the transport socket.
-     * The transport thread may also be reading, but duplicate reads on a
-     * UDP socket are safe — at most one reader gets each datagram.
-     */
-    uint64_t overall_deadline = rtc_time_ms() + 30000;
-    int round = 0;
-
-    while (rtc_time_ms() < overall_deadline) {
-        if (agent->remote_candidate_count == 0)
-            break;
-        int r = round % agent->remote_candidate_count;
-        rtc_ice_candidate_t *remote = &agent->remote_candidates[r];
-
-        char ip[64];
-        uint16_t port;
-        rtc_addr_to_string(&remote->addr, ip, sizeof(ip), &port);
-        if (round < agent->remote_candidate_count)
-            RTC_LOG_INFO("ICE: checking pair -> %s:%u", ip, port);
-        else
-            RTC_LOG_DBG("ICE: retry check -> %s:%u (round %d)", ip, port, round);
-
-        /* Build STUN Binding Request with ICE attributes */
-        rtc_stun_msg_t req;
-        uint32_t prio = ice_candidate_priority(ICE_CANDIDATE_HOST, 65535, 1);
-        int rc = rtc_stun_build_binding_request(&req, username, agent->remote_pwd, prio,
-                                                agent->controlling, agent->tie_breaker,
-                                                agent->controlling);
-        if (rc != RTC_OK) {
-            round++;
-            continue;
-        }
-
-        /* Send the check via transport */
-        rc = rtc_transport_send(agent->transport, req.buf, req.buf_len, &remote->addr);
-        if (rc != RTC_OK) {
-            round++;
-            continue;
-        }
-
-        /* Wait up to 500ms, handling incoming STUN requests */
-        uint64_t check_deadline = rtc_time_ms() + 500;
-        while (rtc_time_ms() < check_deadline) {
-            uint64_t now = rtc_time_ms();
-            if (now >= check_deadline)
-                break;
-            uint64_t remaining_ms = check_deadline - now;
-
-            fd_set fds;
-            struct timeval tv;
-            FD_ZERO(&fds);
-            FD_SET(sock, &fds);
-            tv.tv_sec = (long)(remaining_ms / 1000);
-            tv.tv_usec = (long)((remaining_ms % 1000) * 1000);
-
-            int sel = select((int)sock + 1, &fds, NULL, NULL, &tv);
-            if (sel <= 0)
-                break;
-
-            uint8_t buf[STUN_MAX_MSG_SIZE];
-            struct sockaddr_storage from_addr;
-            socklen_t fromlen = sizeof(from_addr);
-            ssize_t n = recvfrom(sock, (char *)buf, sizeof(buf), 0, (struct sockaddr *)&from_addr,
-                                 &fromlen);
-            if (n < STUN_HEADER_SIZE)
-                continue;
-
-            /* Verify STUN magic cookie */
-            uint32_t cookie = ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) |
-                              ((uint32_t)buf[6] << 8) | buf[7];
-            if (cookie != STUN_MAGIC_COOKIE)
-                continue;
-
-            uint16_t msg_type = ((uint16_t)buf[0] << 8) | buf[1];
-
-            if (msg_type == STUN_BINDING_RESPONSE) {
-                /* Verify transaction ID matches our request */
-                if (memcmp(buf + 8, req.txn_id, STUN_TXN_ID_SIZE) != 0)
-                    continue;
-
-                /* Success! Select this pair */
-                agent->selected_remote = remote->addr;
-                if (agent->local_candidate_count > 0)
-                    agent->selected_local = agent->local_candidates[0].addr;
-
-                agent->state = ICE_STATE_CONNECTED;
-                RTC_LOG_INFO("ICE: connected to %s:%u", ip, port);
-
-                /* Set remote address on transport */
-                rtc_transport_set_remote(agent->transport, &agent->selected_remote);
-                return RTC_OK;
-            }
-
-            if (msg_type == STUN_BINDING_REQUEST) {
-                /* Respond to the peer's connectivity check */
-                rtc_addr_t from;
-                memcpy(&from.addr, &from_addr, fromlen);
-                from.len = fromlen;
-                ice_send_binding_response(agent->transport, buf, &from);
-                RTC_LOG_DBG("ICE: responded to binding request from peer");
-            }
-        }
-
-        round++;
+    rtc_stun_msg_t req;
+    uint32_t prio = ice_candidate_priority(ICE_CANDIDATE_HOST, 65535, 1);
+    int rc =
+        rtc_stun_build_binding_request(&req, username, agent->remote_pwd, prio, agent->controlling,
+                                       agent->tie_breaker, agent->controlling);
+    if (rc != RTC_OK) {
+        agent->check_round++;
+        return rc;
     }
 
-    agent->state = ICE_STATE_FAILED;
-    RTC_LOG_ERR("ICE: all connectivity checks failed");
-    return RTC_ERR_ICE;
+    /* Remember the txn id so rtc_ice_handle_stun can match the response */
+    memcpy(agent->last_txn_id, req.txn_id, STUN_TXN_ID_SIZE);
+
+    rc = rtc_transport_send(agent->transport, req.buf, req.buf_len, &remote->addr);
+    agent->check_round++;
+    return rc;
+}
+
+bool rtc_ice_check_deadline_passed(const rtc_ice_agent_t *agent) {
+    return rtc_time_ms() >= agent->check_deadline_ms;
+}
+
+int rtc_ice_connect(rtc_ice_agent_t *agent) {
+    if (agent->remote_candidate_count == 0) {
+        RTC_LOG_ERR("ICE: no remote candidates to check");
+        agent->state = ICE_STATE_FAILED;
+        return RTC_ERR_ICE;
+    }
+
+    agent->state = ICE_STATE_CHECKING;
+    agent->check_round = 0;
+    agent->check_deadline_ms = rtc_time_ms() + 30000; /* 30s overall */
+    RTC_LOG_INFO("ICE: starting connectivity checks (%d remote candidates)",
+                 agent->remote_candidate_count);
+
+    /* Fire the first check synchronously; subsequent retries are scheduled by
+     * the caller via rtc_transport_add_timer + rtc_ice_send_check. The
+     * transport's recv callback dispatches BINDING_RESPONSE to
+     * rtc_ice_handle_stun, which transitions state to CONNECTED. */
+    return rtc_ice_send_check(agent);
 }
 
 /*
@@ -432,6 +369,32 @@ void rtc_ice_handle_stun(rtc_ice_agent_t *agent, const uint8_t *data, size_t len
     if (type == STUN_BINDING_REQUEST) {
         ice_send_binding_response(agent->transport, data, from);
         RTC_LOG_DBG("ICE: handled binding request from peer");
+        return;
+    }
+
+    if (type == STUN_BINDING_RESPONSE) {
+        /* Only accept responses while we're actively checking. */
+        if (agent->state != ICE_STATE_CHECKING)
+            return;
+        /* Match the transaction ID against our last outgoing request. */
+        if (memcmp(data + 8, agent->last_txn_id, STUN_TXN_ID_SIZE) != 0) {
+            RTC_LOG_DBG("ICE: binding response txn_id mismatch — ignoring");
+            return;
+        }
+
+        /* Success — promote the responding remote to selected. */
+        agent->selected_remote = *from;
+        if (agent->local_candidate_count > 0)
+            agent->selected_local = agent->local_candidates[0].addr;
+
+        agent->state = ICE_STATE_CONNECTED;
+
+        char ip[64];
+        uint16_t port;
+        rtc_addr_to_string(from, ip, sizeof(ip), &port);
+        RTC_LOG_INFO("ICE: connected to %s:%u", ip, port);
+
+        rtc_transport_set_remote(agent->transport, &agent->selected_remote);
     }
 }
 
