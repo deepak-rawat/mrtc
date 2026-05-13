@@ -241,7 +241,19 @@ signaling_client_t *signaling_create(const signaling_config_t *cfg) {
         return NULL;
 
     sc->cfg = *cfg;
-    if (parse_url(sc, cfg->server_url) != 0) {
+    /* Caller may pass stack-allocated strings; deep-copy the ones we hold
+     * past return. Callbacks/user_data remain caller-owned by API contract. */
+    sc->cfg.server_url = strdup(cfg->server_url);
+    sc->cfg.meeting = cfg->meeting ? strdup(cfg->meeting) : NULL;
+    if (!sc->cfg.server_url || (cfg->meeting && !sc->cfg.meeting)) {
+        free((void *)sc->cfg.server_url);
+        free((void *)sc->cfg.meeting);
+        free(sc);
+        return NULL;
+    }
+    if (parse_url(sc, sc->cfg.server_url) != 0) {
+        free((void *)sc->cfg.server_url);
+        free((void *)sc->cfg.meeting);
         free(sc);
         return NULL;
     }
@@ -336,5 +348,7 @@ void signaling_destroy(signaling_client_t *sc) {
     rtc_mutex_unlock(&sc->queue_mutex);
     rtc_mutex_destroy(&sc->queue_mutex);
 
+    free((void *)sc->cfg.server_url);
+    free((void *)sc->cfg.meeting);
     free(sc);
 }
