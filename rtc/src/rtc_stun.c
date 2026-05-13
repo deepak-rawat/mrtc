@@ -11,6 +11,9 @@
 #include <string.h>
 #include <openssl/evp.h>
 #include <openssl/core_names.h>
+#ifndef _WIN32
+#include <poll.h>
+#endif
 
 /* Compute HMAC-SHA1 using modern EVP_MAC API. Key is treated as a raw byte
  * buffer of length key_len — it is NOT NUL-terminated and may contain zero
@@ -387,16 +390,22 @@ int rtc_stun_binding(const char *server_ip, uint16_t server_port, rtc_socket_t s
         return RTC_ERR_SOCKET;
     }
 
-    /* Wait for response (with timeout) */
-    fd_set fds;
-    struct timeval tv;
-    FD_ZERO(&fds);
-    FD_SET(sock, &fds);
-    tv.tv_sec = 3;
-    tv.tv_usec = 0;
-
-    int sel = select((int)sock + 1, &fds, NULL, NULL, &tv);
-    if (sel <= 0) {
+    /* Wait for response (with timeout). Use poll/WSAPoll, not select: on
+     * Linux, FD_SET overflows fd_set when sock >= FD_SETSIZE (1024). */
+#ifdef _WIN32
+    WSAPOLLFD pfd;
+    pfd.fd = sock;
+    pfd.events = POLLRDNORM;
+    pfd.revents = 0;
+    int pn = WSAPoll(&pfd, 1, 3000);
+#else
+    struct pollfd pfd;
+    pfd.fd = sock;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    int pn = poll(&pfd, 1, 3000);
+#endif
+    if (pn <= 0) {
         RTC_LOG_ERR("STUN timeout");
         return RTC_ERR_TIMEOUT;
     }
