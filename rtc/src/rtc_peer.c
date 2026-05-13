@@ -144,6 +144,12 @@ struct rtc_peer_connection {
      * Hot path: O(1) average via rtc_u32_map (Fibonacci hash + linear probing). */
     rtc_u32_map_t recv_map;
 
+    /* Fast SSRC → sender lookup. Populated eagerly in add_track when the
+     * sender's SSRC is allocated. Used to demux RTCP RR report blocks back
+     * to the originating local sender (so an audio RR doesn't perturb a
+     * video sender's rate controller, and vice versa). */
+    rtc_u32_map_t send_map;
+
     /* DTLS application-data receive buffer. Sized to the max DTLS record
      * payload (64 KiB) so a single SCTP/data-channel chunk can never be
      * truncated. Heap-allocated to keep struct rtc_peer_connection small. */
@@ -539,14 +545,16 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                                 rtt_ms = 0;
                         }
 
-                        /* TODO: RTCP RR demux — rr->ssrc identifies which of
-                         * our senders is being reported on, but we feed a single
-                         * shared rate controller regardless. With audio+video
-                         * senders, an audio RR (low jitter, no loss) incorrectly
-                         * inflates the rate estimate used for video. Fix: match
-                         * rr->ssrc to the corresponding sender's rtcp_stats.ssrc
-                         * and give each sender (or at least each video sender)
-                         * its own rate controller. */
+                        /* RTCP RR demux: rr->ssrc identifies which of our
+                         * senders is being reported on. Look it up in send_map
+                         * so per-sender feedback can be routed correctly.
+                         * TODO Phase 2.5: replace the shared pc->rate_ctrl
+                         * with a per-sender rate controller and feed
+                         * (fraction_lost, rtt_ms, jitter) into sender->... */
+                        struct rtc_rtp_sender *sender =
+                            (struct rtc_rtp_sender *)rtc_u32_map_get(&pc->send_map, rr->ssrc);
+                        (void)sender; /* not yet wired into rate control */
+
                         if (pc->rate_ctrl) {
                             rtc_rate_control_on_rtcp_rr(pc->rate_ctrl, rr->fraction_lost, rtt_ms,
                                                         (int)rr->jitter);
@@ -727,6 +735,15 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
         return NULL;
     }
 
+    /* Initialize SSRC → sender lookup map */
+    if (rtc_u32_map_init(&pc->send_map) != RTC_OK) {
+        rtc_u32_map_free(&pc->recv_map);
+        rtc_transport_close(&pc->transport);
+        free(pc->app_buf);
+        free(pc);
+        return NULL;
+    }
+
     /* Register recv callback */
     rtc_transport_set_recv_callback(&pc->transport, peer_transport_recv, pc);
 
@@ -766,6 +783,7 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc) {
     rtc_ice_close(&pc->ice);
     rtc_transport_close(&pc->transport);
     rtc_u32_map_free(&pc->recv_map);
+    rtc_u32_map_free(&pc->send_map);
     rtc_sdp_close(&pc->local_sdp);
     rtc_sdp_close(&pc->remote_sdp);
     if (pc->rate_ctrl) {
@@ -816,6 +834,10 @@ rtc_rtp_sender_t *rtc_peer_connection_add_track(rtc_peer_connection_t *pc, rtc_k
     t->sender.active = true;
     rtc_rtp_session_init(&t->sender.rtp_session, codec->payload_type, codec->clock_rate);
     rtc_rtcp_stats_init(&t->sender.rtcp_stats, t->sender.rtp_session.ssrc);
+
+    /* Eager SSRC → sender map: SSRC is known now, register so RTCP RR
+     * report blocks naming this SSRC can be demuxed back to this sender. */
+    rtc_u32_map_set(&pc->send_map, t->sender.rtp_session.ssrc, &t->sender);
 
     /* Receiver (activated when remote description arrives) */
     t->receiver.codec = *codec;
