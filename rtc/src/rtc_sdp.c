@@ -93,6 +93,12 @@ static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media
         SDP_WRITE(p, remain, "a=sctp-port:5000\r\n");
     }
 
+    /* SSRC (audio/video only). cname is required by RFC 5576; mrtc does not
+     * use it for correlation so a fixed token suffices. */
+    if ((m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) && m->ssrc != 0) {
+        SDP_WRITE(p, remain, "a=ssrc:%u cname:mrtc\r\n", m->ssrc);
+    }
+
     return RTC_OK;
 }
 
@@ -353,6 +359,17 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
                     memcpy(m->codec_name, codec, clen);
                     m->codec_name[clen] = '\0';
                 }
+            }
+        }
+
+        /* SSRC: a=ssrc:<NNN> ... (only first ssrc per m= section is captured;
+         * RFC 5576 allows multiple ssrc lines for FEC/RTX, those are ignored). */
+        if (sdp_line_starts(line, "a=ssrc:") && current_media >= 0 &&
+            current_media < sdp->media_count) {
+            unsigned long ssrc_val = 0;
+            if (sscanf(line, "a=ssrc:%lu", &ssrc_val) == 1 &&
+                sdp->media[current_media].ssrc == 0) {
+                sdp->media[current_media].ssrc = (uint32_t)ssrc_val;
             }
         }
 

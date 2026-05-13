@@ -69,10 +69,7 @@ over data channels.
 
 ### Phase 1: C11 Atomics + Design Cleanup — ✅ COMPLETE
 
-_See git log: `bc399a3` (1.1), `d2d4111` (1.3), `2ff83b7` (1.2), `8a9a243` (1.4).
-recv_map eager population is deferred until the SDP parser exposes per-media
-`a=ssrc` lines; lazy first-packet population remains in place and works for the
-current one-transceiver-per-kind cases._
+_See git log: `bc399a3` (1.1), `d2d4111` (1.3), `2ff83b7` (1.2), `8a9a243` + follow-up (1.4)._
 
 **1.1 — Replace `volatile` with `_Atomic` (`<stdatomic.h>`)**
 

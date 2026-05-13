@@ -641,6 +641,7 @@ static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
         m->clockrate = (int)t->sender.codec.clock_rate;
         m->channels = t->sender.codec.channels;
         m->mid_index = t->mid_index;
+        m->ssrc = t->sender.rtp_session.ssrc;
 
         sdp->media_count++;
     }
@@ -1041,6 +1042,25 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
             r->active = true;
             if (pc->on_track)
                 pc->on_track((rtc_rtp_receiver_t *)r, pc->on_track_user);
+        }
+    }
+
+    /* Eager SSRC → receiver map population from remote SDP. Walk parsed
+     * m= sections; for each that carried a=ssrc, find the matching
+     * transceiver by mid_index and register its receiver under that SSRC.
+     * Lazy first-packet population in peer_transport_recv remains as a
+     * defensive fallback for peers that omit a=ssrc lines. */
+    for (int i = 0; i < sdp.media_count; i++) {
+        const rtc_sdp_media_t *m = &sdp.media[i];
+        if (m->ssrc == 0)
+            continue;
+        for (int j = 0; j < pc->transceiver_count; j++) {
+            struct rtc_rtp_transceiver *t = &pc->transceivers[j];
+            if (t->mid_index == m->mid_index) {
+                t->receiver.ssrc = m->ssrc;
+                rtc_u32_map_set(&pc->recv_map, m->ssrc, &t->receiver);
+                break;
+            }
         }
     }
 

@@ -55,6 +55,7 @@ typedef struct {
     int channels;        /* e.g. 2 for Opus. 0 for video. */
     char codec_name[32]; /* e.g. "opus", "VP8", "H264" */
     int mid_index;       /* m= line index (0, 1, 2, ...) */
+    uint32_t ssrc;       /* a=ssrc:<NNN> ... 0 means not present */
 } rtc_sdp_media_t;
 
 typedef struct {
