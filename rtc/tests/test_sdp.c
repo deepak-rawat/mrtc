@@ -184,6 +184,14 @@ TEST(sdp_roundtrip) {
     rtc_addr_from_string(&cand1.addr, "8.8.8.8", 54321);
     rtc_sdp_add_candidate(&orig, &cand1);
 
+    rtc_ice_candidate_t cand2 = {0};
+    cand2.type = ICE_CANDIDATE_RELAY;
+    cand2.component = 1;
+    cand2.priority = 16777215;
+    strcpy(cand2.foundation, "R2");
+    rtc_addr_from_string(&cand2.addr, "203.0.113.7", 3478);
+    rtc_sdp_add_candidate(&orig, &cand2);
+
     /* Generate */
     int rc = rtc_sdp_generate(&orig);
     ASSERT_EQ(rc, RTC_OK);
@@ -203,7 +211,7 @@ TEST(sdp_roundtrip) {
     ASSERT_EQ(parsed.clockrate, 8000);
     ASSERT_EQ(parsed.channels, 1);
     ASSERT_STR_EQ(parsed.codec_name, "PCMA");
-    ASSERT_EQ((int)rtc_sdp_candidate_count(&parsed), 2);
+    ASSERT_EQ((int)rtc_sdp_candidate_count(&parsed), 3);
 
     /* Verify candidate IPs survived round-trip */
     char ip[64];
@@ -212,13 +220,21 @@ TEST(sdp_roundtrip) {
     rtc_addr_to_string(&pc0->addr, ip, sizeof(ip), &port);
     ASSERT_STR_EQ(ip, "192.168.1.50");
     ASSERT_EQ(port, 12345);
+    ASSERT_EQ(pc0->type, ICE_CANDIDATE_HOST);
 
     const rtc_ice_candidate_t *pc1 = rtc_sdp_get_candidate(&parsed, 1);
     rtc_addr_to_string(&pc1->addr, ip, sizeof(ip), &port);
     ASSERT_STR_EQ(ip, "8.8.8.8");
     ASSERT_EQ(port, 54321);
+    ASSERT_EQ(pc1->type, ICE_CANDIDATE_SRFLX);
 
-    printf("    round-trip: all fields preserved (2 candidates)\n");
+    const rtc_ice_candidate_t *pc2 = rtc_sdp_get_candidate(&parsed, 2);
+    rtc_addr_to_string(&pc2->addr, ip, sizeof(ip), &port);
+    ASSERT_STR_EQ(ip, "203.0.113.7");
+    ASSERT_EQ(port, 3478);
+    ASSERT_EQ(pc2->type, ICE_CANDIDATE_RELAY);
+
+    printf("    round-trip: all fields preserved (3 candidates)\n");
     rtc_sdp_close(&orig);
     rtc_sdp_close(&parsed);
 }

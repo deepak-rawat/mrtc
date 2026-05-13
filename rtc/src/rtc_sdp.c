@@ -162,6 +162,9 @@ int rtc_sdp_generate(rtc_sdp_t *sdp) {
             case ICE_CANDIDATE_SRFLX:
                 type_str = "srflx";
                 break;
+            case ICE_CANDIDATE_RELAY:
+                type_str = "relay";
+                break;
             default:
                 type_str = "host";
                 break;
@@ -376,6 +379,8 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
                     c.type = ICE_CANDIDATE_HOST;
                 else if (strcmp(type_str, "srflx") == 0)
                     c.type = ICE_CANDIDATE_SRFLX;
+                else if (strcmp(type_str, "relay") == 0)
+                    c.type = ICE_CANDIDATE_RELAY;
                 else
                     c.type = ICE_CANDIDATE_HOST;
 
