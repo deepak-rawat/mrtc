@@ -67,24 +67,12 @@ over data channels.
 
 ## Known Bugs (by severity)
 
-### High
-
-| Bug | Location | Description |
-|---|---|---|
-| SRTP no buffer size check | `rtc_srtp.c` | `protect` appends auth tag without verifying buffer capacity. API lacks `buflen` parameter. |
-| ICE/transport socket race | `rtc_ice.c` `rtc_ice_connect` | Synchronous `recvfrom()` on same socket transport thread polls. Either thread steals packets. |
-| Rate controller data race | `rtc_rate_control.c` | Written on transport thread, read on main thread, no mutex. Torn reads on multi-word fields. |
-| CRC32 table init race | `rtc_stun.c` | Global `crc32_table[]` first-init with no synchronization. Two threads → corrupted table → broken STUN FINGERPRINT. |
-| No SRTP replay protection | `rtc_srtp.c` | RFC 3711 requires replay list. Captured packets can be replayed. |
-| Destroy without close → UAF | `rtc_peer.c` `destroy` | `free(pc)` while transport thread still running → use-after-free. |
-| STUN IPv6 OOB read | `rtc_stun.c` | Checks `alen >= 8` but IPv6 mapped address needs 20 bytes. Reads 12 bytes past buffer. |
-
 ### Medium
 
 | Bug | Location | Description |
 |---|---|---|
 | Relay candidates labeled "host" | `rtc_sdp.c` | Missing `ICE_CANDIDATE_RELAY` case → defaults to "host". TURN relay broken with compliant peers. |
-| `select()` unsafe for fd ≥ 1024 | `rtc_ice.c` / `rtc_stun.c` | `FD_SET` on high fds overflows `fd_set` stack buffer on Linux. |
+| `select()` unsafe for fd ≥ 1024 | `rtc_stun.c` | `FD_SET` on high fds overflows `fd_set` stack buffer on Linux. |
 | Signaling config shallow copy | `signaling_client.c` | String pointers from stack config become dangling after caller returns. |
 | Jitter buffer recursive pop | `jitter_buffer.c` | Up to 64 recursion levels skipping lost packets. Stack overflow risk. |
 | VP8 2-byte PictureID not handled | `vp8_packetizer.c` | RFC 7741 M-bit extension ignored. Breaks interop with extended PictureID peers. |
