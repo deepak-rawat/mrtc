@@ -65,38 +65,9 @@ over data channels.
 
 ---
 
-## Known Limitations
+## Known Bugs (by severity)
 
-| Area | Limitation |
-|---|---|
-| Atomics | `volatile` used instead of `_Atomic` — no real memory ordering |
-| RTCP | SR/RR integrated with periodic send, SRTCP, rate control feedback — no NACK, PLI, FIR, REMB |
-| Bandwidth | AIMD rate controller driven by RTCP RR — no delay-based BWE |
-| FEC | No forward error correction |
-| ICE | No trickle ICE, no relay candidates, always controlling role |
-| Stats | No `getStats()` API |
-| Pipeline | Send/recv share one bloated struct with unused fields |
-| SDP | `rtc_sdp.h` is public but only `rtc_peer.h` needs two types from it |
-| Codec negotiation | Conference hardcodes VP8/Opus |
-| Mute | Only at conference level, not at sender level |
-| `on_track` | Passes `rtc_rtp_receiver_t*`, should pass `rtc_rtp_transceiver_t*` |
-| RTP demux | SSRC→receiver cache is O(n) linear scan; use a hashmap for O(1) |
-| Rate control | Single rate controller shared by all video senders; media pipeline uses first peer's feedback only |
-| RTCP RR demux | Receiver Reports feed a single shared rate controller; should match RR `ssrc` to the corresponding sender's stats |
-
-### Known Bugs (by severity)
-
-#### Critical
-
-| Bug | Location | Description |
-|---|---|---|
-| SDP gen buffer overflow | `rtc_sdp.c` `sdp_write_media_section` | `*remain -= n` unsigned underflow wraps to `SIZE_MAX`, subsequent `snprintf` writes past `sdp->raw[8192]`. Remote-triggerable via many candidates/transceivers. |
-| SDP parse underflow | `rtc_sdp.c` `rtc_sdp_parse` | `vlen = line_len - prefix_len` underflows when `line_len < prefix_len`, causing massive `memcpy` overflow. Remote-triggerable via malformed SDP. |
-| TURN auth key truncation | `rtc_turn.c` / `turn_handler.c` | Binary MD5 `lt_key` passed as `const char*` to HMAC functions that call `strlen()`. Null bytes truncate key (~63% chance). Auth non-deterministically broken or weakened. |
-| No memory ordering | `rtc_peer.c` | `volatile` on `connection_state` etc. has no acquire/release semantics. On ARM, main thread can see `CONNECTED` but read stale SRTP context. |
-| Data channel ID 8-bit truncation | `rtc_data_channel.c` | `channel_id = data[0]` reads 1 byte but IDs are `uint16_t`. Channels ≥ 256 never receive messages. |
-
-#### High
+### High
 
 | Bug | Location | Description |
 |---|---|---|
@@ -108,7 +79,7 @@ over data channels.
 | Destroy without close → UAF | `rtc_peer.c` `destroy` | `free(pc)` while transport thread still running → use-after-free. |
 | STUN IPv6 OOB read | `rtc_stun.c` | Checks `alen >= 8` but IPv6 mapped address needs 20 bytes. Reads 12 bytes past buffer. |
 
-#### Medium
+### Medium
 
 | Bug | Location | Description |
 |---|---|---|
@@ -162,6 +133,19 @@ is 256KB).
 `rtc_peer.h` only needs `SDP_MAX_SIZE` and `rtc_sdp_type_t`. Move those into
 `rtc_peer.h`, move `rtc_sdp.h` to `rtc/src/`.
 
+**1.4 — O(1) SSRC→receiver demux**
+
+Current peer connection scans the receiver list linearly on every inbound RTP
+packet. Replace with a hashmap keyed by SSRC (use `rtc_u32_map` from `common`):
+
+```c
+rtc_u32_map_t ssrc_to_receiver;   // SSRC → rtc_rtp_receiver_t*
+rtc_u32_map_t ssrc_to_sender;     // SSRC → rtc_rtp_sender_t* (for RTCP RR demux)
+```
+
+Populate when transceivers are created / remote SSRCs are learned from SDP.
+Required prerequisite for Phase 2.5 (per-sender RR demux).
+
 ---
 
 ### Phase 2: RTCP Feedback (NACK, PLI, REMB)
@@ -204,6 +188,26 @@ Media pipeline wires: `on_pli` → `video_encoder_request_keyframe()`,
 
 Wire `peer_transport_recv` to parse RTCP packet type and dispatch to matching
 sender/receiver callbacks.
+
+**2.5 — Per-sender rate control + RR demux**
+
+Today a single `rtc_rate_control_t` is shared by all video senders and the media
+pipeline only consumes feedback from the first peer. Move the rate controller
+*into* each `rtc_rtp_sender_t`:
+
+```c
+struct rtc_rtp_sender_t {
+    uint32_t ssrc;
+    rtc_rate_control_t rate_ctrl;   // per-sender, not shared
+    rtc_nack_buf_t *nack_buf;
+    ...
+};
+```
+
+When a Receiver Report arrives, use the SSRC→sender hashmap from 1.4 to feed
+loss / jitter / RTT into the correct sender's rate controller. Media pipeline
+queries each sender's target bitrate independently and encodes per peer
+(or picks min across peers for shared encoder).
 
 ---
 
