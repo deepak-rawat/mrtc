@@ -86,6 +86,7 @@ typedef struct {
     uint32_t packets_received;
     uint32_t packets_expected;
     uint32_t packets_lost;
+    uint32_t base_seq;     /* extended seq of first packet received (RFC 3550 §A.1) */
     uint32_t highest_seq;  /* highest seq received (with ROC in upper 16 bits) */
     uint32_t jitter;       /* interarrival jitter (Q16.16 fixed point) */
     uint32_t last_transit; /* last transit time for jitter calc */

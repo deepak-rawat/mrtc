@@ -165,6 +165,33 @@ TEST(rtcp_stats_loss) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: stats track loss correctly when seq doesn't start at 0       */
+/*  (RFC 3550 §5.1: real streams pick a random initial seq.)           */
+/* ------------------------------------------------------------------ */
+TEST(rtcp_stats_loss_nonzero_start) {
+    rtc_rtcp_stats_t stats;
+    rtc_rtcp_stats_init(&stats, 0x12345678);
+
+    /* Start at seq 12345, receive 5 packets cleanly */
+    for (uint16_t i = 0; i < 5; i++)
+        rtc_rtcp_stats_on_rtp_recv(&stats, (uint16_t)(12345 + i), i * 960, 0xAABBCCDD, 48000);
+
+    ASSERT_EQ(stats.packets_received, 5);
+    ASSERT_EQ(stats.packets_expected, 5);
+    ASSERT_EQ(stats.packets_lost, 0);
+
+    /* Skip 12350-12351 and receive 12352 — one gap of 2 lost. */
+    rtc_rtcp_stats_on_rtp_recv(&stats, 12352, 7 * 960, 0xAABBCCDD, 48000);
+    ASSERT_EQ(stats.packets_received, 6);
+    ASSERT_EQ(stats.packets_expected, 8);
+    ASSERT_EQ(stats.packets_lost, 2);
+
+    printf("    nonzero-start loss: base=%u highest=%u received=%u expected=%u lost=%u\n",
+           stats.base_seq, stats.highest_seq, stats.packets_received, stats.packets_expected,
+           stats.packets_lost);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Test: RTCP detection                                               */
 /* ------------------------------------------------------------------ */
 TEST(rtcp_is_rtcp) {
@@ -254,6 +281,7 @@ int main(void) {
     RUN_TEST(rtcp_sr_roundtrip);
     RUN_TEST(rtcp_rr_roundtrip);
     RUN_TEST(rtcp_stats_loss);
+    RUN_TEST(rtcp_stats_loss_nonzero_start);
     RUN_TEST(rtcp_is_rtcp);
     RUN_TEST(rtcp_parse_invalid);
     RUN_TEST(rtcp_sr_no_reports);

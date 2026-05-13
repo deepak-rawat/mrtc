@@ -59,6 +59,7 @@ void rtc_rtcp_stats_on_rtp_recv(rtc_rtcp_stats_t *stats, uint16_t seq, uint32_t 
     if (stats->first_packet) {
         stats->remote_ssrc = ssrc;
         stats->highest_seq = seq;
+        stats->base_seq = seq;
         stats->first_packet = false;
         stats->packets_received = 1;
         stats->packets_expected = 1;
@@ -81,8 +82,10 @@ void rtc_rtcp_stats_on_rtp_recv(rtc_rtcp_stats_t *stats, uint16_t seq, uint32_t 
     if (seq32 > stats->highest_seq)
         stats->highest_seq = seq32;
 
-    /* Expected packets = highest_seq - first_seq + 1 (simplified) */
-    stats->packets_expected = stats->highest_seq + 1;
+    /* Expected packets (RFC 3550 §A.3): highest_seq - base_seq + 1.
+     * The base_seq itself is an extended 32-bit value (the upper 16 bits are
+     * the rollover counter, which is 0 at session start). */
+    stats->packets_expected = stats->highest_seq - stats->base_seq + 1;
 
     /* Packet loss */
     if (stats->packets_expected > stats->packets_received)
