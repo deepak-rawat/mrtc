@@ -35,6 +35,18 @@ typedef struct {
     bool initialized;
 } rtc_srtp_replay_t;
 
+/* Per-SSRC replay state. RFC 3711 §3.2.3: replay list is scoped to a single
+ * cryptographic context which is keyed on the SSRC — bundled WebRTC streams
+ * (audio + video on one transport) share a single SRTP key but have
+ * independent sequence-number spaces and so need independent windows. */
+#define SRTP_REPLAY_MAX_STREAMS 8
+typedef struct {
+    uint32_t ssrc;
+    bool in_use;
+    uint64_t lru_tick; /* set on each access; smallest is evicted when full */
+    rtc_srtp_replay_t replay;
+} rtc_srtp_replay_entry_t;
+
 typedef struct {
     /* Master key + salt (from DTLS export) */
     uint8_t master_key[SRTP_MAX_KEY_LEN];
@@ -57,9 +69,10 @@ typedef struct {
     /* SRTCP index counter */
     uint32_t srtcp_index;
 
-    /* Replay protection — receive direction only */
-    rtc_srtp_replay_t rtp_replay;
-    rtc_srtp_replay_t rtcp_replay;
+    /* Replay protection — receive direction only, per-SSRC. */
+    rtc_srtp_replay_entry_t rtp_replay[SRTP_REPLAY_MAX_STREAMS];
+    rtc_srtp_replay_entry_t rtcp_replay[SRTP_REPLAY_MAX_STREAMS];
+    uint64_t replay_lru_tick;
 
     bool initialized;
 } rtc_srtp_ctx_t;

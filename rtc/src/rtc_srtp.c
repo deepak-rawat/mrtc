@@ -99,12 +99,43 @@ static int srtp_replay_check(rtc_srtp_replay_t *r, uint64_t index) {
 }
 
 /*
+ * Find (or allocate) the replay window for `ssrc` in a per-SSRC table.
+ * On overflow evicts the least-recently-used entry. Never fails.
+ */
+static rtc_srtp_replay_t *srtp_replay_for_ssrc(rtc_srtp_replay_entry_t *table, size_t n,
+                                               uint64_t *lru_tick, uint32_t ssrc) {
+    rtc_srtp_replay_entry_t *free_slot = NULL;
+    rtc_srtp_replay_entry_t *lru_slot = &table[0];
+    for (size_t i = 0; i < n; i++) {
+        if (table[i].in_use && table[i].ssrc == ssrc) {
+            table[i].lru_tick = ++(*lru_tick);
+            return &table[i].replay;
+        }
+        if (!table[i].in_use && !free_slot)
+            free_slot = &table[i];
+        if (table[i].lru_tick < lru_slot->lru_tick)
+            lru_slot = &table[i];
+    }
+
+    rtc_srtp_replay_entry_t *slot = free_slot ? free_slot : lru_slot;
+    if (slot == lru_slot && slot->in_use) {
+        RTC_LOG_WARN("SRTP: replay table full, evicting SSRC=0x%08x for SSRC=0x%08x", slot->ssrc,
+                     ssrc);
+    }
+    memset(slot, 0, sizeof(*slot));
+    slot->ssrc = ssrc;
+    slot->in_use = true;
+    slot->lru_tick = ++(*lru_tick);
+    return &slot->replay;
+}
+
+/*
  * SRTP Key Derivation Function (RFC 3711, Section 4.3.1)
  *
  * derived_key = AES-CM(master_key, master_salt XOR (label << 48))
  */
-static int srtp_kdf(const uint8_t *master_key, size_t key_len, const uint8_t *master_salt,
-                    size_t salt_len, uint8_t label, uint8_t *out, size_t out_len) {
+static int srtp_kdf(const uint8_t *master_key, const uint8_t *master_salt, size_t salt_len,
+                    uint8_t label, uint8_t *out, size_t out_len) {
     /* Build the "x" value: salt XOR (label || index) padded to 14 bytes */
     uint8_t x[14];
     memset(x, 0, sizeof(x));
@@ -163,36 +194,35 @@ int rtc_srtp_init(rtc_srtp_ctx_t *ctx, const uint8_t *master_key, size_t key_len
 
     /* Derive session keys */
     int rc;
-    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTP_ENCRYPTION,
-                  ctx->session_key, SRTP_MAX_KEY_LEN);
+    rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTP_ENCRYPTION, ctx->session_key,
+                  SRTP_MAX_KEY_LEN);
     if (rc != RTC_OK)
         return rc;
 
-    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTP_SALT,
-                  ctx->session_salt, SRTP_MAX_SALT_LEN);
+    rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTP_SALT, ctx->session_salt,
+                  SRTP_MAX_SALT_LEN);
     if (rc != RTC_OK)
         return rc;
 
     uint8_t auth_key[20];
-    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTP_AUTH, auth_key, 20);
+    rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTP_AUTH, auth_key, 20);
     if (rc != RTC_OK)
         return rc;
     memcpy(ctx->session_auth_key, auth_key, 20);
 
     /* Derive RTCP session keys (labels 0x03-0x05) */
-    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTCP_ENCRYPTION,
+    rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTCP_ENCRYPTION,
                   ctx->rtcp_session_key, SRTP_MAX_KEY_LEN);
     if (rc != RTC_OK)
         return rc;
 
-    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTCP_SALT,
-                  ctx->rtcp_session_salt, SRTP_MAX_SALT_LEN);
+    rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTCP_SALT, ctx->rtcp_session_salt,
+                  SRTP_MAX_SALT_LEN);
     if (rc != RTC_OK)
         return rc;
 
     uint8_t rtcp_auth_key[20];
-    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTCP_AUTH, rtcp_auth_key,
-                  20);
+    rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTCP_AUTH, rtcp_auth_key, 20);
     if (rc != RTC_OK)
         return rc;
     memcpy(ctx->rtcp_session_auth_key, rtcp_auth_key, 20);
@@ -349,9 +379,12 @@ int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     }
 
     /* Replay check (RFC 3711 §3.3.2) — after auth verify to avoid spoofed
-     * replay rejection. Packet index = (ROC << 16) | seq. */
+     * replay rejection. Packet index = (ROC << 16) | seq. Window is per-SSRC:
+     * bundled streams share a key but not a sequence space. */
     uint64_t pkt_index = ((uint64_t)roc << 16) | seq;
-    int replay_rc = srtp_replay_check(&ctx->rtp_replay, pkt_index);
+    rtc_srtp_replay_t *replay =
+        srtp_replay_for_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS, &ctx->replay_lru_tick, ssrc);
+    int replay_rc = srtp_replay_check(replay, pkt_index);
     if (replay_rc != RTC_OK)
         return replay_rc;
 
@@ -505,8 +538,13 @@ int rtc_srtp_unprotect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
         return RTC_ERR_SRTP;
     }
 
-    /* Replay check (RFC 3711 §3.3.2) — after auth verify. */
-    int replay_rc = srtp_replay_check(&ctx->rtcp_replay, (uint64_t)index);
+    /* Replay check (RFC 3711 §3.3.2) — after auth verify. Per-SSRC: the
+     * SRTCP index space is independent for each sender. */
+    uint32_t sender_ssrc =
+        ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) | ((uint32_t)buf[6] << 8) | buf[7];
+    rtc_srtp_replay_t *replay = srtp_replay_for_ssrc(ctx->rtcp_replay, SRTP_REPLAY_MAX_STREAMS,
+                                                     &ctx->replay_lru_tick, sender_ssrc);
+    int replay_rc = srtp_replay_check(replay, (uint64_t)index);
     if (replay_rc != RTC_OK)
         return replay_rc;
 
