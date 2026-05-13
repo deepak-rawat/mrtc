@@ -69,16 +69,9 @@ over data channels.
 
 ### Medium
 
-| Bug | Location | Description |
-|---|---|---|
-| Relay candidates labeled "host" | `rtc_sdp.c` | Missing `ICE_CANDIDATE_RELAY` case → defaults to "host". TURN relay broken with compliant peers. |
-| `select()` unsafe for fd ≥ 1024 | `rtc_stun.c` | `FD_SET` on high fds overflows `fd_set` stack buffer on Linux. |
-| Signaling config shallow copy | `signaling_client.c` | String pointers from stack config become dangling after caller returns. |
-| Jitter buffer recursive pop | `jitter_buffer.c` | Up to 64 recursion levels skipping lost packets. Stack overflow risk. |
-| VP8 2-byte PictureID not handled | `vp8_packetizer.c` | RFC 7741 M-bit extension ignored. Breaks interop with extended PictureID peers. |
-| DTLS app data buffer too small | `rtc_peer.c` | 2048-byte `SSL_read` buffer vs 65535 max data channel message size. Large messages fragmented mid-message. |
-| TURN nonce never rotated | `turn_handler.c` | Single nonce for server lifetime. Enables replay attacks. |
-| RTCP loss calc ignores initial seq | `rtc_rtcp.c` | `packets_expected = highest_seq + 1` assumes seq started at 0. Wrong loss stats → wrong rate control. |
+_(none — see git log for recent fixes: relay candidate label, STUN poll(),
+signaling deep-copy, jitter buffer derecursion, VP8 M-bit PictureID,
+64 KiB DTLS app buffer, TURN nonce rotation, RTCP base_seq.)_
 
 ---
 
