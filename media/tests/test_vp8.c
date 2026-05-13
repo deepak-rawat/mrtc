@@ -250,6 +250,42 @@ TEST(vp8_multiple_frames) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: depacketize with 15-bit (M-bit) PictureID                    */
+/*  RFC 7741 §4.2: if first PictureID byte's high bit is set, the ID  */
+/*  spans 2 bytes rather than 1.                                       */
+/* ------------------------------------------------------------------ */
+TEST(vp8_depacketize_long_picid) {
+    rtc_vp8_depacketizer_t depac;
+    rtc_vp8_depacketizer_init(&depac);
+
+    uint8_t vp8_data[20];
+    memset(vp8_data, 0xAB, sizeof(vp8_data));
+
+    /* Build payload with X-bit + I-bit + 2-byte PictureID (M-bit set). */
+    uint8_t payload[4 + sizeof(vp8_data)];
+    payload[0] = 0x90;          /* X=1, S=1 (start) */
+    payload[1] = 0x80;          /* I=1, L=0, T=0, K=0 */
+    payload[2] = 0x80 | 0x12;   /* PictureID byte 1: M-bit set + upper 7 bits */
+    payload[3] = 0x34;          /* PictureID byte 2: lower 8 bits */
+    memcpy(payload + 4, vp8_data, sizeof(vp8_data));
+
+    const uint8_t *frame_out = NULL;
+    size_t frame_len = 0;
+    bool is_keyframe = false;
+
+    int rc = rtc_vp8_depacketize(&depac, payload, sizeof(payload), 4000, true, &frame_out,
+                                 &frame_len, &is_keyframe);
+    ASSERT_EQ(rc, RTC_OK);
+    ASSERT_EQ(frame_len, sizeof(vp8_data));
+    ASSERT_MEM_EQ(frame_out, vp8_data, sizeof(vp8_data));
+
+    /* Sanity: same payload with M-bit clear is a 1-byte PictureID. The
+     * descriptor would be 3 bytes (not 4), so a depacketizer that does NOT
+     * honor the M-bit would have included payload[3]=0x34 as VP8 data. */
+    printf("    depacketized 2-byte PictureID (M-bit): %zu bytes\n", frame_len);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  VP8 RTP Packetization Tests\n");
@@ -264,6 +300,7 @@ int main(void) {
     RUN_TEST(vp8_roundtrip_large);
     RUN_TEST(vp8_depacketize_no_start);
     RUN_TEST(vp8_multiple_frames);
+    RUN_TEST(vp8_depacketize_long_picid);
 
     TEST_SUMMARY();
 }

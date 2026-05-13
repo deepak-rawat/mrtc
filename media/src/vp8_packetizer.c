@@ -81,8 +81,13 @@ int rtc_vp8_depacketize(rtc_vp8_depacketizer_t *d, const uint8_t *payload, size_
         uint8_t ext = payload[1];
         pd_len = 2;
         /* Skip I, L, T, K extension bytes if flagged */
-        if (ext & 0x80)
-            pd_len++; /* I: PictureID */
+        if (ext & 0x80) {
+            /* I: PictureID. RFC 7741 §4.2: if the high bit (M) of the first
+             * PictureID byte is set, the ID is 15 bits over 2 bytes. */
+            if (pd_len >= len)
+                return RTC_ERR_INVALID;
+            pd_len += (payload[pd_len] & 0x80) ? 2 : 1;
+        }
         if (ext & 0x40)
             pd_len++; /* L: TL0PICIDX */
         if (ext & 0x20 || ext & 0x10)
