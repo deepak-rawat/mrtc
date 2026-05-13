@@ -145,8 +145,7 @@ int jitter_buffer_pop(jitter_buffer_t *jb, jitter_buffer_packet_t *out) {
     /* Loop instead of recursing: each "skip lost packet" round advances
      * next_seq and retries from the top. */
     for (;;) {
-        jb_slot_t *slot =
-            (jb_slot_t *)rtc_u32_map_get(&jb->by_seq, (uint32_t)jb->next_seq);
+        jb_slot_t *slot = (jb_slot_t *)rtc_u32_map_get(&jb->by_seq, (uint32_t)jb->next_seq);
         if (slot) {
             int age = (int)(now - slot->arrival_ms);
             if (age < jb->target_delay_ms)

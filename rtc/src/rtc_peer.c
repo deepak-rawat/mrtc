@@ -434,8 +434,7 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
             /* Check for DTLS application data (data channel messages) */
             if (pc->dtls.state == RTC_DTLS_STATE_CONNECTED) {
                 int app_len;
-                while ((app_len = SSL_read(pc->dtls.ssl, pc->app_buf,
-                                           (int)pc->app_buf_cap)) > 0) {
+                while ((app_len = SSL_read(pc->dtls.ssl, pc->app_buf, (int)pc->app_buf_cap)) > 0) {
                     rtc_dc_manager_recv(&pc->dc_manager, pc->app_buf, (size_t)app_len);
                 }
             }

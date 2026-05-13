@@ -263,10 +263,10 @@ TEST(vp8_depacketize_long_picid) {
 
     /* Build payload with X-bit + I-bit + 2-byte PictureID (M-bit set). */
     uint8_t payload[4 + sizeof(vp8_data)];
-    payload[0] = 0x90;          /* X=1, S=1 (start) */
-    payload[1] = 0x80;          /* I=1, L=0, T=0, K=0 */
-    payload[2] = 0x80 | 0x12;   /* PictureID byte 1: M-bit set + upper 7 bits */
-    payload[3] = 0x34;          /* PictureID byte 2: lower 8 bits */
+    payload[0] = 0x90;        /* X=1, S=1 (start) */
+    payload[1] = 0x80;        /* I=1, L=0, T=0, K=0 */
+    payload[2] = 0x80 | 0x12; /* PictureID byte 1: M-bit set + upper 7 bits */
+    payload[3] = 0x34;        /* PictureID byte 2: lower 8 bits */
     memcpy(payload + 4, vp8_data, sizeof(vp8_data));
 
     const uint8_t *frame_out = NULL;

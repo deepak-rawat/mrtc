@@ -12,7 +12,7 @@
 #include <openssl/evp.h>
 #include <openssl/core_names.h>
 #ifndef _WIN32
-#include <poll.h>
+#  include <poll.h>
 #endif
 
 /* Compute HMAC-SHA1 using modern EVP_MAC API. Key is treated as a raw byte

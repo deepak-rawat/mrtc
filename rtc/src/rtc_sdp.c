@@ -147,8 +147,7 @@ int rtc_sdp_generate(rtc_sdp_t *sdp) {
     /* Candidates (after all media sections — applies to BUNDLE) */
     size_t ncand = rtc_vec_len(&sdp->candidates);
     for (size_t i = 0; i < ncand; i++) {
-        const rtc_ice_candidate_t *c =
-            (const rtc_ice_candidate_t *)rtc_vec_at(&sdp->candidates, i);
+        const rtc_ice_candidate_t *c = (const rtc_ice_candidate_t *)rtc_vec_at(&sdp->candidates, i);
         char ip[64];
         uint16_t port;
         if (rtc_addr_to_string(&c->addr, ip, sizeof(ip), &port) != RTC_OK)

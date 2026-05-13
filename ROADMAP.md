@@ -65,16 +65,6 @@ over data channels.
 
 ---
 
-## Known Bugs (by severity)
-
-### Medium
-
-_(none — see git log for recent fixes: relay candidate label, STUN poll(),
-signaling deep-copy, jitter buffer derecursion, VP8 M-bit PictureID,
-64 KiB DTLS app buffer, TURN nonce rotation, RTCP base_seq.)_
-
----
-
 ## Implementation Plan
 
 ### Phase 1: C11 Atomics + Design Cleanup
