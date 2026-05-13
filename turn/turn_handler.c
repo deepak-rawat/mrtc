@@ -125,8 +125,9 @@ static int verify_credentials(turn_server_t *ts, const rtc_stun_msg_t *msg, cons
     if (ulen != strlen(ts->username) || memcmp(uval, ts->username, ulen) != 0)
         return -1;
 
-    /* Verify MESSAGE-INTEGRITY with long-term key */
-    return rtc_stun_verify_integrity(raw, raw_len, (const char *)ts->lt_key);
+    /* Verify MESSAGE-INTEGRITY with long-term key.  lt_key is 16 raw bytes
+     * of MD5(user:realm:pass) — may contain NUL, so use the byte-key variant. */
+    return rtc_stun_verify_integrity_key(raw, raw_len, ts->lt_key, sizeof(ts->lt_key));
 }
 
 static void handle_allocate(turn_server_t *ts, const rtc_stun_msg_t *msg, const uint8_t *raw,

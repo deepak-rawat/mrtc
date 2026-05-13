@@ -12,8 +12,10 @@
 #include <openssl/evp.h>
 #include <openssl/core_names.h>
 
-/* Compute HMAC-SHA1 using modern EVP_MAC API */
-static int stun_hmac_sha1(const char *key, size_t key_len, const uint8_t *data, size_t data_len,
+/* Compute HMAC-SHA1 using modern EVP_MAC API. Key is treated as a raw byte
+ * buffer of length key_len — it is NOT NUL-terminated and may contain zero
+ * bytes (required for TURN long-term credentials, RFC 5389 §10.2). */
+static int stun_hmac_sha1(const uint8_t *key, size_t key_len, const uint8_t *data, size_t data_len,
                           uint8_t *out, size_t *out_len) {
     EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
     if (!mac)
@@ -28,8 +30,8 @@ static int stun_hmac_sha1(const char *key, size_t key_len, const uint8_t *data, 
                            OSSL_PARAM_construct_end()};
 
     int ret = RTC_ERR_GENERIC;
-    if (EVP_MAC_init(ctx, (const unsigned char *)key, key_len, params) &&
-        EVP_MAC_update(ctx, data, data_len) && EVP_MAC_final(ctx, out, out_len, *out_len))
+    if (EVP_MAC_init(ctx, key, key_len, params) && EVP_MAC_update(ctx, data, data_len) &&
+        EVP_MAC_final(ctx, out, out_len, *out_len))
         ret = RTC_OK;
 
     EVP_MAC_CTX_free(ctx);
@@ -163,7 +165,7 @@ int rtc_stun_build_binding_request(rtc_stun_msg_t *msg, const char *username, co
         /* Compute HMAC-SHA1 */
         size_t hmac_len = 20;
         uint8_t hmac[20];
-        stun_hmac_sha1(password, strlen(password), buf, pos, hmac, &hmac_len);
+        stun_hmac_sha1((const uint8_t *)password, strlen(password), buf, pos, hmac, &hmac_len);
 
         if (append_attr(buf, &pos, STUN_MAX_MSG_SIZE, STUN_ATTR_MESSAGE_INTEGRITY, hmac, 20) !=
             RTC_OK)
@@ -283,7 +285,8 @@ int rtc_stun_get_mapped_address(const rtc_stun_msg_t *msg, rtc_addr_t *addr) {
     return RTC_ERR_INVALID; /* attribute not found */
 }
 
-int rtc_stun_verify_integrity(const uint8_t *data, size_t len, const char *password) {
+int rtc_stun_verify_integrity_key(const uint8_t *data, size_t len, const uint8_t *key,
+                                  size_t key_len) {
     /* Find MESSAGE-INTEGRITY attribute */
     if (len < STUN_HEADER_SIZE + 24)
         return RTC_ERR_INVALID;
@@ -317,7 +320,7 @@ int rtc_stun_verify_integrity(const uint8_t *data, size_t len, const char *passw
 
             size_t hmac_len = 20;
             uint8_t computed[20];
-            stun_hmac_sha1(password, strlen(password), tmp, hmac_input_len, computed, &hmac_len);
+            stun_hmac_sha1(key, key_len, tmp, hmac_input_len, computed, &hmac_len);
 
             if (memcmp(computed, data + pos + 4, 20) == 0)
                 return RTC_OK;
@@ -327,6 +330,12 @@ int rtc_stun_verify_integrity(const uint8_t *data, size_t len, const char *passw
         pos += 4 + padded;
     }
     return RTC_ERR_INVALID; /* MI not found */
+}
+
+int rtc_stun_verify_integrity(const uint8_t *data, size_t len, const char *password) {
+    if (!password)
+        return RTC_ERR_INVALID;
+    return rtc_stun_verify_integrity_key(data, len, (const uint8_t *)password, strlen(password));
 }
 
 int rtc_stun_binding(const char *server_ip, uint16_t server_port, rtc_socket_t sock,
@@ -494,18 +503,18 @@ int rtc_stun_add_nonce(rtc_stun_msg_t *msg, const char *nonce) {
     return rc;
 }
 
-int rtc_stun_finalize(rtc_stun_msg_t *msg, const char *password) {
+int rtc_stun_finalize_key(rtc_stun_msg_t *msg, const uint8_t *key, size_t key_len) {
     uint8_t *buf = msg->buf;
     size_t pos = msg->buf_len;
 
-    if (password) {
+    if (key && key_len > 0) {
         /* Update header length to include MI */
         uint16_t mi_len = (uint16_t)(pos - STUN_HEADER_SIZE + 24);
         write_u16(buf + 2, mi_len);
 
         size_t hmac_len = 20;
         uint8_t hmac[20];
-        stun_hmac_sha1(password, strlen(password), buf, pos, hmac, &hmac_len);
+        stun_hmac_sha1(key, key_len, buf, pos, hmac, &hmac_len);
         if (append_attr(buf, &pos, STUN_MAX_MSG_SIZE, STUN_ATTR_MESSAGE_INTEGRITY, hmac, 20) !=
             RTC_OK)
             return RTC_ERR_NOMEM;
@@ -527,6 +536,12 @@ int rtc_stun_finalize(rtc_stun_msg_t *msg, const char *password) {
     write_u16(buf + 0, msg->type);
     write_u16(buf + 2, msg->length);
     return RTC_OK;
+}
+
+int rtc_stun_finalize(rtc_stun_msg_t *msg, const char *password) {
+    if (password)
+        return rtc_stun_finalize_key(msg, (const uint8_t *)password, strlen(password));
+    return rtc_stun_finalize_key(msg, NULL, 0);
 }
 
 const uint8_t *rtc_stun_find_attr(const rtc_stun_msg_t *msg, uint16_t attr_type,

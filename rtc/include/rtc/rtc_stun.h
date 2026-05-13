@@ -86,9 +86,20 @@ int rtc_stun_parse(rtc_stun_msg_t *msg, const uint8_t *data, size_t len);
 int rtc_stun_get_mapped_address(const rtc_stun_msg_t *msg, rtc_addr_t *addr);
 
 /*
- * Verify MESSAGE-INTEGRITY on a parsed message.
+ * Verify MESSAGE-INTEGRITY on a parsed message using a NUL-terminated password.
+ * Equivalent to rtc_stun_verify_integrity_key(data, len, password, strlen(password)).
+ * Do NOT use with binary keys that may contain NUL bytes (e.g. TURN long-term
+ * keys, which are 16-byte MD5 digests).
  */
 int rtc_stun_verify_integrity(const uint8_t *data, size_t len, const char *password);
+
+/*
+ * Verify MESSAGE-INTEGRITY on a parsed message using a raw byte key.
+ * Required for binary keys such as TURN long-term credentials (RFC 5389 §10.2:
+ * key = MD5(username ":" realm ":" password), 16 raw bytes).
+ */
+int rtc_stun_verify_integrity_key(const uint8_t *data, size_t len, const uint8_t *key,
+                                  size_t key_len);
 
 /*
  * Build a STUN message with given method type and optional attributes.
@@ -119,8 +130,14 @@ int rtc_stun_add_realm(rtc_stun_msg_t *msg, const char *realm);
 /* Add NONCE attribute */
 int rtc_stun_add_nonce(rtc_stun_msg_t *msg, const char *nonce);
 
-/* Finalize a message built with rtc_stun_build_request (adds integrity + fingerprint) */
+/* Finalize a message built with rtc_stun_build_request (adds integrity + fingerprint).
+ * Uses a NUL-terminated password as the HMAC key.  Do NOT use with binary keys
+ * that may contain NUL bytes — use rtc_stun_finalize_key() instead. */
 int rtc_stun_finalize(rtc_stun_msg_t *msg, const char *password);
+
+/* Finalize a message using a raw byte key (e.g. TURN long-term credentials,
+ * which are a 16-byte MD5 digest that may contain NUL bytes). */
+int rtc_stun_finalize_key(rtc_stun_msg_t *msg, const uint8_t *key, size_t key_len);
 
 /* Extract a specific attribute from a parsed message. Returns pointer + length, or NULL. */
 const uint8_t *rtc_stun_find_attr(const rtc_stun_msg_t *msg, uint16_t attr_type, uint16_t *out_len);

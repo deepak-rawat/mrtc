@@ -63,8 +63,9 @@ static int build_authenticated_request(rtc_turn_client_t *tc, rtc_stun_msg_t *ms
 
 static int finalize_with_key(rtc_turn_client_t *tc, rtc_stun_msg_t *msg) {
     if (tc->has_credentials) {
-        /* Use long-term key as the HMAC password */
-        return rtc_stun_finalize(msg, (const char *)tc->lt_key);
+        /* TURN long-term key is 16 raw bytes of MD5(user:realm:pass) — may
+         * contain NUL bytes, so use the explicit-length variant. */
+        return rtc_stun_finalize_key(msg, tc->lt_key, sizeof(tc->lt_key));
     }
     return rtc_stun_finalize(msg, NULL);
 }
@@ -123,7 +124,7 @@ rtc_err_t rtc_turn_allocate(rtc_turn_client_t *tc) {
             /* Retry with credentials */
             build_authenticated_request(tc, &req, STUN_METHOD_ALLOCATE);
             rtc_stun_add_requested_transport(&req, 17);
-            /* Use lt_key (16 bytes) as HMAC key — need to pass as string */
+            /* lt_key is 16 raw bytes — finalize_with_key uses the byte-length variant. */
             finalize_with_key(tc, &req);
 
             rc = turn_transaction(tc, &req, &resp);

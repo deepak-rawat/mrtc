@@ -91,6 +91,44 @@ TEST(stun_integrity_verify) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: integrity with binary key containing NUL bytes (TURN regression) */
+/* ------------------------------------------------------------------ */
+TEST(stun_integrity_binary_key_with_nul) {
+    /* Simulate a 16-byte MD5 long-term key whose first byte is NUL.
+     * The old strlen()-based API truncated such keys to zero bytes, allowing
+     * any HMAC to match (or matching nothing). The byte-length API must work. */
+    uint8_t key[16] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                       0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+    uint8_t key2[16] = {0xAA, 0x00, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                        0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+
+    /* Build a generic request and finalize with binary key */
+    rtc_stun_msg_t msg;
+    int rc = rtc_stun_build_request(&msg, STUN_METHOD_ALLOCATE, NULL, NULL);
+    ASSERT_EQ(rc, RTC_OK);
+    rtc_stun_add_username(&msg, "alice");
+    rc = rtc_stun_finalize_key(&msg, key, sizeof(key));
+    ASSERT_EQ(rc, RTC_OK);
+
+    /* Correct binary key verifies */
+    rc = rtc_stun_verify_integrity_key(msg.buf, msg.buf_len, key, sizeof(key));
+    ASSERT_EQ(rc, RTC_OK);
+
+    /* Different binary key (differs only AFTER first NUL byte of key2) must fail.
+     * Under the old strlen() bug, key (length 0) and key2 (length 1) would both
+     * be silently truncated to short prefixes and could match spuriously. */
+    rc = rtc_stun_verify_integrity_key(msg.buf, msg.buf_len, key2, sizeof(key2));
+    ASSERT(rc != RTC_OK);
+
+    /* Truncated key (just the leading bytes before the NUL — i.e. what
+     * strlen() would have returned, which is 0) must NOT verify. */
+    rc = rtc_stun_verify_integrity_key(msg.buf, msg.buf_len, key, 0);
+    ASSERT(rc != RTC_OK);
+
+    printf("    binary key with embedded NUL verified correctly\n");
+}
+
+/* ------------------------------------------------------------------ */
 /*  Test: live STUN binding (needs network)                            */
 /* ------------------------------------------------------------------ */
 TEST(stun_live_binding) {
@@ -134,6 +172,7 @@ int main(void) {
     RUN_TEST(stun_build_ice_attrs);
     RUN_TEST(stun_build_parse_roundtrip);
     RUN_TEST(stun_integrity_verify);
+    RUN_TEST(stun_integrity_binary_key_with_nul);
     RUN_TEST(stun_live_binding);
 
     rtc_cleanup();
