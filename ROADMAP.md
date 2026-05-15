@@ -121,7 +121,7 @@ Required prerequisite for Phase 2.5 (per-sender RR demux).
 
 ---
 
-### Phase 2: RTCP Feedback (NACK, PLI, REMB)
+### Phase 2: RTCP Feedback (NACK, PLI, REMB) — ✅ COMPLETE
 
 **2.1 — NACK/PLI/FIR/REMB build + parse**
 
