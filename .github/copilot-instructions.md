@@ -73,3 +73,19 @@ Uses modern EVP APIs (3.0+). Avoid deprecated functions like `HMAC()` or low-lev
 
 ### Testing
 Tests use a minimal harness (`tests/test_harness.h`) with `TEST()`, `RUN_TEST()`, `ASSERT*` macros. No external test framework. Each test is a standalone executable.
+
+## Formatting (no external clang-format required)
+
+`clang-format` CLI is **not** installed. The repo's `.clang-format` is applied
+by the VS Code C/C++ extension (`ms-vscode.cpptools`), which bundles its own
+clang-format.
+
+After editing any C/C++ file (`*.c`, `*.h`, `*.cc`, `*.cpp`, `*.hpp`), before
+staging it for commit:
+
+1. Open the file in the editor (run VS Code command `vscode.open` with the file URI).
+2. Run the VS Code command `editor.action.formatDocument`.
+3. Run the VS Code command `workbench.action.files.save` to persist.
+
+Do this for every C/C++ file you modified in the change before `git add`. Do
+not invoke `clang-format` from the terminal — it is not available.
