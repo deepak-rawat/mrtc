@@ -398,6 +398,298 @@ bool rtc_rtcp_is_rtcp(const uint8_t *data, size_t len) {
         return false;
 
     uint8_t pt = data[1];
-    /* RTCP payload types: 200-204 (SR, RR, SDES, BYE, APP) */
-    return (pt >= 200 && pt <= 204);
+    /* RTCP payload types: 200-204 (SR, RR, SDES, BYE, APP) + 205-206 (RTPFB, PSFB) */
+    return (pt >= 200 && pt <= 206);
+}
+
+/* ---------- Helper: extract PT and FMT ---------- */
+
+bool rtc_rtcp_get_pt_fmt(const uint8_t *data, size_t len, uint8_t *pt, uint8_t *fmt) {
+    if (!data || len < 4)
+        return false;
+    uint8_t version = (data[0] >> 6) & 0x03;
+    if (version != 2)
+        return false;
+    *pt = data[1];
+    *fmt = data[0] & 0x1F;
+    return true;
+}
+
+/* ---------- NACK Build (RFC 4585 §6.2.1) ---------- */
+
+/* Sort helper for uint16_t */
+static int cmp_u16(const void *a, const void *b) {
+    uint16_t va = *(const uint16_t *)a;
+    uint16_t vb = *(const uint16_t *)b;
+    return (va > vb) - (va < vb);
+}
+
+int rtc_rtcp_build_nack(uint8_t *buf, size_t buf_cap, size_t *out_len,
+                        uint32_t sender_ssrc, uint32_t media_ssrc,
+                        const uint16_t *lost_seqs, int count) {
+    if (!buf || !out_len || !lost_seqs || count <= 0)
+        return RTC_ERR_INVALID;
+
+    /* Sort the lost sequence numbers to coalesce into PID+BLP */
+    uint16_t sorted[RTCP_NACK_MAX_SEQS];
+    if (count > RTCP_NACK_MAX_SEQS)
+        count = RTCP_NACK_MAX_SEQS;
+    memcpy(sorted, lost_seqs, (size_t)count * sizeof(uint16_t));
+    qsort(sorted, (size_t)count, sizeof(uint16_t), cmp_u16);
+
+    /* Build FCI entries: each PID + 16-bit BLP bitmask */
+    typedef struct {
+        uint16_t pid;
+        uint16_t blp;
+    } nack_fci_t;
+    nack_fci_t fcis[RTCP_NACK_MAX_FCIS];
+    int fci_count = 0;
+
+    int i = 0;
+    while (i < count && fci_count < RTCP_NACK_MAX_FCIS) {
+        uint16_t pid = sorted[i++];
+        uint16_t blp = 0;
+        while (i < count) {
+            int diff = (int)sorted[i] - (int)pid;
+            if (diff >= 1 && diff <= 16) {
+                blp |= (uint16_t)(1 << (diff - 1));
+                i++;
+            } else {
+                break;
+            }
+        }
+        fcis[fci_count].pid = pid;
+        fcis[fci_count].blp = blp;
+        fci_count++;
+    }
+
+    /* Packet size: header(4) + sender_ssrc(4) + media_ssrc(4) + fcis(4 each) */
+    size_t pkt_len = 12 + (size_t)fci_count * 4;
+    if (buf_cap < pkt_len)
+        return RTC_ERR_INVALID;
+
+    /* Header: V=2, P=0, FMT=1, PT=205 */
+    buf[0] = (2 << 6) | RTCP_FMT_NACK;
+    buf[1] = RTCP_PT_RTPFB;
+    uint16_t length_words = (uint16_t)(pkt_len / 4 - 1);
+    write_u16(buf + 2, length_words);
+
+    write_u32(buf + 4, sender_ssrc);
+    write_u32(buf + 8, media_ssrc);
+
+    for (int j = 0; j < fci_count; j++) {
+        size_t off = 12 + (size_t)j * 4;
+        write_u16(buf + off, fcis[j].pid);
+        write_u16(buf + off + 2, fcis[j].blp);
+    }
+
+    *out_len = pkt_len;
+    return RTC_OK;
+}
+
+/* ---------- NACK Parse ---------- */
+
+int rtc_rtcp_parse_nack(rtc_rtcp_nack_t *out, const uint8_t *data, size_t len) {
+    if (!out || !data)
+        return RTC_ERR_INVALID;
+    if (len < 12)
+        return RTC_ERR_INVALID;
+
+    memset(out, 0, sizeof(*out));
+
+    uint8_t version = (data[0] >> 6) & 0x03;
+    if (version != 2)
+        return RTC_ERR_INVALID;
+
+    out->sender_ssrc = read_u32(data + 4);
+    out->media_ssrc = read_u32(data + 8);
+
+    /* Parse FCI entries starting at offset 12 */
+    size_t offset = 12;
+    out->lost_count = 0;
+    while (offset + 4 <= len && out->lost_count < RTCP_NACK_MAX_SEQS) {
+        uint16_t pid = read_u16(data + offset);
+        uint16_t blp = read_u16(data + offset + 2);
+        offset += 4;
+
+        out->lost_seqs[out->lost_count++] = pid;
+        for (int bit = 0; bit < 16 && out->lost_count < RTCP_NACK_MAX_SEQS; bit++) {
+            if (blp & (1 << bit))
+                out->lost_seqs[out->lost_count++] = (uint16_t)(pid + bit + 1);
+        }
+    }
+
+    return RTC_OK;
+}
+
+/* ---------- PLI Build (RFC 4585 §6.3.1) ---------- */
+
+int rtc_rtcp_build_pli(uint8_t *buf, size_t buf_cap, size_t *out_len,
+                       uint32_t sender_ssrc, uint32_t media_ssrc) {
+    if (!buf || !out_len)
+        return RTC_ERR_INVALID;
+    if (buf_cap < 12)
+        return RTC_ERR_INVALID;
+
+    /* Fixed 12 bytes: header(4) + sender_ssrc(4) + media_ssrc(4) */
+    buf[0] = (2 << 6) | RTCP_FMT_PLI;
+    buf[1] = RTCP_PT_PSFB;
+    write_u16(buf + 2, 2); /* length = 2 (12 bytes / 4 - 1) */
+    write_u32(buf + 4, sender_ssrc);
+    write_u32(buf + 8, media_ssrc);
+
+    *out_len = 12;
+    return RTC_OK;
+}
+
+/* ---------- PLI Parse ---------- */
+
+int rtc_rtcp_parse_pli(rtc_rtcp_pli_t *out, const uint8_t *data, size_t len) {
+    if (!out || !data)
+        return RTC_ERR_INVALID;
+    if (len < 12)
+        return RTC_ERR_INVALID;
+
+    uint8_t version = (data[0] >> 6) & 0x03;
+    if (version != 2)
+        return RTC_ERR_INVALID;
+
+    out->sender_ssrc = read_u32(data + 4);
+    out->media_ssrc = read_u32(data + 8);
+    return RTC_OK;
+}
+
+/* ---------- FIR Build (RFC 5104 §4.3.1) ---------- */
+
+int rtc_rtcp_build_fir(uint8_t *buf, size_t buf_cap, size_t *out_len,
+                       uint32_t sender_ssrc, uint32_t media_ssrc, uint8_t seq_nr) {
+    if (!buf || !out_len)
+        return RTC_ERR_INVALID;
+    /* header(4) + sender_ssrc(4) + media_ssrc(4, unused=0) + FCI(8) = 20 bytes */
+    if (buf_cap < 20)
+        return RTC_ERR_INVALID;
+
+    buf[0] = (2 << 6) | RTCP_FMT_FIR;
+    buf[1] = RTCP_PT_PSFB;
+    write_u16(buf + 2, 4); /* length = 4 (20 bytes / 4 - 1) */
+    write_u32(buf + 4, sender_ssrc);
+    write_u32(buf + 8, 0); /* media source SSRC unused in FIR, set to 0 */
+
+    /* FCI: SSRC(4) + Seq Nr(1) + Reserved(3) */
+    write_u32(buf + 12, media_ssrc);
+    buf[16] = seq_nr;
+    buf[17] = 0;
+    buf[18] = 0;
+    buf[19] = 0;
+
+    *out_len = 20;
+    return RTC_OK;
+}
+
+/* ---------- FIR Parse ---------- */
+
+int rtc_rtcp_parse_fir(rtc_rtcp_fir_t *out, const uint8_t *data, size_t len) {
+    if (!out || !data)
+        return RTC_ERR_INVALID;
+    if (len < 20)
+        return RTC_ERR_INVALID;
+
+    uint8_t version = (data[0] >> 6) & 0x03;
+    if (version != 2)
+        return RTC_ERR_INVALID;
+
+    out->sender_ssrc = read_u32(data + 4);
+    /* FCI starts at offset 12 */
+    out->media_ssrc = read_u32(data + 12);
+    out->seq_nr = data[16];
+    return RTC_OK;
+}
+
+/* ---------- REMB Build (draft-alvestrand-rmcat-remb) ---------- */
+
+int rtc_rtcp_build_remb(uint8_t *buf, size_t buf_cap, size_t *out_len,
+                        uint32_t sender_ssrc, const uint32_t *media_ssrcs,
+                        int ssrc_count, uint32_t bitrate_bps) {
+    if (!buf || !out_len || !media_ssrcs || ssrc_count <= 0)
+        return RTC_ERR_INVALID;
+    if (ssrc_count > 255)
+        ssrc_count = 255;
+
+    /* header(4) + sender_ssrc(4) + media_ssrc(4,=0) + "REMB"(4) + num+br(4) + ssrcs(4 each) */
+    size_t pkt_len = 20 + (size_t)ssrc_count * 4;
+    if (buf_cap < pkt_len)
+        return RTC_ERR_INVALID;
+
+    buf[0] = (2 << 6) | RTCP_FMT_REMB;
+    buf[1] = RTCP_PT_PSFB;
+    uint16_t length_words = (uint16_t)(pkt_len / 4 - 1);
+    write_u16(buf + 2, length_words);
+    write_u32(buf + 4, sender_ssrc);
+    write_u32(buf + 8, 0); /* media source SSRC unused */
+
+    /* Unique identifier "REMB" */
+    buf[12] = 'R';
+    buf[13] = 'E';
+    buf[14] = 'M';
+    buf[15] = 'B';
+
+    /* Encode bitrate as mantissa * 2^exp (18-bit mantissa, 6-bit exponent) */
+    uint8_t exp = 0;
+    uint32_t mantissa = bitrate_bps;
+    while (mantissa > 0x3FFFF) { /* 18 bits max */
+        mantissa >>= 1;
+        exp++;
+    }
+
+    /* Num SSRC (8 bits) | BR Exp (6 bits) | BR Mantissa (18 bits) = 4 bytes */
+    buf[16] = (uint8_t)ssrc_count;
+    buf[17] = (uint8_t)((exp << 2) | ((mantissa >> 16) & 0x03));
+    buf[18] = (uint8_t)((mantissa >> 8) & 0xFF);
+    buf[19] = (uint8_t)(mantissa & 0xFF);
+
+    /* SSRC list */
+    for (int i = 0; i < ssrc_count; i++)
+        write_u32(buf + 20 + (size_t)i * 4, media_ssrcs[i]);
+
+    *out_len = pkt_len;
+    return RTC_OK;
+}
+
+/* ---------- REMB Parse ---------- */
+
+int rtc_rtcp_parse_remb(rtc_rtcp_remb_t *out, const uint8_t *data, size_t len) {
+    if (!out || !data)
+        return RTC_ERR_INVALID;
+    if (len < 20)
+        return RTC_ERR_INVALID;
+
+    uint8_t version = (data[0] >> 6) & 0x03;
+    if (version != 2)
+        return RTC_ERR_INVALID;
+
+    memset(out, 0, sizeof(*out));
+
+    out->sender_ssrc = read_u32(data + 4);
+
+    /* Verify "REMB" identifier */
+    if (data[12] != 'R' || data[13] != 'E' || data[14] != 'M' || data[15] != 'B')
+        return RTC_ERR_INVALID;
+
+    /* Decode bitrate */
+    int num_ssrc = data[16];
+    uint8_t exp = (data[17] >> 2) & 0x3F;
+    uint32_t mantissa = ((uint32_t)(data[17] & 0x03) << 16) | ((uint32_t)data[18] << 8) | data[19];
+    out->bitrate_bps = mantissa << exp;
+
+    /* Parse SSRC list */
+    out->ssrc_count = 0;
+    for (int i = 0; i < num_ssrc && i < 256; i++) {
+        size_t off = 20 + (size_t)i * 4;
+        if (off + 4 > len)
+            break;
+        out->media_ssrcs[i] = read_u32(data + off);
+        out->ssrc_count++;
+    }
+
+    return RTC_OK;
 }

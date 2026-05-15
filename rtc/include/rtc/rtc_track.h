@@ -62,6 +62,22 @@ int rtc_rtp_sender_get_target_bitrate(const rtc_rtp_sender_t *sender);
 /* Returns true and clears if a keyframe was requested by rate control. */
 bool rtc_rtp_sender_should_keyframe(rtc_rtp_sender_t *sender);
 
+/* ---- Sender feedback callbacks (fired on transport thread) ---- */
+
+/* NACK: reports lost sequence numbers that were retransmitted. */
+typedef void (*rtc_on_nack_fn)(const uint16_t *lost_seqs, int count, void *user);
+
+/* PLI: remote peer requested a keyframe. */
+typedef void (*rtc_on_pli_fn)(void *user);
+
+/* REMB: remote peer's estimated max bitrate in bps. */
+typedef void (*rtc_on_remb_fn)(uint32_t bitrate_bps, void *user);
+
+/* Register optional notification callbacks on a sender. */
+void rtc_rtp_sender_on_nack(rtc_rtp_sender_t *sender, rtc_on_nack_fn fn, void *user);
+void rtc_rtp_sender_on_pli(rtc_rtp_sender_t *sender, rtc_on_pli_fn fn, void *user);
+void rtc_rtp_sender_on_remb(rtc_rtp_sender_t *sender, rtc_on_remb_fn fn, void *user);
+
 /* ---- RTCRtpReceiver ---- */
 
 /* Set callback for incoming decoded frames (fires on transport thread) */

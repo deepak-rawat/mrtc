@@ -13,10 +13,22 @@
 #include "rtc_common.h"
 
 /* RTCP packet types (RFC 3550 section 12.1) */
-#define RTCP_PT_SR   200
-#define RTCP_PT_RR   201
-#define RTCP_PT_SDES 202
-#define RTCP_PT_BYE  203
+#define RTCP_PT_SR    200
+#define RTCP_PT_RR    201
+#define RTCP_PT_SDES  202
+#define RTCP_PT_BYE   203
+#define RTCP_PT_RTPFB 205 /* Transport layer feedback (RFC 4585) */
+#define RTCP_PT_PSFB  206 /* Payload-specific feedback (RFC 4585) */
+
+/* Feedback Message Types — FMT field in header (RFC 4585 / RFC 5104) */
+#define RTCP_FMT_NACK 1  /* Generic NACK (RTPFB, RFC 4585 §6.2.1) */
+#define RTCP_FMT_PLI  1  /* Picture Loss Indication (PSFB, RFC 4585 §6.3.1) */
+#define RTCP_FMT_FIR  4  /* Full Intra Request (PSFB, RFC 5104 §4.3.1) */
+#define RTCP_FMT_REMB 15 /* REMB (PSFB, draft-alvestrand-rmcat-remb) */
+
+/* NACK limits */
+#define RTCP_NACK_MAX_FCIS 64
+#define RTCP_NACK_MAX_SEQS (RTCP_NACK_MAX_FCIS * 17)
 
 /* RTCP header size (common part: V, P, RC, PT, length) */
 #define RTCP_HEADER_SIZE   4
@@ -121,5 +133,61 @@ int rtc_rtcp_parse(rtc_rtcp_packet_t *pkt, const uint8_t *data, size_t len);
 
 /* Check if raw data looks like RTCP (for demux alongside RTP) */
 bool rtc_rtcp_is_rtcp(const uint8_t *data, size_t len);
+
+/* ---------- RTCP Feedback packets (RFC 4585 / 5104 / REMB) ---------- */
+
+/* NACK parse result */
+typedef struct {
+    uint32_t sender_ssrc;
+    uint32_t media_ssrc;
+    uint16_t lost_seqs[RTCP_NACK_MAX_SEQS];
+    int lost_count;
+} rtc_rtcp_nack_t;
+
+/* PLI parse result */
+typedef struct {
+    uint32_t sender_ssrc;
+    uint32_t media_ssrc;
+} rtc_rtcp_pli_t;
+
+/* FIR parse result */
+typedef struct {
+    uint32_t sender_ssrc;
+    uint32_t media_ssrc;
+    uint8_t seq_nr;
+} rtc_rtcp_fir_t;
+
+/* REMB parse result */
+typedef struct {
+    uint32_t sender_ssrc;
+    uint32_t media_ssrcs[256];
+    int ssrc_count;
+    uint32_t bitrate_bps;
+} rtc_rtcp_remb_t;
+
+/* Build feedback packets — write into caller-supplied buffer.
+ * Returns RTC_OK on success, error code on failure.
+ * *out_len is set to the number of bytes written. */
+int rtc_rtcp_build_nack(uint8_t *buf, size_t buf_cap, size_t *out_len,
+                        uint32_t sender_ssrc, uint32_t media_ssrc,
+                        const uint16_t *lost_seqs, int count);
+int rtc_rtcp_build_pli(uint8_t *buf, size_t buf_cap, size_t *out_len,
+                       uint32_t sender_ssrc, uint32_t media_ssrc);
+int rtc_rtcp_build_fir(uint8_t *buf, size_t buf_cap, size_t *out_len,
+                       uint32_t sender_ssrc, uint32_t media_ssrc, uint8_t seq_nr);
+int rtc_rtcp_build_remb(uint8_t *buf, size_t buf_cap, size_t *out_len,
+                        uint32_t sender_ssrc, const uint32_t *media_ssrcs,
+                        int ssrc_count, uint32_t bitrate_bps);
+
+/* Parse feedback packets from raw RTCP bytes (after SRTCP unprotect).
+ * Caller must check PT and FMT before calling the appropriate parse function. */
+int rtc_rtcp_parse_nack(rtc_rtcp_nack_t *out, const uint8_t *data, size_t len);
+int rtc_rtcp_parse_pli(rtc_rtcp_pli_t *out, const uint8_t *data, size_t len);
+int rtc_rtcp_parse_fir(rtc_rtcp_fir_t *out, const uint8_t *data, size_t len);
+int rtc_rtcp_parse_remb(rtc_rtcp_remb_t *out, const uint8_t *data, size_t len);
+
+/* Extract PT and FMT from an RTCP header (after version check).
+ * Useful for dispatch. Returns false if data too short or version != 2. */
+bool rtc_rtcp_get_pt_fmt(const uint8_t *data, size_t len, uint8_t *pt, uint8_t *fmt);
 
 #endif /* RTC_RTCP_H */

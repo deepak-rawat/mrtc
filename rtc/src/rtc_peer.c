@@ -31,6 +31,7 @@
 #include "rtc_dtls.h"
 #include "rtc_srtp.h"
 #include "rtc_sdp.h"
+#include "rtc_nack_buf.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -53,7 +54,16 @@ struct rtc_rtp_sender {
     void *transport;
     rtc_rtcp_stats_t rtcp_stats;
     rtc_rate_controller_t *rate_ctrl; /* borrowed from peer, set after CONNECTED */
+    rtc_nack_buf_t *nack_buf;         /* retransmit buffer */
     bool active;
+
+    /* Feedback callbacks */
+    rtc_on_nack_fn on_nack;
+    void *on_nack_user;
+    rtc_on_pli_fn on_pli;
+    void *on_pli_user;
+    rtc_on_remb_fn on_remb;
+    void *on_remb_user;
 };
 
 struct rtc_rtp_receiver {
@@ -160,6 +170,11 @@ struct rtc_peer_connection {
 /* ---- Forward declarations ---- */
 static int peer_dc_send(const uint8_t *data, size_t len, void *user);
 static void peer_rtcp_timer(void *user);
+
+/* Internal handlers from rtc_track.c (declared here for peer connection dispatch) */
+void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_seqs, int count);
+void rtc_rtp_sender_handle_pli(rtc_rtp_sender_t *sender);
+void rtc_rtp_sender_handle_remb(rtc_rtp_sender_t *sender, uint32_t bitrate_bps);
 
 /* ---- RTCP periodic send timer (fires on transport thread every 5 seconds) ---- */
 
@@ -286,19 +301,18 @@ static void peer_complete_connection(rtc_peer_connection_t *pc) {
         }
     }
 
-    /* Create rate controller */
-    rtc_rate_control_config_t rc_cfg = {
-        .target_bitrate_kbps = 500,
-        .min_bitrate_kbps = 100,
-        .max_bitrate_kbps = 2500,
-    };
-    pc->rate_ctrl = rtc_rate_control_create(&rc_cfg);
-
-    /* Wire rate controller to video senders */
+    /* Create rate controllers and NACK buffers per sender */
     for (int i = 0; i < pc->transceiver_count; i++) {
         struct rtc_rtp_sender *s = &pc->transceivers[i].sender;
-        if (s->active && s->kind == RTC_KIND_VIDEO)
-            s->rate_ctrl = pc->rate_ctrl;
+        if (s->active && s->kind == RTC_KIND_VIDEO) {
+            rtc_rate_control_config_t rc_cfg = {
+                .target_bitrate_kbps = 500,
+                .min_bitrate_kbps = 100,
+                .max_bitrate_kbps = 2500,
+            };
+            s->rate_ctrl = rtc_rate_control_create(&rc_cfg);
+            s->nack_buf = rtc_nack_buf_create(NACK_BUF_DEFAULT_SIZE);
+        }
     }
 
     /* Initialize data channel manager (if not already) and notify DTLS connected */
@@ -510,14 +524,17 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                     break;
                 }
 
-                /* Parse RTCP packet */
-                rtc_rtcp_packet_t rtcp;
-                rc = rtc_rtcp_parse(&rtcp, buf, pkt_len);
-                if (rc != RTC_OK)
+                /* Extract PT and FMT for dispatch */
+                uint8_t pt, fmt;
+                if (!rtc_rtcp_get_pt_fmt(buf, pkt_len, &pt, &fmt))
                     break;
 
-                if (rtcp.header.packet_type == RTCP_PT_SR) {
-                    /* Store last SR NTP for DLSR calculation in the matching receiver */
+                if (pt == RTCP_PT_SR) {
+                    /* Parse SR and store last SR NTP for DLSR calc */
+                    rtc_rtcp_packet_t rtcp;
+                    rc = rtc_rtcp_parse(&rtcp, buf, pkt_len);
+                    if (rc != RTC_OK)
+                        break;
                     uint32_t lsr = (rtcp.sr.ntp_sec & 0xFFFF) << 16 | (rtcp.sr.ntp_frac >> 16);
                     struct rtc_rtp_receiver *r =
                         (struct rtc_rtp_receiver *)rtc_u32_map_get(&pc->recv_map, rtcp.sender_ssrc);
@@ -525,39 +542,76 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                         r->rtcp_stats.last_sr_ntp = lsr;
                         r->rtcp_stats.last_sr_recv_time = rtc_time_ms();
                     }
-                } else if (rtcp.header.packet_type == RTCP_PT_RR) {
-                    /* Extract feedback and notify callback */
+                } else if (pt == RTCP_PT_RR) {
+                    /* Extract feedback and feed to rate controller */
+                    rtc_rtcp_packet_t rtcp;
+                    rc = rtc_rtcp_parse(&rtcp, buf, pkt_len);
+                    if (rc != RTC_OK)
+                        break;
                     for (int i = 0; i < rtcp.report_count; i++) {
                         const rtc_rtcp_rr_block_t *rr = &rtcp.reports[i];
 
                         /* Compute RTT from delay_since_sr */
                         int rtt_ms = 0;
                         if (rr->last_sr != 0) {
-                            /* Get current NTP compact (middle 32 bits) */
                             uint64_t now_ms = rtc_time_ms();
                             uint32_t now_sec = (uint32_t)(now_ms / 1000);
                             uint32_t now_frac = (uint32_t)((now_ms % 1000) * 4294967ULL);
                             uint32_t now_compact = (now_sec & 0xFFFF) << 16 | (now_frac >> 16);
-                            /* RTT = now - last_sr - delay_since_sr (all in 1/65536 sec) */
                             uint32_t rtt_ntp = now_compact - rr->last_sr - rr->delay_since_sr;
                             rtt_ms = (int)((rtt_ntp * 1000ULL) >> 16);
                             if (rtt_ms < 0)
                                 rtt_ms = 0;
                         }
 
-                        /* RTCP RR demux: rr->ssrc identifies which of our
-                         * senders is being reported on. Look it up in send_map
-                         * so per-sender feedback can be routed correctly.
-                         * TODO Phase 2.5: replace the shared pc->rate_ctrl
-                         * with a per-sender rate controller and feed
-                         * (fraction_lost, rtt_ms, jitter) into sender->... */
+                        /* Route to per-sender rate controller via send_map */
                         struct rtc_rtp_sender *sender =
                             (struct rtc_rtp_sender *)rtc_u32_map_get(&pc->send_map, rr->ssrc);
-                        (void)sender; /* not yet wired into rate control */
-
-                        if (pc->rate_ctrl) {
+                        if (sender && sender->rate_ctrl) {
+                            rtc_rate_control_on_rtcp_rr(sender->rate_ctrl, rr->fraction_lost,
+                                                        rtt_ms, (int)rr->jitter);
+                        } else if (pc->rate_ctrl) {
+                            /* Fallback: shared rate controller */
                             rtc_rate_control_on_rtcp_rr(pc->rate_ctrl, rr->fraction_lost, rtt_ms,
                                                         (int)rr->jitter);
+                        }
+                    }
+                } else if (pt == RTCP_PT_RTPFB && fmt == RTCP_FMT_NACK) {
+                    /* NACK — retransmit lost packets */
+                    rtc_rtcp_nack_t nack;
+                    if (rtc_rtcp_parse_nack(&nack, buf, pkt_len) == RTC_OK) {
+                        struct rtc_rtp_sender *sender =
+                            (struct rtc_rtp_sender *)rtc_u32_map_get(&pc->send_map, nack.media_ssrc);
+                        if (sender)
+                            rtc_rtp_sender_handle_nack(sender, nack.lost_seqs, nack.lost_count);
+                    }
+                } else if (pt == RTCP_PT_PSFB && fmt == RTCP_FMT_PLI) {
+                    /* PLI — request keyframe */
+                    rtc_rtcp_pli_t pli;
+                    if (rtc_rtcp_parse_pli(&pli, buf, pkt_len) == RTC_OK) {
+                        struct rtc_rtp_sender *sender =
+                            (struct rtc_rtp_sender *)rtc_u32_map_get(&pc->send_map, pli.media_ssrc);
+                        if (sender)
+                            rtc_rtp_sender_handle_pli(sender);
+                    }
+                } else if (pt == RTCP_PT_PSFB && fmt == RTCP_FMT_FIR) {
+                    /* FIR — request keyframe (same effect as PLI) */
+                    rtc_rtcp_fir_t fir;
+                    if (rtc_rtcp_parse_fir(&fir, buf, pkt_len) == RTC_OK) {
+                        struct rtc_rtp_sender *sender =
+                            (struct rtc_rtp_sender *)rtc_u32_map_get(&pc->send_map, fir.media_ssrc);
+                        if (sender)
+                            rtc_rtp_sender_handle_pli(sender);
+                    }
+                } else if (pt == RTCP_PT_PSFB && fmt == RTCP_FMT_REMB) {
+                    /* REMB — cap bitrate */
+                    rtc_rtcp_remb_t remb;
+                    if (rtc_rtcp_parse_remb(&remb, buf, pkt_len) == RTC_OK) {
+                        for (int i = 0; i < remb.ssrc_count; i++) {
+                            struct rtc_rtp_sender *sender = (struct rtc_rtp_sender *)
+                                rtc_u32_map_get(&pc->send_map, remb.media_ssrcs[i]);
+                            if (sender)
+                                rtc_rtp_sender_handle_remb(sender, remb.bitrate_bps);
                         }
                     }
                 }
@@ -790,6 +844,18 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc) {
     if (pc->rate_ctrl) {
         rtc_rate_control_destroy(pc->rate_ctrl);
         pc->rate_ctrl = NULL;
+    }
+    /* Destroy per-sender rate controllers and NACK buffers */
+    for (int i = 0; i < pc->transceiver_count; i++) {
+        struct rtc_rtp_sender *s = &pc->transceivers[i].sender;
+        if (s->rate_ctrl) {
+            rtc_rate_control_destroy(s->rate_ctrl);
+            s->rate_ctrl = NULL;
+        }
+        if (s->nack_buf) {
+            rtc_nack_buf_destroy(s->nack_buf);
+            s->nack_buf = NULL;
+        }
     }
 
     pc->connection_state = RTC_CONNECTION_CLOSED;

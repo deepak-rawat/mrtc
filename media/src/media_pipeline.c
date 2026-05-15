@@ -317,22 +317,28 @@ static int push_video_to_stream(media_pipeline_t *p, media_send_stream_t *s,
     if (!s->has_encoder || !has_send_targets(p))
         return RTC_ERR_INVALID;
 
-    /* TODO: Rate control only reads first peer's feedback. With multiple
-     * peers at different network conditions (e.g. one on LTE, one on fiber),
-     * we ignore all but the first peer's bitrate/keyframe signals. Fix:
-     * aggregate across all peers — use the minimum target bitrate (encode
-     * for the weakest link) and OR together keyframe requests (any peer
-     * requesting a keyframe should trigger one). */
-    for (int peer = 0; peer < p->send_peer_count; peer++) {
-        mp_send_peer_t *sp = &p->send_peers[peer];
-        if (!sp->active || !sp->video_sender)
-            continue;
-        int br = rtc_rtp_sender_get_target_bitrate(sp->video_sender);
-        if (br > 0)
-            video_encoder_set_bitrate(&s->video_enc, br);
-        if (rtc_rtp_sender_should_keyframe(sp->video_sender))
+    /* Aggregate rate control across all peers: use minimum target bitrate
+     * (weakest-link strategy) and OR keyframe requests (any peer requesting
+     * a keyframe triggers one for the shared encoder). */
+    {
+        int min_bitrate = 0;
+        bool any_keyframe = false;
+        for (int peer = 0; peer < p->send_peer_count; peer++) {
+            mp_send_peer_t *sp = &p->send_peers[peer];
+            if (!sp->active || !sp->video_sender)
+                continue;
+            int br = rtc_rtp_sender_get_target_bitrate(sp->video_sender);
+            if (br > 0) {
+                if (min_bitrate == 0 || br < min_bitrate)
+                    min_bitrate = br;
+            }
+            if (rtc_rtp_sender_should_keyframe(sp->video_sender))
+                any_keyframe = true;
+        }
+        if (min_bitrate > 0)
+            video_encoder_set_bitrate(&s->video_enc, min_bitrate);
+        if (any_keyframe)
             video_encoder_request_keyframe(&s->video_enc);
-        break; /* use first peer's rate control for encoder config */
     }
 
     /* Encode */
