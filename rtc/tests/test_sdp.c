@@ -288,6 +288,53 @@ TEST(sdp_many_candidates) {
 }
 
 /* ------------------------------------------------------------------ */
+TEST(sdp_extmap_roundtrip) {
+    rtc_sdp_t sdp;
+    memset(&sdp, 0, sizeof(sdp));
+    sdp.type = RTC_SDP_OFFER;
+    sdp.setup = RTC_SETUP_ACTPASS;
+    strcpy(sdp.ice_ufrag, "uf");
+    strcpy(sdp.ice_pwd, "pwdpwdpwdpwdpwdpwdpwdpw");
+    strcpy(sdp.fingerprint, "00:11");
+    sdp.media_count = 1;
+    sdp.media[0].media_type = RTC_MEDIA_VIDEO;
+    sdp.media[0].payload_type = 96;
+    sdp.media[0].clockrate = 90000;
+    sdp.media[0].mid_index = 0;
+    strcpy(sdp.media[0].codec_name, "VP8");
+    ASSERT_EQ(rtc_sdp_media_add_extmap(&sdp.media[0], 2,
+                                       "http://www.webrtc.org/experiments/rtp-hdrext/"
+                                       "abs-send-time"),
+              RTC_OK);
+    ASSERT_EQ(rtc_sdp_media_add_extmap(&sdp.media[0], 5,
+                                       "http://www.ietf.org/id/"
+                                       "draft-holmer-rmcat-transport-wide-cc-extensions-01"),
+              RTC_OK);
+
+    int rc = rtc_sdp_generate(&sdp);
+    ASSERT_EQ(rc, RTC_OK);
+    ASSERT(strstr(sdp.raw, "a=extmap:2 http://www.webrtc.org") != NULL);
+    ASSERT(strstr(sdp.raw, "a=extmap:5 http://www.ietf.org") != NULL);
+
+    rtc_sdp_t parsed;
+    memset(&parsed, 0, sizeof(parsed));
+    rc = rtc_sdp_parse(&parsed, sdp.raw, sdp.raw_len);
+    ASSERT_EQ(rc, RTC_OK);
+    ASSERT_EQ((int)parsed.media[0].extmap_count, 2);
+    ASSERT_EQ((int)rtc_sdp_media_find_extmap_id(&parsed.media[0], "http://www.webrtc.org/"
+                                                                  "experiments/rtp-hdrext/"
+                                                                  "abs-send-time"),
+              2);
+    ASSERT_EQ((int)rtc_sdp_media_find_extmap_id(&parsed.media[0], "http://www.ietf.org/id/"
+                                                                  "draft-holmer-rmcat-transport-"
+                                                                  "wide-cc-extensions-01"),
+              5);
+
+    rtc_sdp_close(&sdp);
+    rtc_sdp_close(&parsed);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  SDP Component Tests\n");
@@ -301,6 +348,7 @@ int main(void) {
     RUN_TEST(sdp_parse);
     RUN_TEST(sdp_roundtrip);
     RUN_TEST(sdp_many_candidates);
+    RUN_TEST(sdp_extmap_roundtrip);
 
     rtc_cleanup();
     TEST_SUMMARY();

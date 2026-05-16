@@ -33,7 +33,14 @@ typedef struct {
     char foundation[8];
 } rtc_ice_candidate_t;
 
-#define SDP_MAX_MEDIA 4
+#define SDP_MAX_MEDIA      4
+#define SDP_MAX_EXTMAP     6
+#define SDP_EXTMAP_URI_LEN 96
+
+typedef struct {
+    uint8_t id; /* 1..14 */
+    char uri[SDP_EXTMAP_URI_LEN];
+} rtc_sdp_extmap_t;
 
 typedef enum {
     RTC_MEDIA_AUDIO,
@@ -56,6 +63,10 @@ typedef struct {
     char codec_name[32]; /* e.g. "opus", "VP8", "H264" */
     int mid_index;       /* m= line index (0, 1, 2, ...) */
     uint32_t ssrc;       /* a=ssrc:<NNN> ... 0 means not present */
+
+    /* Negotiated RTP header extensions for this m-section (a=extmap:). */
+    rtc_sdp_extmap_t extmaps[SDP_MAX_EXTMAP];
+    int extmap_count;
 } rtc_sdp_media_t;
 
 typedef struct {
@@ -113,5 +124,9 @@ int rtc_sdp_add_candidate(rtc_sdp_t *sdp, const rtc_ice_candidate_t *c);
 /* Candidate accessors. */
 size_t rtc_sdp_candidate_count(const rtc_sdp_t *sdp);
 const rtc_ice_candidate_t *rtc_sdp_get_candidate(const rtc_sdp_t *sdp, size_t idx);
+
+/* extmap helpers */
+int rtc_sdp_media_add_extmap(rtc_sdp_media_t *m, uint8_t id, const char *uri);
+uint8_t rtc_sdp_media_find_extmap_id(const rtc_sdp_media_t *m, const char *uri);
 
 #endif /* RTC_SDP_H */

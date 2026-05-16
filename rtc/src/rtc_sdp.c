@@ -88,6 +88,16 @@ static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media
         }
     }
 
+    /* RTP header extensions (RFC 8285 a=extmap) — audio/video only */
+    if (m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) {
+        for (int i = 0; i < m->extmap_count; i++) {
+            if (m->extmaps[i].id == 0 || m->extmaps[i].uri[0] == '\0')
+                continue;
+            SDP_WRITE(p, remain, "a=extmap:%u %s\r\n", (unsigned)m->extmaps[i].id,
+                      m->extmaps[i].uri);
+        }
+    }
+
     /* Data channel attributes */
     if (m->media_type == RTC_MEDIA_APPLICATION) {
         SDP_WRITE(p, remain, "a=sctp-port:5000\r\n");
@@ -372,6 +382,26 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
             }
         }
 
+        /* extmap: a=extmap:<id>[/dir] <uri> */
+        if (sdp_line_starts(line, "a=extmap:") && current_media >= 0 &&
+            current_media < sdp->media_count) {
+            int id_val = 0;
+            char uri[SDP_EXTMAP_URI_LEN] = {0};
+            if (sscanf(line, "a=extmap:%d %95s", &id_val, uri) == 2 ||
+                sscanf(line, "a=extmap:%d/%*[^ ] %95s", &id_val, uri) == 2) {
+                rtc_sdp_media_t *m = &sdp->media[current_media];
+                if (id_val >= 1 && id_val <= 14 && m->extmap_count < SDP_MAX_EXTMAP) {
+                    m->extmaps[m->extmap_count].id = (uint8_t)id_val;
+                    size_t ulen = strlen(uri);
+                    if (ulen >= sizeof(m->extmaps[m->extmap_count].uri))
+                        ulen = sizeof(m->extmaps[m->extmap_count].uri) - 1;
+                    memcpy(m->extmaps[m->extmap_count].uri, uri, ulen);
+                    m->extmaps[m->extmap_count].uri[ulen] = '\0';
+                    m->extmap_count++;
+                }
+            }
+        }
+
         /* Candidate */
         if (sdp_line_starts(line, "a=candidate:")) {
             rtc_ice_candidate_t c;
@@ -445,4 +475,36 @@ const rtc_ice_candidate_t *rtc_sdp_get_candidate(const rtc_sdp_t *sdp, size_t id
     if (!sdp)
         return NULL;
     return (const rtc_ice_candidate_t *)rtc_vec_at(&sdp->candidates, idx);
+}
+
+int rtc_sdp_media_add_extmap(rtc_sdp_media_t *m, uint8_t id, const char *uri) {
+    if (!m || !uri || id < 1 || id > 14)
+        return RTC_ERR_INVALID;
+    if (m->extmap_count >= SDP_MAX_EXTMAP)
+        return RTC_ERR_INVALID;
+    /* If URI already present, just update id */
+    for (int i = 0; i < m->extmap_count; i++) {
+        if (strcmp(m->extmaps[i].uri, uri) == 0) {
+            m->extmaps[i].id = id;
+            return RTC_OK;
+        }
+    }
+    m->extmaps[m->extmap_count].id = id;
+    size_t ulen = strlen(uri);
+    if (ulen >= sizeof(m->extmaps[m->extmap_count].uri))
+        ulen = sizeof(m->extmaps[m->extmap_count].uri) - 1;
+    memcpy(m->extmaps[m->extmap_count].uri, uri, ulen);
+    m->extmaps[m->extmap_count].uri[ulen] = '\0';
+    m->extmap_count++;
+    return RTC_OK;
+}
+
+uint8_t rtc_sdp_media_find_extmap_id(const rtc_sdp_media_t *m, const char *uri) {
+    if (!m || !uri)
+        return 0;
+    for (int i = 0; i < m->extmap_count; i++) {
+        if (strcmp(m->extmaps[i].uri, uri) == 0)
+            return m->extmaps[i].id;
+    }
+    return 0;
 }
