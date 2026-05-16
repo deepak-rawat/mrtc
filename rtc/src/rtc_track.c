@@ -6,11 +6,13 @@
  */
 #include "rtc/rtc_track.h"
 #include "rtc_rtp.h"
+#include "rtc_rtp_ext.h"
 #include "rtc_rtcp.h"
 #include "rtc_rate_control.h"
 #include "rtc_transport.h"
 #include "rtc_srtp.h"
 #include "rtc_nack_buf.h"
+#include "rtc_twcc_sender.h"
 
 #include <stdatomic.h>
 #include <string.h>
@@ -35,6 +37,10 @@ struct rtc_rtp_sender {
     void *on_pli_user;
     rtc_on_remb_fn on_remb;
     void *on_remb_user;
+
+    /* Transport-CC tagging (set after SDP negotiation, borrowed from peer) */
+    void *twcc;          /* rtc_twcc_sender_t* */
+    uint8_t twcc_ext_id; /* 0 = disabled */
 };
 
 struct rtc_rtp_receiver {
@@ -65,9 +71,21 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
     if (!sender->srtp || !sender->transport)
         return RTC_ERR_INVALID;
 
-    /* Build RTP packet */
+    /* Build RTP packet — with transport-cc extension if negotiated. */
     rtc_rtp_packet_t pkt;
-    int rc = rtc_rtp_session_send(&sender->rtp_session, &pkt, payload, len, samples, marker);
+    int rc;
+    uint16_t twcc_seq = 0;
+    bool tagged = (sender->twcc && sender->twcc_ext_id != 0);
+    if (tagged) {
+        rtc_twcc_sender_t *twcc = (rtc_twcc_sender_t *)sender->twcc;
+        twcc_seq = atomic_fetch_add(&twcc->next_seq, 1);
+        rtc_rtp_ext_t exts[1];
+        rtc_rtp_ext_make_transport_cc(&exts[0], sender->twcc_ext_id, twcc_seq);
+        rc = rtc_rtp_session_send_with_ext(&sender->rtp_session, &pkt, exts, 1, payload, len,
+                                           samples, marker);
+    } else {
+        rc = rtc_rtp_session_send(&sender->rtp_session, &pkt, payload, len, samples, marker);
+    }
     if (rc != RTC_OK)
         return rc;
 
@@ -79,6 +97,16 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
     rc = rtc_srtp_protect(sender->srtp, pkt.buf, &pkt_len, sizeof(pkt.buf));
     if (rc != RTC_OK)
         return rc;
+
+    /* Record send-time + wire size in TWCC sender ring */
+    if (tagged) {
+        rtc_twcc_sender_t *twcc = (rtc_twcc_sender_t *)sender->twcc;
+        rtc_twcc_sent_pkt_t *e = &twcc->ring[twcc_seq & (RTC_TWCC_SENDER_RING - 1)];
+        e->seq = twcc_seq;
+        e->size = (uint16_t)pkt_len;
+        e->send_time_us = rtc_time_us();
+        e->used = true;
+    }
 
     /* Store post-SRTP packet in NACK buffer for retransmission */
     if (sender->nack_buf)
@@ -134,8 +162,7 @@ void rtc_rtp_sender_on_remb(rtc_rtp_sender_t *sender, rtc_on_remb_fn fn, void *u
 
 /* ---- Internal handlers (called by peer connection on RTCP feedback) ---- */
 
-void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender,
-                                const uint16_t *lost_seqs, int count) {
+void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_seqs, int count) {
     if (!sender || !lost_seqs || count <= 0)
         return;
 
@@ -161,8 +188,7 @@ void rtc_rtp_sender_handle_pli(rtc_rtp_sender_t *sender) {
 
     /* Request keyframe via rate controller */
     if (sender->rate_ctrl)
-        atomic_store_explicit(&sender->rate_ctrl->keyframe_requested, true,
-                              memory_order_release);
+        atomic_store_explicit(&sender->rate_ctrl->keyframe_requested, true, memory_order_release);
 
     if (sender->on_pli)
         sender->on_pli(sender->on_pli_user);

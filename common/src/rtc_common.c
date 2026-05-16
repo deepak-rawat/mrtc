@@ -182,6 +182,22 @@ uint64_t rtc_time_ms(void) {
 #endif
 }
 
+uint64_t rtc_time_us(void) {
+#ifdef _WIN32
+    /* QueryPerformanceCounter has microsecond+ resolution */
+    static LARGE_INTEGER freq = {0};
+    LARGE_INTEGER now;
+    if (freq.QuadPart == 0)
+        QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    return (uint64_t)((now.QuadPart * 1000000ULL) / (uint64_t)freq.QuadPart);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+#endif
+}
+
 /* ---------- Threading ---------- */
 #ifdef _WIN32
 

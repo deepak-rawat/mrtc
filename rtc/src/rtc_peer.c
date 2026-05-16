@@ -24,6 +24,7 @@
 #include "rtc/rtc_peer.h"
 #include "rtc/rtc_u32_map.h"
 #include "rtc_rtp.h"
+#include "rtc_rtp_ext.h"
 #include "rtc_rtcp.h"
 #include "rtc_rate_control.h"
 #include "rtc_transport.h"
@@ -32,6 +33,8 @@
 #include "rtc_srtp.h"
 #include "rtc_sdp.h"
 #include "rtc_nack_buf.h"
+#include "rtc_twcc_sender.h"
+#include "rtc_twcc_receiver.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -64,6 +67,10 @@ struct rtc_rtp_sender {
     void *on_pli_user;
     rtc_on_remb_fn on_remb;
     void *on_remb_user;
+
+    /* Transport-CC tagging (set after SDP negotiation) */
+    void *twcc;          /* borrowed rtc_twcc_sender_t* */
+    uint8_t twcc_ext_id; /* 0 = not negotiated */
 };
 
 struct rtc_rtp_receiver {
@@ -165,11 +172,22 @@ struct rtc_peer_connection {
      * truncated. Heap-allocated to keep struct rtc_peer_connection small. */
     uint8_t *app_buf;
     size_t app_buf_cap;
+
+    /* Transport-Wide Congestion Control (Phase 3.2) */
+    rtc_twcc_sender_t twcc_sender;     /* per-peer outbound seq history */
+    rtc_twcc_receiver_t twcc_receiver; /* per-peer inbound arrival history */
+    uint8_t twcc_ext_id_send;          /* extension id we use when sending (0 = disabled) */
+    uint8_t twcc_ext_id_recv;          /* extension id remote uses (0 = disabled) */
+    uint32_t twcc_local_ssrc;          /* sender_ssrc for feedback we emit */
+    uint32_t twcc_remote_ssrc;         /* media_ssrc for feedback we emit */
+    rtc_timer_id_t twcc_fb_timer_id;   /* feedback send timer */
+    bool twcc_have_packets;            /* set after first received tagged packet */
 };
 
 /* ---- Forward declarations ---- */
 static int peer_dc_send(const uint8_t *data, size_t len, void *user);
 static void peer_rtcp_timer(void *user);
+static void peer_twcc_fb_timer(void *user);
 
 /* Internal handlers from rtc_track.c (declared here for peer connection dispatch) */
 void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_seqs, int count);
@@ -221,6 +239,39 @@ static void peer_rtcp_timer(void *user) {
     /* Re-arm timer */
     pc->rtcp_timer_id = rtc_transport_add_timer(&pc->transport, rtc_time_ms() + RTCP_INTERVAL_MS,
                                                 peer_rtcp_timer, pc);
+}
+
+/* ---- TWCC feedback timer (fires every 100ms on transport thread) ---- */
+
+#define TWCC_FB_INTERVAL_MS 100
+
+static void peer_twcc_fb_timer(void *user) {
+    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+    if (pc->connection_state != RTC_CONNECTION_CONNECTED) {
+        pc->twcc_fb_timer_id = rtc_transport_add_timer(
+            &pc->transport, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
+        return;
+    }
+
+    if (pc->twcc_have_packets && pc->twcc_receiver.have_base) {
+        uint8_t fb[RTCP_MAX_PACKET];
+        size_t fb_len = 0;
+        if (rtc_twcc_receiver_build_feedback(&pc->twcc_receiver, pc->twcc_local_ssrc,
+                                             pc->twcc_remote_ssrc, fb, sizeof(fb),
+                                             &fb_len) == RTC_OK) {
+            uint8_t buf[RTCP_MAX_PACKET + 4 + SRTP_AUTH_TAG_LEN];
+            if (fb_len <= sizeof(buf)) {
+                memcpy(buf, fb, fb_len);
+                size_t out_len = fb_len;
+                if (rtc_srtp_protect_rtcp(&pc->srtp_send, buf, &out_len, sizeof(buf)) == RTC_OK)
+                    rtc_transport_send_to_remote(&pc->transport, buf, out_len);
+            }
+        }
+        pc->twcc_have_packets = false;
+    }
+
+    pc->twcc_fb_timer_id = rtc_transport_add_timer(
+        &pc->transport, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
 }
 
 /* ---- State helpers ---- */
@@ -292,12 +343,19 @@ static void peer_complete_connection(rtc_peer_connection_t *pc) {
         return;
     }
 
-    /* Wire up senders to SRTP + transport */
+    /* Wire up senders to SRTP + transport, and to TWCC sender if negotiated */
     for (int i = 0; i < pc->transceiver_count; i++) {
         struct rtc_rtp_sender *s = &pc->transceivers[i].sender;
         if (s->active) {
             s->srtp = &pc->srtp_send;
             s->transport = &pc->transport;
+            if (pc->twcc_ext_id_send != 0) {
+                s->twcc = &pc->twcc_sender;
+                s->twcc_ext_id = pc->twcc_ext_id_send;
+                /* Use any active sender's SSRC as the feedback sender_ssrc */
+                if (pc->twcc_local_ssrc == 0)
+                    pc->twcc_local_ssrc = s->rtp_session.ssrc;
+            }
         }
     }
 
@@ -333,6 +391,13 @@ static void peer_complete_connection(rtc_peer_connection_t *pc) {
     /* Start periodic RTCP send timer */
     pc->rtcp_timer_id = rtc_transport_add_timer(&pc->transport, rtc_time_ms() + RTCP_INTERVAL_MS,
                                                 peer_rtcp_timer, pc);
+
+    /* Start TWCC feedback timer if negotiated for inbound. */
+    if (pc->twcc_ext_id_recv != 0) {
+        rtc_twcc_receiver_init(&pc->twcc_receiver);
+        pc->twcc_fb_timer_id =
+            rtc_transport_add_timer(&pc->transport, rtc_time_ms() + 100, peer_twcc_fb_timer, pc);
+    }
 }
 
 /* ---- DTLS retransmission timer (fires on transport thread) ---- */
@@ -506,6 +571,23 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                     r->on_frame(pkt.payload, pkt.payload_len, pkt.header.seq, pkt.header.timestamp,
                                 pkt.header.ssrc, pkt.header.marker, r->on_frame_user);
                 }
+
+                /* Transport-CC arrival recording */
+                if (pc->twcc_ext_id_recv != 0 && pkt.header.extension && pkt.ext_data &&
+                    pkt.ext_len > 0) {
+                    rtc_rtp_ext_t exts[RTC_RTP_EXT_MAX_ENTRIES];
+                    size_t cnt = RTC_RTP_EXT_MAX_ENTRIES;
+                    if (rtc_rtp_ext_parse_body(pkt.ext_data, pkt.ext_len, exts, &cnt) == RTC_OK) {
+                        const rtc_rtp_ext_t *e = rtc_rtp_ext_find(exts, cnt, pc->twcc_ext_id_recv);
+                        if (e) {
+                            uint16_t tseq = rtc_rtp_ext_read_transport_cc(e);
+                            rtc_twcc_receiver_on_packet(&pc->twcc_receiver, tseq, rtc_time_us());
+                            if (pc->twcc_remote_ssrc == 0)
+                                pc->twcc_remote_ssrc = pkt.header.ssrc;
+                            pc->twcc_have_packets = true;
+                        }
+                    }
+                }
             }
             break;
 
@@ -580,10 +662,18 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                     /* NACK — retransmit lost packets */
                     rtc_rtcp_nack_t nack;
                     if (rtc_rtcp_parse_nack(&nack, buf, pkt_len) == RTC_OK) {
-                        struct rtc_rtp_sender *sender =
-                            (struct rtc_rtp_sender *)rtc_u32_map_get(&pc->send_map, nack.media_ssrc);
+                        struct rtc_rtp_sender *sender = (struct rtc_rtp_sender *)rtc_u32_map_get(
+                            &pc->send_map, nack.media_ssrc);
                         if (sender)
                             rtc_rtp_sender_handle_nack(sender, nack.lost_seqs, nack.lost_count);
+                    }
+                } else if (pt == RTCP_PT_RTPFB && fmt == 15) {
+                    /* Transport-CC feedback (parsed; BWE consumer added in Phase 3.3) */
+                    rtc_rtcp_twcc_t tw;
+                    if (rtc_rtcp_parse_twcc(&tw, buf, pkt_len) == RTC_OK) {
+                        RTC_LOG_DBG("Peer: TWCC feedback base=%u count=%d fb_pkt=%u",
+                                    (unsigned)tw.base_seq, tw.item_count,
+                                    (unsigned)tw.fb_pkt_count);
                     }
                 } else if (pt == RTCP_PT_PSFB && fmt == RTCP_FMT_PLI) {
                     /* PLI — request keyframe */
@@ -608,8 +698,9 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                     rtc_rtcp_remb_t remb;
                     if (rtc_rtcp_parse_remb(&remb, buf, pkt_len) == RTC_OK) {
                         for (int i = 0; i < remb.ssrc_count; i++) {
-                            struct rtc_rtp_sender *sender = (struct rtc_rtp_sender *)
-                                rtc_u32_map_get(&pc->send_map, remb.media_ssrcs[i]);
+                            struct rtc_rtp_sender *sender =
+                                (struct rtc_rtp_sender *)rtc_u32_map_get(&pc->send_map,
+                                                                         remb.media_ssrcs[i]);
                             if (sender)
                                 rtc_rtp_sender_handle_remb(sender, remb.bitrate_bps);
                         }
@@ -696,6 +787,12 @@ static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
         m->channels = t->sender.codec.channels;
         m->mid_index = t->mid_index;
         m->ssrc = t->sender.rtp_session.ssrc;
+
+        /* Advertise transport-cc on audio/video using a stable id (5). The
+         * answerer must echo this id back in their SDP. */
+        if (m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) {
+            rtc_sdp_media_add_extmap(m, 5, RTC_EXT_URI_TRANSPORT_CC);
+        }
 
         sdp->media_count++;
     }
@@ -1127,6 +1224,25 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
                 rtc_u32_map_set(&pc->recv_map, m->ssrc, &t->receiver);
                 break;
             }
+        }
+    }
+
+    /* Transport-CC extmap negotiation. Pick the first non-zero id we see
+     * across audio/video m-sections as the active id (both directions). */
+    for (int i = 0; i < sdp.media_count; i++) {
+        const rtc_sdp_media_t *m = &sdp.media[i];
+        if (m->media_type != RTC_MEDIA_AUDIO && m->media_type != RTC_MEDIA_VIDEO)
+            continue;
+        uint8_t id = rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC);
+        if (id != 0) {
+            pc->twcc_ext_id_send = id;
+            pc->twcc_ext_id_recv = id;
+            if (pc->twcc_remote_ssrc == 0)
+                pc->twcc_remote_ssrc = m->ssrc;
+            rtc_twcc_sender_init(&pc->twcc_sender);
+            rtc_twcc_receiver_init(&pc->twcc_receiver);
+            RTC_LOG_INFO("Peer: transport-cc negotiated (ext id=%u)", (unsigned)id);
+            break;
         }
     }
 

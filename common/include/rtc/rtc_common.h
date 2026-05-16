@@ -66,6 +66,8 @@ int rtc_random_bytes(uint8_t *buf, size_t len);
 int rtc_random_string(char *buf, size_t len);
 /* Current monotonic time in milliseconds */
 uint64_t rtc_time_ms(void);
+/* Current monotonic time in microseconds */
+uint64_t rtc_time_us(void);
 
 /* ---------- Threading ---------- */
 #ifdef _WIN32

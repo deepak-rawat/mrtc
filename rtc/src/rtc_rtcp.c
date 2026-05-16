@@ -424,9 +424,8 @@ static int cmp_u16(const void *a, const void *b) {
     return (va > vb) - (va < vb);
 }
 
-int rtc_rtcp_build_nack(uint8_t *buf, size_t buf_cap, size_t *out_len,
-                        uint32_t sender_ssrc, uint32_t media_ssrc,
-                        const uint16_t *lost_seqs, int count) {
+int rtc_rtcp_build_nack(uint8_t *buf, size_t buf_cap, size_t *out_len, uint32_t sender_ssrc,
+                        uint32_t media_ssrc, const uint16_t *lost_seqs, int count) {
     if (!buf || !out_len || !lost_seqs || count <= 0)
         return RTC_ERR_INVALID;
 
@@ -524,8 +523,8 @@ int rtc_rtcp_parse_nack(rtc_rtcp_nack_t *out, const uint8_t *data, size_t len) {
 
 /* ---------- PLI Build (RFC 4585 §6.3.1) ---------- */
 
-int rtc_rtcp_build_pli(uint8_t *buf, size_t buf_cap, size_t *out_len,
-                       uint32_t sender_ssrc, uint32_t media_ssrc) {
+int rtc_rtcp_build_pli(uint8_t *buf, size_t buf_cap, size_t *out_len, uint32_t sender_ssrc,
+                       uint32_t media_ssrc) {
     if (!buf || !out_len)
         return RTC_ERR_INVALID;
     if (buf_cap < 12)
@@ -561,8 +560,8 @@ int rtc_rtcp_parse_pli(rtc_rtcp_pli_t *out, const uint8_t *data, size_t len) {
 
 /* ---------- FIR Build (RFC 5104 §4.3.1) ---------- */
 
-int rtc_rtcp_build_fir(uint8_t *buf, size_t buf_cap, size_t *out_len,
-                       uint32_t sender_ssrc, uint32_t media_ssrc, uint8_t seq_nr) {
+int rtc_rtcp_build_fir(uint8_t *buf, size_t buf_cap, size_t *out_len, uint32_t sender_ssrc,
+                       uint32_t media_ssrc, uint8_t seq_nr) {
     if (!buf || !out_len)
         return RTC_ERR_INVALID;
     /* header(4) + sender_ssrc(4) + media_ssrc(4, unused=0) + FCI(8) = 20 bytes */
@@ -607,9 +606,8 @@ int rtc_rtcp_parse_fir(rtc_rtcp_fir_t *out, const uint8_t *data, size_t len) {
 
 /* ---------- REMB Build (draft-alvestrand-rmcat-remb) ---------- */
 
-int rtc_rtcp_build_remb(uint8_t *buf, size_t buf_cap, size_t *out_len,
-                        uint32_t sender_ssrc, const uint32_t *media_ssrcs,
-                        int ssrc_count, uint32_t bitrate_bps) {
+int rtc_rtcp_build_remb(uint8_t *buf, size_t buf_cap, size_t *out_len, uint32_t sender_ssrc,
+                        const uint32_t *media_ssrcs, int ssrc_count, uint32_t bitrate_bps) {
     if (!buf || !out_len || !media_ssrcs || ssrc_count <= 0)
         return RTC_ERR_INVALID;
     if (ssrc_count > 255)
@@ -689,6 +687,98 @@ int rtc_rtcp_parse_remb(rtc_rtcp_remb_t *out, const uint8_t *data, size_t len) {
             break;
         out->media_ssrcs[i] = read_u32(data + off);
         out->ssrc_count++;
+    }
+
+    return RTC_OK;
+}
+
+/* ---------- Transport-CC parse ---------- */
+
+#define TWCC_STATUS_NOT_RECV    0
+#define TWCC_STATUS_SMALL_DELTA 1
+#define TWCC_STATUS_LARGE_DELTA 2
+#define TWCC_TICK_US            250
+
+int rtc_rtcp_parse_twcc(rtc_rtcp_twcc_t *out, const uint8_t *data, size_t len) {
+    if (!out || !data)
+        return RTC_ERR_INVALID;
+    if (len < 20)
+        return RTC_ERR_INVALID;
+    if (((data[0] >> 6) & 0x3) != 2)
+        return RTC_ERR_INVALID;
+
+    memset(out, 0, sizeof(*out));
+    out->sender_ssrc = read_u32(data + 4);
+    out->media_ssrc = read_u32(data + 8);
+    out->base_seq = read_u16(data + 12);
+    uint16_t status_count = read_u16(data + 14);
+    uint32_t ref_time_64ms = ((uint32_t)data[16] << 16) | ((uint32_t)data[17] << 8) | data[18];
+    out->fb_pkt_count = data[19];
+    out->reference_time_us = (uint64_t)ref_time_64ms * 64000ULL;
+
+    if (status_count == 0 || status_count > RTC_TWCC_PARSE_MAX)
+        return RTC_ERR_INVALID;
+    out->item_count = status_count;
+    for (int i = 0; i < status_count; i++)
+        out->items[i].seq = (uint16_t)(out->base_seq + i);
+
+    /* Walk chunks to assign per-packet status into a scratch buffer. */
+    uint8_t status[RTC_TWCC_PARSE_MAX];
+    size_t p = 20;
+    int filled = 0;
+    while (filled < status_count) {
+        if (p + 2 > len)
+            return RTC_ERR_INVALID;
+        uint16_t chunk = read_u16(data + p);
+        p += 2;
+        if ((chunk & 0x8000) == 0) {
+            /* Run-length: T=0, S=2 bits, L=13 bits */
+            uint8_t s = (chunk >> 13) & 0x3;
+            int run = chunk & 0x1FFF;
+            for (int k = 0; k < run && filled < status_count; k++)
+                status[filled++] = s;
+        } else {
+            /* Status-vector chunk */
+            int sbit = (chunk >> 14) & 0x1;
+            if (sbit == 0) {
+                /* 14 × 1-bit symbols (0 = not recv, 1 = small delta) */
+                for (int k = 0; k < 14 && filled < status_count; k++) {
+                    int v = (chunk >> (13 - k)) & 0x1;
+                    status[filled++] = v ? TWCC_STATUS_SMALL_DELTA : TWCC_STATUS_NOT_RECV;
+                }
+            } else {
+                /* 7 × 2-bit symbols */
+                for (int k = 0; k < 7 && filled < status_count; k++) {
+                    uint8_t v = (chunk >> (12 - 2 * k)) & 0x3;
+                    status[filled++] = v;
+                }
+            }
+        }
+    }
+
+    /* Read per-packet receive deltas (250µs units), accumulating absolute time. */
+    uint64_t cur_us = out->reference_time_us;
+    for (int i = 0; i < status_count; i++) {
+        if (status[i] == TWCC_STATUS_NOT_RECV) {
+            out->items[i].received = false;
+            continue;
+        }
+        if (status[i] == TWCC_STATUS_SMALL_DELTA) {
+            if (p + 1 > len)
+                return RTC_ERR_INVALID;
+            int8_t d = (int8_t)data[p++];
+            cur_us = (uint64_t)((int64_t)cur_us + (int64_t)d * TWCC_TICK_US);
+        } else if (status[i] == TWCC_STATUS_LARGE_DELTA) {
+            if (p + 2 > len)
+                return RTC_ERR_INVALID;
+            int16_t d = (int16_t)read_u16(data + p);
+            p += 2;
+            cur_us = (uint64_t)((int64_t)cur_us + (int64_t)d * TWCC_TICK_US);
+        } else {
+            return RTC_ERR_INVALID;
+        }
+        out->items[i].received = true;
+        out->items[i].recv_time_us = cur_us;
     }
 
     return RTC_OK;

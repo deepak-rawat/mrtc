@@ -165,19 +165,36 @@ typedef struct {
     uint32_t bitrate_bps;
 } rtc_rtcp_remb_t;
 
+/* Transport-CC feedback parse result (draft-holmer-rmcat-transport-wide-cc).
+ * Receive deltas are normalized to microseconds, relative to the start of
+ * the feedback's reference time. */
+#define RTC_TWCC_PARSE_MAX 256
+
+typedef struct {
+    uint32_t sender_ssrc;
+    uint32_t media_ssrc;
+    uint16_t base_seq;
+    uint8_t fb_pkt_count;
+    uint64_t reference_time_us; /* absolute, derived from 24-bit field × 64ms */
+    struct {
+        uint16_t seq;
+        bool received;
+        uint64_t recv_time_us; /* absolute (reference_time_us + cumulative deltas) */
+    } items[RTC_TWCC_PARSE_MAX];
+    int item_count;
+} rtc_rtcp_twcc_t;
+
 /* Build feedback packets — write into caller-supplied buffer.
  * Returns RTC_OK on success, error code on failure.
  * *out_len is set to the number of bytes written. */
-int rtc_rtcp_build_nack(uint8_t *buf, size_t buf_cap, size_t *out_len,
-                        uint32_t sender_ssrc, uint32_t media_ssrc,
-                        const uint16_t *lost_seqs, int count);
-int rtc_rtcp_build_pli(uint8_t *buf, size_t buf_cap, size_t *out_len,
-                       uint32_t sender_ssrc, uint32_t media_ssrc);
-int rtc_rtcp_build_fir(uint8_t *buf, size_t buf_cap, size_t *out_len,
-                       uint32_t sender_ssrc, uint32_t media_ssrc, uint8_t seq_nr);
-int rtc_rtcp_build_remb(uint8_t *buf, size_t buf_cap, size_t *out_len,
-                        uint32_t sender_ssrc, const uint32_t *media_ssrcs,
-                        int ssrc_count, uint32_t bitrate_bps);
+int rtc_rtcp_build_nack(uint8_t *buf, size_t buf_cap, size_t *out_len, uint32_t sender_ssrc,
+                        uint32_t media_ssrc, const uint16_t *lost_seqs, int count);
+int rtc_rtcp_build_pli(uint8_t *buf, size_t buf_cap, size_t *out_len, uint32_t sender_ssrc,
+                       uint32_t media_ssrc);
+int rtc_rtcp_build_fir(uint8_t *buf, size_t buf_cap, size_t *out_len, uint32_t sender_ssrc,
+                       uint32_t media_ssrc, uint8_t seq_nr);
+int rtc_rtcp_build_remb(uint8_t *buf, size_t buf_cap, size_t *out_len, uint32_t sender_ssrc,
+                        const uint32_t *media_ssrcs, int ssrc_count, uint32_t bitrate_bps);
 
 /* Parse feedback packets from raw RTCP bytes (after SRTCP unprotect).
  * Caller must check PT and FMT before calling the appropriate parse function. */
@@ -185,6 +202,7 @@ int rtc_rtcp_parse_nack(rtc_rtcp_nack_t *out, const uint8_t *data, size_t len);
 int rtc_rtcp_parse_pli(rtc_rtcp_pli_t *out, const uint8_t *data, size_t len);
 int rtc_rtcp_parse_fir(rtc_rtcp_fir_t *out, const uint8_t *data, size_t len);
 int rtc_rtcp_parse_remb(rtc_rtcp_remb_t *out, const uint8_t *data, size_t len);
+int rtc_rtcp_parse_twcc(rtc_rtcp_twcc_t *out, const uint8_t *data, size_t len);
 
 /* Extract PT and FMT from an RTCP header (after version check).
  * Useful for dispatch. Returns false if data too short or version != 2. */
