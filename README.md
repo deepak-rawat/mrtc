@@ -14,13 +14,17 @@ orchestration on top. All public API functions use the `rtc_` prefix.
 ## Features
 
 - **STUN/ICE/TURN** — NAT traversal, candidate gathering, connectivity checks, relay
-- **DTLS 1.2 + SRTP** — encrypted media (AES-128-CM, HMAC-SHA1-80)
+- **DTLS 1.2 + SRTP/SRTCP** — encrypted media (AES-128-CM, HMAC-SHA1-80)
 - **RTP/RTCP** — media packets, sender/receiver reports, jitter/loss stats
+- **RTP header extensions** (RFC 8285 one-byte form) with SDP `a=extmap:` negotiation
+- **RTCP feedback** — NACK / PLI / FIR / REMB plus per-video NACK retransmit buffer
+- **Transport-Wide Congestion Control** (draft-holmer-rmcat-transport-wide-cc) end-to-end
+- **GCC bandwidth estimator** — trendline + loss controller; exposes target via callback
 - **SDP** — multi-media session description (audio + video + data channels)
 - **Data Channels** — message framing over DTLS (OPEN/ACK handshake, up to 16 channels)
 - **Peer Connection** — high-level WebRTC API
 - **VP8** (libvpx) + **Opus** (libopus) — video/audio codecs with RTP packetization
-- **Media pipeline** — encode-once fan-out, jitter buffer, rate control
+- **Media pipeline** — encode-once fan-out, jitter buffer, per-sender rate control
 - **Conference library** — multi-peer orchestration
 - **Signaling** — WebSocket client + server for meeting management
 - **Applications** — `chat` (terminal text messaging) and `conf_sdl` (SDL3 video conference)
@@ -67,7 +71,7 @@ mkdir build && cd build && cmake -G Ninja .. && ninja
 
 ## Tests
 
-23 executables, 140 tests. No external framework.
+31 executables, 239 individual test cases. No external framework.
 
 ```bash
 # Run all tests (from build/)

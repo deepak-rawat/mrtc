@@ -165,11 +165,13 @@ AES-128-CM encryption with HMAC-SHA1-80 authentication (RFC 3711).
 
 Key functions: `rtc_srtp_init()`, `rtc_srtp_protect()`, `rtc_srtp_unprotect()`
 
-### RTP / RTCP (`rtc_rtp.h/c`, `rtc_rtcp.h/c`)
+### RTP / RTCP (`rtc_rtp.h/c`, `rtc_rtcp.h/c`, `rtc_rtp_ext.h/c`)
 
-**RTP (RFC 3550):** 12-byte header + payload. Session tracking (SSRC, seq, timestamp). Marker bit support.
+**RTP (RFC 3550):** 12-byte header + payload. Session tracking (SSRC, seq, timestamp). Marker bit support. `rtc_rtp_build_with_ext()` / `rtc_rtp_session_send_with_ext()` emit a one-byte-form header extension block (X bit) alongside the payload; parse exposes `pkt.ext_data` / `pkt.ext_len` for downstream consumers.
 
-**RTCP:** Sender Reports (SR) with NTP timestamps, Receiver Reports (RR) with jitter/loss/delay stats.
+**RTP header extensions (RFC 8285):** `rtc_rtp_ext.h/c` implements the one-byte form (ids 1–14, lengths 1–16). Helpers exist for `abs-send-time` (24-bit 6.18 fixed-point) and `transport-cc` (16-bit transport-wide seq).
+
+**RTCP:** Sender Reports (SR) with NTP timestamps, Receiver Reports (RR) with jitter/loss/delay stats. Feedback messages: NACK / PLI / FIR / REMB (RFC 4585 + 5104) and Transport-CC (PT=205 FMT=15, draft-holmer-rmcat-transport-wide-cc) build + parse. SRTCP protect/unprotect for all outgoing/incoming RTCP. A 5s periodic timer emits SR/RR per active transceiver; a separate 100ms timer emits TWCC feedback when negotiated.
 
 Statistics tracked:
 ```
@@ -185,6 +187,7 @@ Offer/Answer generation and parsing (RFC 4566 WebRTC subset).
 - ICE credentials (ufrag, pwd), DTLS fingerprint + setup role
 - Codec parameters (payload type, clock rate, channels)
 - Candidate lines as SDP attributes
+- `a=extmap:<id> <uri>` (RFC 8285) emit + parse with `rtc_sdp_media_add_extmap()` / `rtc_sdp_media_find_extmap_id()`. Peer connection auto-advertises transport-cc (id=5) on every audio/video m-section.
 
 ### Track / Transceiver (`rtc_track.h/c`)
 
@@ -214,7 +217,7 @@ Key functions: `rtc_data_channel_send()`, `rtc_data_channel_send_text()`, `rtc_d
 
 ### Rate Control (`rtc_rate_control.h/c`)
 
-AIMD (Additive Increase, Multiplicative Decrease) bitrate adaptation driven by RTCP Receiver Reports.
+AIMD (Additive Increase, Multiplicative Decrease) bitrate adaptation driven by RTCP Receiver Reports. Lives **inside each `rtc_rtp_sender_t`** (per-sender, since Phase 2.5) so an audio RR doesn't perturb a video sender and vice versa. The SSRC→sender hashmap routes each RR block to the originating sender.
 
 - Loss < 2% → increase bitrate 5%
 - Loss > 5% → decrease bitrate 20%
@@ -223,6 +226,33 @@ AIMD (Additive Increase, Multiplicative Decrease) bitrate adaptation driven by R
 - Clamps to configurable [min, max] bitrate bounds
 
 Key functions: `rtc_rate_control_create()`, `rtc_rate_control_on_rtcp_rr()`, `rtc_rate_control_get_bitrate()`, `rtc_rate_control_should_keyframe()`
+
+### NACK retransmit buffer (`rtc_nack_buf.h/c`)
+
+512-packet ring buffer per video sender, indexed by RTP sequence number. Stores post-SRTP packets so an incoming Generic NACK (RFC 4585 §6.2.1) can be served by re-sending the original wire packet via `rtc_transport_send_to_remote()` without re-encrypting. Created on connect for `RTC_KIND_VIDEO` senders.
+
+### Transport-Wide CC (`rtc_twcc_sender.h/c`, `rtc_twcc_receiver.h/c`)
+
+Wire-level implementation of draft-holmer-rmcat-transport-wide-cc-extensions.
+
+- **Sender ring** — 1024 entries of `(twcc_seq, send_time_us, wire_size)` keyed by `twcc_seq & (RING-1)`. `rtc_rtp_sender_send()` assigns the next seq, writes the transport-cc extension into the RTP header, then records the post-SRTP wire size + send time after protect.
+- **Receiver window** — 256 entries; `rtc_twcc_receiver_on_packet()` records arrivals. The 100ms feedback timer in the peer connection calls `rtc_twcc_receiver_build_feedback()` which emits an RTCP PT=205/FMT=15 packet using run-length and 14×1-bit status-vector chunks plus 1- or 2-byte 250µs receive deltas. The packet is then SRTCP-protected and sent.
+- **Parse** — `rtc_rtcp_parse_twcc()` walks chunks and reconstructs absolute arrival time per packet (relative to the 24-bit reference time × 64ms).
+
+### Bandwidth Estimator (`rtc_bwe.h/c`)
+
+Simplified Google Congestion Control (draft-ietf-rmcat-gcc):
+
+- Group packets by send time into ≤5ms bursts.
+- Inter-group delay = `recv_delta − send_delta`, accumulated.
+- Trendline filter (linear regression over a 20-sample sliding window) → slope.
+- Adaptive threshold drives `{NORMAL, OVERUSE, UNDERUSE}`.
+- Rate controller: NORMAL → multiplicative (×1.08) or additive (+50 kbps) increase; OVERUSE → decrease to 0.85 × recent throughput; UNDERUSE → hold.
+- Loss controller (folded in via `rtc_bwe_on_loss`): <2% → +5%, 2–10% hold, >10% → ×(1−0.5·loss).
+- Final target = `min(delay_estimate, loss_estimate)` clamped to `[min_bps, max_bps]`.
+- Callback fires on >3% change or 1s elapsed.
+
+One `rtc_bwe_t` per peer is created when transport-cc is negotiated. `rtc_peer.c` feeds each parsed TWCC feedback item via `rtc_twcc_sender_lookup`, plus RR `fraction_lost`, into the BWE; the resulting bitrate is exposed to applications via `rtc_peer_connection_on_bitrate_estimate()`.
 
 ### Peer Connection (`rtc_peer.h/c`)
 
@@ -238,6 +268,9 @@ struct rtc_peer_connection {
     rtc_dc_manager_t dc_manager;          // Data channels
     rtc_rate_controller_t *rate_ctrl;     // AIMD rate control
     rtc_desc_t local_desc, remote_desc;
+    rtc_twcc_sender_t twcc_sender;        // outbound transport-wide seq history
+    rtc_twcc_receiver_t twcc_receiver;    // inbound arrivals → feedback
+    rtc_bwe_t *bwe;                       // GCC bandwidth estimator (per peer)
     _Atomic rtc_connection_state_t state;
 };
 ```
@@ -259,14 +292,19 @@ struct rtc_peer_connection {
 |------|----------|
 | `test_stun` | STUN Binding Req/Resp, MESSAGE-INTEGRITY, FINGERPRINT |
 | `test_rtp` | RTP header parsing, session tracking, seq/ts increment |
+| `test_rtp_ext` | RFC 8285 one-byte ext write/parse, build_with_ext round-trip |
 | `test_srtp` | AES-CM encryption, HMAC-SHA1, wrong-key rejection |
 | `test_dtls` | DTLS handshake via memory BIOs, SRTP key export |
 | `test_ice` | Candidate gathering, connectivity checks, loopback e2e |
-| `test_sdp` | SDP generation/parsing round-trip |
+| `test_sdp` | SDP generation/parsing round-trip, extmap |
 | `test_sdp_video` | Multi-media SDP (audio + video), codec params |
 | `test_transport` | Socket init, packet demux, timer management |
 | `test_peer` | Full peer connection lifecycle, offer/answer |
 | `test_rtcp` | SR/RR build/parse, jitter statistics |
+| `test_rtcp_feedback` | NACK / PLI / FIR / REMB build + parse |
+| `test_nack_buf` | NACK ring buffer store/lookup, wraparound |
+| `test_twcc` | TWCC sender ring, receiver window, feedback round-trip |
+| `test_bwe` | GCC steady increase, delay-induced decrease, loss clamp, callback |
 | `test_data_channel` | Channel open/close, message send/recv |
 | `test_turn` | TURN allocation, ChannelData framing, credentials |
 | `test_rate_control` | AIMD algorithm, bitrate adaptation, keyframe requests |
@@ -277,7 +315,5 @@ struct rtc_peer_connection {
 - TURN relay candidates not yet wired into ICE gathering
 - Always ICE-controlling role (no nomination negotiation)
 - No RTCP compound packets (single SR or RR per interval)
-- No RTCP feedback messages (NACK, PLI, FIR, REMB)
-- No SRTP replay protection
-- Single rate controller shared across all senders per peer
-- SSRC→receiver lookup is O(n) linear scan (should use hashmap)
+- No SRTP replay protection on RTCP path
+- BWE bitrate is exposed via callback but not auto-wired to media pipeline encoder bitrate (apps subscribe explicitly)

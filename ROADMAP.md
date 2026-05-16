@@ -34,11 +34,17 @@ and pipeline orchestration — it depends on `rtc` and uses its public types dir
 
 ## Completed Work
 
-**Core RTC** — ICE (host + SRFLX candidates), DTLS 1.2 (OpenSSL), SRTP,
-RTP/RTCP SR/RR, SDP (multi-media), data channels (wire protocol with
-OPEN/ACK handshake, up to 16 concurrent channels), peer connection with
-automatic ICE→DTLS→SRTP on both descriptions set. STUN binding, TURN client
-(allocate, channel bind, channel data). AIMD rate control driven by RTCP RR.
+**Core RTC** — ICE (host + SRFLX candidates), DTLS 1.2 (OpenSSL), SRTP/SRTCP,
+RTP/RTCP SR/RR, RTP header extensions (RFC 8285 one-byte form), SDP (multi-media
+with `a=extmap:` negotiation), data channels (wire protocol with OPEN/ACK
+handshake, up to 16 concurrent channels), peer connection with automatic
+ICE→DTLS→SRTP on both descriptions set. STUN binding, TURN client (allocate,
+channel bind, channel data). Per-sender AIMD rate control driven by RTCP RR.
+RTCP feedback (NACK / PLI / FIR / REMB) with per-video NACK retransmit buffer.
+Transport-Wide Congestion Control end-to-end (draft-holmer-rmcat-transport-wide-cc):
+sender tagging, periodic feedback, parser. Per-peer Google Congestion Control
+bandwidth estimator (delay trendline + loss controller) exposed via
+`rtc_peer_connection_on_bitrate_estimate()`.
 
 **Media** — VP8 encode/decode (libvpx), Opus encode/decode (libopus),
 VP8 RTP packetizer/depacketizer (RFC 7741), jitter buffer, AIMD rate control,
@@ -61,7 +67,7 @@ connection lifecycle.
 tiled video grid, keyboard controls. Chat app (terminal) for text messaging
 over data channels.
 
-**Tests** — 23 test executables, 140 tests covering all components.
+**Tests** — 31 test executables, 239 individual test cases covering all components.
 
 ---
 
