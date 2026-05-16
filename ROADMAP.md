@@ -184,33 +184,37 @@ queries each sender's target bitrate independently and encodes per peer
 
 ---
 
-### Phase 3: Bandwidth Estimation
+### Phase 3: Bandwidth Estimation — ✅ COMPLETE
 
-**3.1 — RTP header extensions**
+**3.1 — RTP header extensions (RFC 8285)**
 
-```c
-int rtc_rtp_ext_write(buf, len, id, data, data_len);
-int rtc_rtp_ext_parse(ext_data, ext_len, id, out, out_len);
-```
+`rtc_rtp_ext.{h,c}` — one-byte form write/parse, helpers for abs-send-time and
+transport-cc. `rtc_rtp_build_with_ext()` / `rtc_rtp_session_send_with_ext()` emit
+the extension block and set the X bit. SDP `a=extmap:` negotiation in
+`rtc_sdp.c` with `rtc_sdp_media_add_extmap()` / `rtc_sdp_media_find_extmap_id()`.
 
-Key extensions: `abs-send-time`, `transport-cc`, `audio-level`, `mid`.
-SDP `a=extmap:` negotiation in `rtc_sdp.c`.
+**3.2 — Transport-CC (draft-holmer-rmcat-transport-wide-cc-extensions)**
 
-**3.2 — Transport-CC (RFC 8888)**
-
-Sender records per-packet send times. Receiver tracks arrival times, builds
-RTCP Transport Feedback periodically. Sender compares send/recv deltas.
+`rtc_twcc_sender.{h,c}` — 1024-entry seq ring of `(twcc_seq, send_time_us, wire_size)`.
+`rtc_twcc_receiver.{h,c}` — 256-packet arrival window; builds RTCP PT=205 FMT=15
+feedback using run-length + status-vector chunks and 1/2-byte 250µs deltas.
+Peer connection auto-emits `a=extmap:5 <transport-cc URI>` on audio/video, tags
+every outgoing RTP with the extension, and runs a 100ms feedback timer.
 
 **3.3 — GCC (Google Congestion Control)**
 
-Delay-based + loss-based estimator. Fires callback when estimate changes.
-Pipeline adjusts encoder bitrate.
+`rtc_bwe.{h,c}` — simplified delay-based + loss-based estimator:
+group packets into 5ms bursts → trendline filter over a 20-sample window →
+adaptive overuse threshold → `{NORMAL, OVERUSE, UNDERUSE}` state drives a rate
+controller (multiplicative/additive increase, 0.85 × recent-throughput decrease).
+Loss controller folds RR `fraction_lost` into the same target. Per-peer BWE
+consumes parsed TWCC feedback in `rtc_peer.c` and fires
+`rtc_peer_connection_on_bitrate_estimate()`.
 
 ```c
-rtc_bwe_t *rtc_bwe_create(initial_bitrate_bps);
-void rtc_bwe_on_delay_feedback(bwe, send_delta, recv_delta, pkt_size);
-void rtc_bwe_on_loss(bwe, fraction_lost);
-uint32_t rtc_bwe_get_bitrate(bwe);
+typedef void (*rtc_on_bitrate_estimate_fn)(uint32_t bitrate_bps, void *user);
+void rtc_peer_connection_on_bitrate_estimate(rtc_peer_connection_t *pc,
+                                             rtc_on_bitrate_estimate_fn fn, void *user);
 ```
 
 ---

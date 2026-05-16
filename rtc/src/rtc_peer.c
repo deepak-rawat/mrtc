@@ -35,6 +35,7 @@
 #include "rtc_nack_buf.h"
 #include "rtc_twcc_sender.h"
 #include "rtc_twcc_receiver.h"
+#include "rtc_bwe.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -182,12 +183,20 @@ struct rtc_peer_connection {
     uint32_t twcc_remote_ssrc;         /* media_ssrc for feedback we emit */
     rtc_timer_id_t twcc_fb_timer_id;   /* feedback send timer */
     bool twcc_have_packets;            /* set after first received tagged packet */
+
+    /* Bandwidth estimator (Phase 3.3). Consumes TWCC feedback + RR loss and
+     * exposes a per-peer target sending bitrate via on_bitrate_estimate.
+     * NULL when transport-cc was not negotiated. */
+    rtc_bwe_t *bwe;
+    rtc_on_bitrate_estimate_fn on_bitrate_estimate;
+    void *on_bitrate_estimate_user;
 };
 
 /* ---- Forward declarations ---- */
 static int peer_dc_send(const uint8_t *data, size_t len, void *user);
 static void peer_rtcp_timer(void *user);
 static void peer_twcc_fb_timer(void *user);
+static void peer_bwe_bitrate_cb(uint32_t bitrate_bps, void *user);
 
 /* Internal handlers from rtc_track.c (declared here for peer connection dispatch) */
 void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_seqs, int count);
@@ -272,6 +281,14 @@ static void peer_twcc_fb_timer(void *user) {
 
     pc->twcc_fb_timer_id = rtc_transport_add_timer(
         &pc->transport, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
+}
+
+/* ---- BWE bitrate callback trampoline ---- */
+
+static void peer_bwe_bitrate_cb(uint32_t bitrate_bps, void *user) {
+    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+    if (pc->on_bitrate_estimate)
+        pc->on_bitrate_estimate(bitrate_bps, pc->on_bitrate_estimate_user);
 }
 
 /* ---- State helpers ---- */
@@ -398,6 +415,10 @@ static void peer_complete_connection(rtc_peer_connection_t *pc) {
         pc->twcc_fb_timer_id =
             rtc_transport_add_timer(&pc->transport, rtc_time_ms() + 100, peer_twcc_fb_timer, pc);
     }
+
+    /* Bind the BWE bitrate callback through a per-peer trampoline. */
+    if (pc->bwe)
+        rtc_bwe_on_bitrate_change(pc->bwe, peer_bwe_bitrate_cb, pc);
 }
 
 /* ---- DTLS retransmission timer (fires on transport thread) ---- */
@@ -625,11 +646,13 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                         r->rtcp_stats.last_sr_recv_time = rtc_time_ms();
                     }
                 } else if (pt == RTCP_PT_RR) {
-                    /* Extract feedback and feed to rate controller */
+                    /* Extract feedback and feed to rate controller + BWE */
                     rtc_rtcp_packet_t rtcp;
                     rc = rtc_rtcp_parse(&rtcp, buf, pkt_len);
                     if (rc != RTC_OK)
                         break;
+                    if (pc->bwe && rtcp.report_count > 0)
+                        rtc_bwe_on_loss(pc->bwe, rtcp.reports[0].fraction_lost);
                     for (int i = 0; i < rtcp.report_count; i++) {
                         const rtc_rtcp_rr_block_t *rr = &rtcp.reports[i];
 
@@ -668,12 +691,24 @@ static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t
                             rtc_rtp_sender_handle_nack(sender, nack.lost_seqs, nack.lost_count);
                     }
                 } else if (pt == RTCP_PT_RTPFB && fmt == 15) {
-                    /* Transport-CC feedback (parsed; BWE consumer added in Phase 3.3) */
+                    /* Transport-CC feedback — feed each reported packet to BWE. */
                     rtc_rtcp_twcc_t tw;
                     if (rtc_rtcp_parse_twcc(&tw, buf, pkt_len) == RTC_OK) {
                         RTC_LOG_DBG("Peer: TWCC feedback base=%u count=%d fb_pkt=%u",
                                     (unsigned)tw.base_seq, tw.item_count,
                                     (unsigned)tw.fb_pkt_count);
+                        if (pc->bwe) {
+                            for (int i = 0; i < tw.item_count; i++) {
+                                const rtc_twcc_sent_pkt_t *s =
+                                    rtc_twcc_sender_lookup(&pc->twcc_sender, tw.items[i].seq);
+                                if (!s)
+                                    continue;
+                                uint64_t recv_us =
+                                    tw.items[i].received ? tw.items[i].recv_time_us : 0;
+                                rtc_bwe_on_packet_feedback(pc->bwe, s->send_time_us, recv_us,
+                                                           s->size);
+                            }
+                        }
                     }
                 } else if (pt == RTCP_PT_PSFB && fmt == RTCP_FMT_PLI) {
                     /* PLI — request keyframe */
@@ -955,6 +990,11 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc) {
         }
     }
 
+    if (pc->bwe) {
+        rtc_bwe_destroy(pc->bwe);
+        pc->bwe = NULL;
+    }
+
     pc->connection_state = RTC_CONNECTION_CLOSED;
     pc->signaling_state = RTC_SIGNALING_CLOSED;
 
@@ -1228,7 +1268,8 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
     }
 
     /* Transport-CC extmap negotiation. Pick the first non-zero id we see
-     * across audio/video m-sections as the active id (both directions). */
+     * across audio/video m-sections as the active id (both directions).
+     * When negotiated, create the per-peer GCC bandwidth estimator. */
     for (int i = 0; i < sdp.media_count; i++) {
         const rtc_sdp_media_t *m = &sdp.media[i];
         if (m->media_type != RTC_MEDIA_AUDIO && m->media_type != RTC_MEDIA_VIDEO)
@@ -1241,6 +1282,14 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
                 pc->twcc_remote_ssrc = m->ssrc;
             rtc_twcc_sender_init(&pc->twcc_sender);
             rtc_twcc_receiver_init(&pc->twcc_receiver);
+            if (!pc->bwe) {
+                rtc_bwe_config_t bcfg = {
+                    .initial_bps = 500000,
+                    .min_bps = 100000,
+                    .max_bps = 4000000,
+                };
+                pc->bwe = rtc_bwe_create(&bcfg);
+            }
             RTC_LOG_INFO("Peer: transport-cc negotiated (ext id=%u)", (unsigned)id);
             break;
         }
@@ -1363,6 +1412,14 @@ void rtc_peer_connection_on_data_channel(rtc_peer_connection_t *pc, rtc_on_data_
         return;
     pc->on_data_channel = fn;
     pc->on_data_channel_user = user;
+}
+
+void rtc_peer_connection_on_bitrate_estimate(rtc_peer_connection_t *pc,
+                                             rtc_on_bitrate_estimate_fn fn, void *user) {
+    if (!pc)
+        return;
+    pc->on_bitrate_estimate = fn;
+    pc->on_bitrate_estimate_user = user;
 }
 
 /* ---- State getters ---- */

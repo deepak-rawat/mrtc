@@ -25,10 +25,11 @@ Status of each IETF RFC relevant to the WebRTC protocol stack as implemented in 
 | [RFC 7741](#rfc-7741--vp8-rtp) | VP8 RTP Payload | ⚠️ Partial | ~85% | Current |
 | [RFC 7983](#rfc-7983--packet-demux) | Multiplexing STUN/DTLS/RTP | ✅ Implemented | 100% | Current |
 | [RFC 8445](#rfc-8445--ice) | ICE | ⚠️ Partial | ~45% | Updated by 8863 |
+| RFC 8285 | One-byte/two-byte RTP header extensions | ⚠️ Partial | one-byte form | Current |
 | [RFC 8829](#rfc-8829--jsep) | JSEP (offer/answer model) | ⚠️ Partial | ~60% | Current |
 | [RFC 8834](#rfc-8834--media-transport) | Media Transport over RTP | ⚠️ Partial | ~50% | Current |
 | [RFC 8839](#rfc-8839--ice-sdp) | ICE SDP Attributes | ⚠️ Partial | ~60% | Current |
-| [RFC 8888](#rfc-8888--transport-cc) | Transport-CC | ❌ Not Impl | 0% | Current |
+| draft-holmer-rmcat-transport-wide-cc | Transport-Wide Congestion Control | ⚠️ Partial | wire + GCC | (was RFC 8888 row) |
 
 ---
 

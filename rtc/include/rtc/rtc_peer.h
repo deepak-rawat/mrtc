@@ -182,6 +182,13 @@ void rtc_peer_connection_on_track(rtc_peer_connection_t *pc, rtc_on_track_fn fn,
 void rtc_peer_connection_on_data_channel(rtc_peer_connection_t *pc, rtc_on_data_channel_fn fn,
                                          void *user);
 
+/* Bandwidth-estimate callback: fired on the transport thread when the
+ * per-peer GCC estimator updates its target sending bitrate (in bits/sec).
+ * Applications typically forward this to their encoder bitrate setter. */
+typedef void (*rtc_on_bitrate_estimate_fn)(uint32_t bitrate_bps, void *user);
+void rtc_peer_connection_on_bitrate_estimate(rtc_peer_connection_t *pc,
+                                             rtc_on_bitrate_estimate_fn fn, void *user);
+
 /* ---- State getters (safe to call from any thread) ---- */
 
 rtc_signaling_state_t rtc_peer_connection_signaling_state(const rtc_peer_connection_t *pc);
