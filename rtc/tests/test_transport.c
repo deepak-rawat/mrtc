@@ -106,7 +106,7 @@ static void get_loopback_addr(rtc_transport_t *t, rtc_addr_t *out) {
 /* ------------------------------------------------------------------ */
 TEST(transport_init_close) {
     rtc_transport_t t;
-    int rc = rtc_transport_init(&t);
+    int rc = rtc_transport_init(&t, NULL, NULL);
     ASSERT_EQ(rc, RTC_OK);
     ASSERT(rtc_transport_get_socket(&t) != RTC_INVALID_SOCKET);
     ASSERT(t.running);
@@ -132,11 +132,9 @@ TEST(transport_init_close) {
 /* ------------------------------------------------------------------ */
 TEST(transport_recv_packet) {
     rtc_transport_t t;
-    int rc = rtc_transport_init(&t);
-    ASSERT_EQ(rc, RTC_OK);
-
     g_recv_count = 0;
-    rtc_transport_set_recv_callback(&t, test_recv_callback, NULL);
+    int rc = rtc_transport_init(&t, test_recv_callback, NULL);
+    ASSERT_EQ(rc, RTC_OK);
 
     /* Send a STUN-like packet (first byte 0x00) to transport's own port */
     rtc_addr_t self;
@@ -167,9 +165,8 @@ TEST(transport_recv_packet) {
 /* ------------------------------------------------------------------ */
 TEST(transport_classify_types) {
     rtc_transport_t t;
-    int rc = rtc_transport_init(&t);
+    int rc = rtc_transport_init(&t, test_recv_callback, NULL);
     ASSERT_EQ(rc, RTC_OK);
-    rtc_transport_set_recv_callback(&t, test_recv_callback, NULL);
 
     rtc_addr_t self;
     get_loopback_addr(&t, &self);
@@ -208,7 +205,7 @@ TEST(transport_classify_types) {
 /* ------------------------------------------------------------------ */
 TEST(transport_timer_fires) {
     rtc_transport_t t;
-    int rc = rtc_transport_init(&t);
+    int rc = rtc_transport_init(&t, NULL, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     g_timer_count = 0;
@@ -230,7 +227,7 @@ TEST(transport_timer_fires) {
 /* ------------------------------------------------------------------ */
 TEST(transport_timer_cancel) {
     rtc_transport_t t;
-    int rc = rtc_transport_init(&t);
+    int rc = rtc_transport_init(&t, NULL, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     g_timer_count = 0;
@@ -254,13 +251,11 @@ TEST(transport_timer_cancel) {
 /* ------------------------------------------------------------------ */
 TEST(transport_send_to_remote) {
     rtc_transport_t sender, receiver;
-    int rc = rtc_transport_init(&sender);
-    ASSERT_EQ(rc, RTC_OK);
-    rc = rtc_transport_init(&receiver);
-    ASSERT_EQ(rc, RTC_OK);
-
     g_recv_count = 0;
-    rtc_transport_set_recv_callback(&receiver, test_recv_callback, NULL);
+    int rc = rtc_transport_init(&sender, NULL, NULL);
+    ASSERT_EQ(rc, RTC_OK);
+    rc = rtc_transport_init(&receiver, test_recv_callback, NULL);
+    ASSERT_EQ(rc, RTC_OK);
 
     /* Get receiver's loopback address */
     rtc_addr_t recv_addr;
@@ -292,9 +287,8 @@ TEST(transport_send_to_remote) {
 /* ------------------------------------------------------------------ */
 TEST(transport_classify_rtcp) {
     rtc_transport_t t;
-    int rc = rtc_transport_init(&t);
+    int rc = rtc_transport_init(&t, test_recv_callback, NULL);
     ASSERT_EQ(rc, RTC_OK);
-    rtc_transport_set_recv_callback(&t, test_recv_callback, NULL);
 
     rtc_addr_t self;
     get_loopback_addr(&t, &self);

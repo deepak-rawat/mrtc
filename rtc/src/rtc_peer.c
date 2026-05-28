@@ -906,8 +906,8 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
                        &pc->stun_port);
     }
 
-    /* Initialize transport (socket + thread) */
-    int rc = rtc_transport_init(&pc->transport);
+    /* Initialize transport (socket + thread). */
+    int rc = rtc_transport_init(&pc->transport, peer_transport_recv, pc);
     if (rc != RTC_OK) {
         free(pc->app_buf);
         free(pc);
@@ -930,9 +930,6 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
         free(pc);
         return NULL;
     }
-
-    /* Register recv callback */
-    rtc_transport_set_recv_callback(&pc->transport, peer_transport_recv, pc);
 
     /* Initialize ICE agent (borrows transport) */
     rc = rtc_ice_init(&pc->ice, &pc->transport, pc->stun_server[0] ? pc->stun_server : NULL,

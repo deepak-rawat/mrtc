@@ -60,10 +60,11 @@ typedef struct rtc_transport {
     _Atomic bool running; /* set false from any thread to stop poller loop */
     rtc_mutex_t mutex;
 
-    /* Packet callback */
+    /* Packet callback. Installed by rtc_transport_init() before the
+     * background thread starts; never changed. Read unlocked on the hot
+     * path. */
     rtc_transport_recv_fn on_recv;
     void *recv_user;
-    rtc_mutex_t recv_mutex; /* protects callback access */
 
     /* Timers */
     rtc_timer_t timers[RTC_TRANSPORT_MAX_TIMERS];
@@ -75,19 +76,16 @@ typedef struct rtc_transport {
 } rtc_transport_t;
 
 /*
- * Initialize transport: create UDP socket, bind to ephemeral port,
- * start background thread with I/O poller.
+ * Create UDP socket, install the recv callback, and start the poller
+ * thread. on_recv (may be NULL) fires on the transport thread.
  */
-int rtc_transport_init(rtc_transport_t *t);
+int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *user);
 
 /* Thread-safe: send data to a specific destination address */
 int rtc_transport_send(rtc_transport_t *t, const uint8_t *data, size_t len, const rtc_addr_t *dest);
 
 /* Thread-safe: send data to the selected remote (set by ICE) */
 int rtc_transport_send_to_remote(rtc_transport_t *t, const uint8_t *data, size_t len);
-
-/* Set the demuxed packet handler (fires on transport thread) */
-void rtc_transport_set_recv_callback(rtc_transport_t *t, rtc_transport_recv_fn fn, void *user);
 
 /* Set the selected remote address (called by ICE after connect) */
 void rtc_transport_set_remote(rtc_transport_t *t, const rtc_addr_t *addr);

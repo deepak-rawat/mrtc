@@ -104,7 +104,7 @@ Recv:  UDP socket → demux (RFC 7983) → callback(type, data, from_addr)
 Send:  rtc_transport_send(data, dest) → UDP sendto (thread-safe)
 ```
 
-Key functions: `rtc_transport_init()`, `rtc_transport_send()`, `rtc_transport_set_recv_callback()`, `rtc_transport_set_remote()`
+Key functions: `rtc_transport_init()`, `rtc_transport_send()`, `rtc_transport_set_remote()`
 
 ### ICE Agent (`rtc_ice.h/c`)
 

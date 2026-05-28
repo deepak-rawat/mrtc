@@ -27,7 +27,7 @@
 /* ------------------------------------------------------------------ */
 TEST(ice_init) {
     rtc_transport_t transport;
-    int rc = rtc_transport_init(&transport);
+    int rc = rtc_transport_init(&transport, NULL, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     rtc_ice_agent_t agent;
@@ -51,7 +51,7 @@ TEST(ice_init) {
 /* ------------------------------------------------------------------ */
 TEST(ice_gather_host) {
     rtc_transport_t transport;
-    rtc_transport_init(&transport);
+    rtc_transport_init(&transport, NULL, NULL);
 
     rtc_ice_agent_t agent;
     rtc_ice_init(&agent, &transport, NULL, 0);
@@ -79,7 +79,7 @@ TEST(ice_gather_host) {
 /* ------------------------------------------------------------------ */
 TEST(ice_remote_credentials) {
     rtc_transport_t transport;
-    rtc_transport_init(&transport);
+    rtc_transport_init(&transport, NULL, NULL);
 
     rtc_ice_agent_t agent;
     rtc_ice_init(&agent, &transport, NULL, 0);
@@ -213,9 +213,16 @@ TEST(ice_two_agents_connect) {
     rtc_transport_t transport_a, transport_b;
     rtc_ice_agent_t alice, bob;
 
-    int rc = rtc_transport_init(&transport_a);
+    /*
+     * Install recv callbacks at init time:
+     *   transport_a captures binding responses for Alice.
+     *   transport_b dispatches to Bob's ICE via g_stun_agent (set below).
+     * g_stun_agent is NULL initially; no packets arrive until we send.
+     */
+    g_stun_recv_count = 0;
+    int rc = rtc_transport_init(&transport_a, ice_test_stun_capture_cb, NULL);
     ASSERT_EQ(rc, RTC_OK);
-    rc = rtc_transport_init(&transport_b);
+    rc = rtc_transport_init(&transport_b, ice_test_recv_cb, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     rc = rtc_ice_init(&alice, &transport_a, NULL, 0);
@@ -250,19 +257,13 @@ TEST(ice_two_agents_connect) {
     ASSERT(bob.remote_candidate_count > 0);
 
     /*
-     * Register Bob's ICE as STUN handler on his transport.
-     * When Alice sends a STUN request, Bob's transport thread will
-     * dispatch it to ice_test_recv_cb which calls rtc_ice_handle_stun(),
-     * which sends a binding response back.
+     * Bob's ICE is the STUN handler. Publish it now that the agents
+     * are initialized; transport_b's callback (installed at init) will
+     * pick it up when Alice's binding request arrives.
      */
-    g_stun_recv_count = 0;
     rtc_mutex_lock(&g_ice_mutex);
     g_stun_agent = &bob;
     rtc_mutex_unlock(&g_ice_mutex);
-    rtc_transport_set_recv_callback(&transport_b, ice_test_recv_cb, NULL);
-
-    /* Register Alice's transport to capture the binding response */
-    rtc_transport_set_recv_callback(&transport_a, ice_test_stun_capture_cb, NULL);
 
     /* Build and send STUN request from Alice to Bob */
     char username_a[ICE_UFRAG_LEN * 2 + 2];
@@ -290,8 +291,6 @@ TEST(ice_two_agents_connect) {
 
     printf("    Alice -> Bob STUN check: request sent, response received\n");
 
-    rtc_transport_set_recv_callback(&transport_b, NULL, NULL);
-    rtc_transport_set_recv_callback(&transport_a, NULL, NULL);
     rtc_transport_close(&transport_a);
     rtc_transport_close(&transport_b);
     rtc_mutex_lock(&g_ice_mutex);
@@ -308,8 +307,9 @@ TEST(ice_data_transfer) {
     rtc_transport_t transport_a, transport_b;
     rtc_ice_agent_t alice, bob;
 
-    rtc_transport_init(&transport_a);
-    rtc_transport_init(&transport_b);
+    g_data_recv_count = 0;
+    rtc_transport_init(&transport_a, ice_test_data_capture_cb, NULL);
+    rtc_transport_init(&transport_b, ice_test_data_capture_cb, NULL);
     rtc_ice_init(&alice, &transport_a, NULL, 0);
     rtc_ice_init(&bob, &transport_b, NULL, 0);
     rtc_ice_gather(&alice);
@@ -323,10 +323,6 @@ TEST(ice_data_transfer) {
     rtc_transport_set_remote(&transport_b, &alice.local_candidates[0].addr);
     bob.selected_remote = alice.local_candidates[0].addr;
     bob.state = ICE_STATE_CONNECTED;
-
-    /* Register recv callbacks to capture data */
-    g_data_recv_count = 0;
-    rtc_transport_set_recv_callback(&transport_b, ice_test_data_capture_cb, NULL);
 
     /* Alice sends data to Bob via transport */
     const char *msg = "Hello over ICE!";
@@ -343,7 +339,6 @@ TEST(ice_data_transfer) {
 
     /* Bob sends back to Alice */
     g_data_recv_count = 0;
-    rtc_transport_set_recv_callback(&transport_a, ice_test_data_capture_cb, NULL);
 
     const char *reply = "Reply from Bob!";
     rc = rtc_transport_send_to_remote(&transport_b, (const uint8_t *)reply, strlen(reply));
@@ -356,8 +351,6 @@ TEST(ice_data_transfer) {
 
     printf("    Bob -> Alice: \"%s\" (%zu bytes)\n", reply, g_data_recv_len);
 
-    rtc_transport_set_recv_callback(&transport_a, NULL, NULL);
-    rtc_transport_set_recv_callback(&transport_b, NULL, NULL);
     rtc_transport_close(&transport_a);
     rtc_transport_close(&transport_b);
     rtc_ice_close(&alice);

@@ -113,14 +113,8 @@ static void *transport_thread_fn(void *arg) {
 
                 rtc_pkt_type_t type = transport_classify(buf, (size_t)len);
 
-                /* Dispatch to callback */
-                rtc_mutex_lock(&t->recv_mutex);
-                rtc_transport_recv_fn fn = t->on_recv;
-                void *user = t->recv_user;
-                rtc_mutex_unlock(&t->recv_mutex);
-
-                if (fn) {
-                    fn(type, buf, (size_t)len, &from, user);
+                if (t->on_recv) {
+                    t->on_recv(type, buf, (size_t)len, &from, t->recv_user);
                 }
             }
         }
@@ -136,7 +130,7 @@ static void *transport_thread_fn(void *arg) {
 /*  Public API                                                         */
 /* ------------------------------------------------------------------ */
 
-int rtc_transport_init(rtc_transport_t *t) {
+int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *user) {
     memset(t, 0, sizeof(*t));
     t->sock = RTC_INVALID_SOCKET;
 
@@ -194,7 +188,10 @@ int rtc_transport_init(rtc_transport_t *t) {
 
     /* Init synchronization */
     rtc_mutex_init(&t->mutex);
-    rtc_mutex_init(&t->recv_mutex);
+
+    /* Wire up callback before the thread starts so no packet is missed. */
+    t->on_recv = on_recv;
+    t->recv_user = user;
 
     /* Start background thread */
     t->running = true;
@@ -205,7 +202,6 @@ int rtc_transport_init(rtc_transport_t *t) {
         rtc_close_socket(t->sock);
         t->sock = RTC_INVALID_SOCKET;
         rtc_mutex_destroy(&t->mutex);
-        rtc_mutex_destroy(&t->recv_mutex);
         return rc;
     }
 
@@ -227,13 +223,6 @@ int rtc_transport_send_to_remote(rtc_transport_t *t, const uint8_t *data, size_t
     if (!t->remote_addr_set)
         return RTC_ERR_INVALID;
     return rtc_transport_send(t, data, len, &t->remote_addr);
-}
-
-void rtc_transport_set_recv_callback(rtc_transport_t *t, rtc_transport_recv_fn fn, void *user) {
-    rtc_mutex_lock(&t->recv_mutex);
-    t->on_recv = fn;
-    t->recv_user = user;
-    rtc_mutex_unlock(&t->recv_mutex);
 }
 
 void rtc_transport_set_remote(rtc_transport_t *t, const rtc_addr_t *addr) {
@@ -297,7 +286,6 @@ void rtc_transport_close(rtc_transport_t *t) {
     }
 
     rtc_mutex_destroy(&t->mutex);
-    rtc_mutex_destroy(&t->recv_mutex);
 
     RTC_LOG_INFO("Transport: closed");
 }
