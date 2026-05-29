@@ -91,22 +91,22 @@ static void *transport_thread_fn(void *arg) {
     uint8_t buf[RTC_TRANSPORT_BUF_SIZE];
 
     while (t->running) {
-        /* Compute timeout from nearest timer */
         rtc_mutex_lock(&t->mutex);
         int timeout = transport_next_timeout_ms(t);
         rtc_mutex_unlock(&t->mutex);
 
-        /* Wait for socket readability or timeout */
         int n = rtc_poller_wait(&t->poller, timeout);
 
         if (n > 0) {
-            /* Read packet */
-            struct sockaddr_storage from_store;
-            socklen_t fromlen = sizeof(from_store);
+            for (int i = 0; i < RTC_TRANSPORT_RECV_BATCH; i++) {
+                struct sockaddr_storage from_store;
+                socklen_t fromlen = sizeof(from_store);
 
-            ssize_t len = recvfrom(t->sock, (char *)buf, sizeof(buf), 0,
-                                   (struct sockaddr *)&from_store, &fromlen);
-            if (len > 0) {
+                ssize_t len = recvfrom(t->sock, (char *)buf, sizeof(buf), 0,
+                                       (struct sockaddr *)&from_store, &fromlen);
+                if (len <= 0)
+                    break; /* EWOULDBLOCK or error — socket drained */
+
                 rtc_addr_t from;
                 memcpy(&from.addr, &from_store, fromlen);
                 from.len = fromlen;
@@ -119,7 +119,6 @@ static void *transport_thread_fn(void *arg) {
             }
         }
 
-        /* Fire expired timers */
         transport_fire_timers(t);
     }
 
@@ -220,16 +219,18 @@ int rtc_transport_send(rtc_transport_t *t, const uint8_t *data, size_t len,
 }
 
 int rtc_transport_send_to_remote(rtc_transport_t *t, const uint8_t *data, size_t len) {
-    if (!t->remote_addr_set)
+    /* Acquire-load pairs with the release-store in rtc_transport_set_remote;
+     * seeing true guarantees a fully-written remote_addr. */
+    if (!atomic_load_explicit(&t->remote_addr_set, memory_order_acquire))
         return RTC_ERR_INVALID;
     return rtc_transport_send(t, data, len, &t->remote_addr);
 }
 
 void rtc_transport_set_remote(rtc_transport_t *t, const rtc_addr_t *addr) {
-    rtc_mutex_lock(&t->mutex);
+    /* One-shot publication. Write address first, then release-store the
+     * flag so any sender observing true also sees the address. */
     t->remote_addr = *addr;
-    t->remote_addr_set = true;
-    rtc_mutex_unlock(&t->mutex);
+    atomic_store_explicit(&t->remote_addr_set, true, memory_order_release);
 }
 
 rtc_timer_id_t rtc_transport_add_timer(rtc_transport_t *t, uint64_t deadline_ms, rtc_timer_fn fn,

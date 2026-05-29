@@ -19,6 +19,10 @@
 #define RTC_TRANSPORT_MAX_TIMERS 16
 #define RTC_TRANSPORT_BUF_SIZE   2048
 
+/* Max packets drained per poll wakeup before yielding to timers.
+ * Bounds worst-case timer lateness under packet bursts. */
+#define RTC_TRANSPORT_RECV_BATCH 16
+
 /* Packet classification per RFC 7983 */
 typedef enum {
     RTC_PKT_STUN,         /* first byte [0, 3]     */
@@ -29,7 +33,16 @@ typedef enum {
     RTC_PKT_UNKNOWN,
 } rtc_pkt_type_t;
 
-/* Callback for received + classified packets (fires on transport thread) */
+/* Callback for received + classified packets (fires on transport thread).
+ *
+ * CONTRACT: must complete quickly (target < 1 ms). The transport thread
+ * also drives timer scheduling for protocol retransmissions (DTLS, ICE,
+ * RTCP, TWCC), so any time spent inside on_recv directly delays timer
+ * firing and back-pressures the receive path.
+ *
+ * Offload heavy work (video decoding, file I/O, application logic) to a
+ * worker thread by enqueuing in this callback and returning immediately.
+ */
 typedef void (*rtc_transport_recv_fn)(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                                       const rtc_addr_t *from, void *user);
 
@@ -70,9 +83,18 @@ typedef struct rtc_transport {
     rtc_timer_t timers[RTC_TRANSPORT_MAX_TIMERS];
     int timer_count;
 
-    /* Selected remote address (set by ICE after connectivity checks) */
+    /* Selected remote address (set by ICE after connectivity checks).
+     *
+     * One-shot publication: ICE writes remote_addr exactly once, then
+     * publishes via a release-store to remote_addr_set. Senders do an
+     * acquire-load on the flag; if true, they are guaranteed to see the
+     * fully-written address. No lock needed on either side.
+     *
+     * If ICE restart / candidate switching is ever added (the remote may
+     * change after publication), switch to a seqlock or take a mutex on
+     * both write and read sides to prevent torn reads of remote_addr. */
     rtc_addr_t remote_addr;
-    bool remote_addr_set;
+    _Atomic bool remote_addr_set;
 } rtc_transport_t;
 
 /*
