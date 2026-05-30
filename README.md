@@ -17,7 +17,7 @@ orchestration on top. All public API functions use the `rtc_` prefix.
 - **DTLS 1.2 + SRTP/SRTCP** — encrypted media (AES-128-CM, HMAC-SHA1-80)
 - **RTP/RTCP** — media packets, sender/receiver reports, jitter/loss stats
 - **RTP header extensions** (RFC 8285 one-byte form) with SDP `a=extmap:` negotiation
-- **RTCP feedback** — NACK / PLI / FIR / REMB plus per-video NACK retransmit buffer
+- **RTCP feedback** — NACK / PLI / FIR plus per-video NACK retransmit buffer
 - **Transport-Wide Congestion Control** (draft-holmer-rmcat-transport-wide-cc) end-to-end
 - **GCC bandwidth estimator** — trendline + loss controller; exposes target via callback
 - **SDP** — multi-media session description (audio + video + data channels)

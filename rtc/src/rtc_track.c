@@ -1,66 +1,12 @@
 /*
  * rtc_track.c - Track / Transceiver implementation.
  *
- * Internal struct definitions for rtc_rtp_sender, rtc_rtp_receiver,
- * and rtc_rtp_transceiver. These are opaque to callers.
+ * Sender send path, receiver callbacks, transceiver accessors.
+ * Struct definitions are in rtc_peer_internal.h (shared with rtc_peer*.c).
  */
-#include "rtc/rtc_track.h"
-#include "rtc_rtp.h"
-#include "rtc_rtp_ext.h"
-#include "rtc_rtcp.h"
-#include "rtc_rate_control.h"
-#include "rtc_transport.h"
-#include "rtc_srtp.h"
-#include "rtc_nack_buf.h"
-#include "rtc_twcc_sender.h"
+#include "rtc_peer_internal.h"
 
-#include <stdatomic.h>
 #include <string.h>
-
-/* ---- Internal struct definitions ---- */
-
-struct rtc_rtp_sender {
-    rtc_codec_t codec;
-    rtc_kind_t kind;
-    rtc_rtp_session_t rtp_session;
-    rtc_srtp_ctx_t *srtp; /* borrowed from peer, set after CONNECTED */
-    void *transport;      /* borrowed rtc_transport_t* for sendto */
-    rtc_rtcp_stats_t rtcp_stats;
-    rtc_rate_controller_t *rate_ctrl; /* borrowed from peer, set after CONNECTED */
-    rtc_nack_buf_t *nack_buf;         /* retransmit buffer (owned, created at init) */
-    bool active;
-
-    /* Feedback callbacks (set before connect, fired on transport thread) */
-    rtc_on_nack_fn on_nack;
-    void *on_nack_user;
-    rtc_on_pli_fn on_pli;
-    void *on_pli_user;
-    rtc_on_remb_fn on_remb;
-    void *on_remb_user;
-
-    /* Transport-CC tagging (set after SDP negotiation, borrowed from peer) */
-    void *twcc;          /* rtc_twcc_sender_t* */
-    uint8_t twcc_ext_id; /* 0 = disabled */
-};
-
-struct rtc_rtp_receiver {
-    rtc_codec_t codec;
-    rtc_kind_t kind;
-    rtc_on_frame_fn on_frame;
-    void *on_frame_user;
-    uint32_t ssrc; /* remote SSRC to match */
-    rtc_rtcp_stats_t rtcp_stats;
-    bool active;
-};
-
-struct rtc_rtp_transceiver {
-    struct rtc_rtp_sender sender;
-    struct rtc_rtp_receiver receiver;
-    rtc_direction_t direction;
-    char mid[32];
-    int mid_index;
-    bool used;
-};
 
 /* ---- RTCRtpSender ---- */
 
@@ -71,9 +17,10 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
     if (!sender->srtp || !sender->transport)
         return RTC_ERR_INVALID;
 
-    /* Build RTP packet — with transport-cc extension if negotiated. */
+    /* Build RTP packet */
     rtc_rtp_packet_t pkt;
     int rc;
+#ifdef MRTC_ENABLE_TWCC
     uint16_t twcc_seq = 0;
     bool tagged = (sender->twcc && sender->twcc_ext_id != 0);
     if (tagged) {
@@ -86,6 +33,9 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
     } else {
         rc = rtc_rtp_session_send(&sender->rtp_session, &pkt, payload, len, samples, marker);
     }
+#else
+    rc = rtc_rtp_session_send(&sender->rtp_session, &pkt, payload, len, samples, marker);
+#endif
     if (rc != RTC_OK)
         return rc;
 
@@ -99,6 +49,7 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
         return rc;
 
     /* Record send-time + wire size in TWCC sender ring */
+#ifdef MRTC_ENABLE_TWCC
     if (tagged) {
         rtc_twcc_sender_t *twcc = (rtc_twcc_sender_t *)sender->twcc;
         rtc_twcc_sent_pkt_t *e = &twcc->ring[twcc_seq & (RTC_TWCC_SENDER_RING - 1)];
@@ -107,6 +58,7 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
         e->send_time_us = rtc_time_us();
         e->used = true;
     }
+#endif
 
     /* Store post-SRTP packet in NACK buffer for retransmission */
     if (sender->nack_buf)
@@ -126,15 +78,25 @@ rtc_kind_t rtc_rtp_sender_kind(const rtc_rtp_sender_t *sender) {
 }
 
 int rtc_rtp_sender_get_target_bitrate(const rtc_rtp_sender_t *sender) {
+#ifdef MRTC_ENABLE_RATE_CONTROL
     if (!sender || !sender->rate_ctrl)
         return 0;
     return rtc_rate_control_get_bitrate(sender->rate_ctrl);
+#else
+    (void)sender;
+    return 0;
+#endif
 }
 
 bool rtc_rtp_sender_should_keyframe(rtc_rtp_sender_t *sender) {
+#ifdef MRTC_ENABLE_RATE_CONTROL
     if (!sender || !sender->rate_ctrl)
         return false;
     return rtc_rate_control_should_keyframe(sender->rate_ctrl);
+#else
+    (void)sender;
+    return false;
+#endif
 }
 
 /* ---- Sender feedback callbacks ---- */
@@ -151,13 +113,6 @@ void rtc_rtp_sender_on_pli(rtc_rtp_sender_t *sender, rtc_on_pli_fn fn, void *use
         return;
     sender->on_pli = fn;
     sender->on_pli_user = user;
-}
-
-void rtc_rtp_sender_on_remb(rtc_rtp_sender_t *sender, rtc_on_remb_fn fn, void *user) {
-    if (!sender)
-        return;
-    sender->on_remb = fn;
-    sender->on_remb_user = user;
 }
 
 /* ---- Internal handlers (called by peer connection on RTCP feedback) ---- */
@@ -187,23 +142,13 @@ void rtc_rtp_sender_handle_pli(rtc_rtp_sender_t *sender) {
         return;
 
     /* Request keyframe via rate controller */
+#ifdef MRTC_ENABLE_RATE_CONTROL
     if (sender->rate_ctrl)
         atomic_store_explicit(&sender->rate_ctrl->keyframe_requested, true, memory_order_release);
+#endif
 
     if (sender->on_pli)
         sender->on_pli(sender->on_pli_user);
-}
-
-void rtc_rtp_sender_handle_remb(rtc_rtp_sender_t *sender, uint32_t bitrate_bps) {
-    if (!sender)
-        return;
-
-    /* REMB caps the bitrate */
-    if (sender->rate_ctrl)
-        rtc_rate_control_on_remb(sender->rate_ctrl, bitrate_bps);
-
-    if (sender->on_remb)
-        sender->on_remb(bitrate_bps, sender->on_remb_user);
 }
 
 /* ---- RTCRtpReceiver ---- */

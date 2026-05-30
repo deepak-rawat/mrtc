@@ -1,43 +1,11 @@
 /*
- * rtc_peer.c - Peer Connection: WebRTC-style API.
+ * rtc_peer.c - Peer Connection: control plane.
  *
- * Opaque, heap-allocated struct. Owns a transport layer with a background
- * thread. All protocol state (ICE, DTLS, SRTP) is driven on the transport
- * thread — no mutexes on protocol state.
- *
- * Threading model:
- *   - Main thread: create, add_track, create_offer/answer,
- *     set_local/remote_desc, sender_send, close, destroy
- *   - Transport thread: ICE connect, DTLS handshake, SRTP setup,
- *     packet recv, callback delivery
- *
- * After both local and remote descriptions are set, a zero-delay timer
- * fires on the transport thread to run: ICE connect → DTLS → SRTP.
- * No explicit connect() call is needed.
- *
- * The SRTP send context is initialized on the transport thread but used
- * from the main thread (via rtc_rtp_sender_send). This is safe because
- * the main thread observes RTC_CONNECTION_CONNECTED before calling
- * sender_send, providing a happens-before guarantee via the _Atomic
- * connection_state (sequentially-consistent on plain read/write).
+ * Lifecycle, SDP, connect choreography, timers, public API.
+ * Packet handling (RTP/RTCP dispatch) lives in rtc_peer_packets.c.
  */
-#include "rtc/rtc_peer.h"
-#include "rtc/rtc_u32_map.h"
-#include "rtc_rtp.h"
-#include "rtc_rtp_ext.h"
-#include "rtc_rtcp.h"
-#include "rtc_rate_control.h"
-#include "rtc_transport.h"
-#include "rtc_ice.h"
-#include "rtc_dtls.h"
-#include "rtc_srtp.h"
-#include "rtc_sdp.h"
-#include "rtc_nack_buf.h"
-#include "rtc_twcc_sender.h"
-#include "rtc_twcc_receiver.h"
-#include "rtc_bwe.h"
+#include "rtc_peer_internal.h"
 
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,160 +16,12 @@
 #  include <unistd.h>
 #endif
 
-/* ---- Internal transceiver struct (must match rtc_track.c layout) ---- */
-
-struct rtc_rtp_sender {
-    rtc_codec_t codec;
-    rtc_kind_t kind;
-    rtc_rtp_session_t rtp_session;
-    rtc_srtp_ctx_t *srtp;
-    void *transport;
-    rtc_rtcp_stats_t rtcp_stats;
-    rtc_rate_controller_t *rate_ctrl; /* borrowed from peer, set after CONNECTED */
-    rtc_nack_buf_t *nack_buf;         /* retransmit buffer */
-    bool active;
-
-    /* Feedback callbacks */
-    rtc_on_nack_fn on_nack;
-    void *on_nack_user;
-    rtc_on_pli_fn on_pli;
-    void *on_pli_user;
-    rtc_on_remb_fn on_remb;
-    void *on_remb_user;
-
-    /* Transport-CC tagging (set after SDP negotiation) */
-    void *twcc;          /* borrowed rtc_twcc_sender_t* */
-    uint8_t twcc_ext_id; /* 0 = not negotiated */
-};
-
-struct rtc_rtp_receiver {
-    rtc_codec_t codec;
-    rtc_kind_t kind;
-    rtc_on_frame_fn on_frame;
-    void *on_frame_user;
-    uint32_t ssrc;
-    rtc_rtcp_stats_t rtcp_stats;
-    bool active;
-};
-
-struct rtc_rtp_transceiver {
-    struct rtc_rtp_sender sender;
-    struct rtc_rtp_receiver receiver;
-    rtc_direction_t direction;
-    char mid[32];
-    int mid_index;
-    bool used;
-};
-
-/* ---- Peer connection internal struct ---- */
-
-struct rtc_peer_connection {
-    /* Transport (owns socket and I/O thread) */
-    rtc_transport_t transport;
-
-    /* Protocol components (touched only on transport thread after connect) */
-    rtc_ice_agent_t ice;
-    rtc_dtls_transport_t dtls;
-    rtc_srtp_ctx_t srtp_send; /* after init: main thread only */
-    rtc_srtp_ctx_t srtp_recv; /* transport thread only */
-
-    /* Data channel manager */
-    rtc_dc_manager_t dc_manager;
-
-    /* Transceivers (main thread before connect, transport thread after) */
-    struct rtc_rtp_transceiver transceivers[RTC_MAX_TRANSCEIVERS];
-    int transceiver_count;
-
-    /* Descriptions */
-    rtc_desc_t local_desc;
-    rtc_desc_t remote_desc;
-    bool has_local_desc;
-    bool has_remote_desc;
-    rtc_sdp_t local_sdp; /* parsed internal SDP */
-    rtc_sdp_t remote_sdp;
-
-    /* States: _Atomic so cross-thread reads/writes carry full memory ordering.
-     * Written on transport thread, read from any thread.  Plain C11 reads
-     * and assignments on _Atomic types are seq_cst, which is sufficient to
-     * publish protocol state (e.g. srtp_send) alongside CONNECTED. */
-    _Atomic rtc_signaling_state_t signaling_state;
-    _Atomic rtc_ice_gathering_state_t ice_gathering_state;
-    _Atomic rtc_ice_connection_state_t ice_connection_state;
-    _Atomic rtc_connection_state_t connection_state;
-
-    /* Callbacks (set from main thread before connect, read on transport thread) */
-    rtc_on_signaling_state_fn on_signaling_state;
-    void *on_signaling_state_user;
-    rtc_on_ice_gathering_state_fn on_ice_gathering_state;
-    void *on_ice_gathering_state_user;
-    rtc_on_ice_connection_state_fn on_ice_connection_state;
-    void *on_ice_connection_state_user;
-    rtc_on_connection_state_fn on_connection_state;
-    void *on_connection_state_user;
-    rtc_on_ice_candidate_fn on_ice_candidate;
-    void *on_ice_candidate_user;
-    rtc_on_track_fn on_track;
-    void *on_track_user;
-    rtc_on_data_channel_fn on_data_channel;
-    void *on_data_channel_user;
-
-    /* Config */
-    char stun_server[64];
-    uint16_t stun_port;
-
-    /* Connection started flag */
-    bool connect_started;
-
-    /* RTCP send timer */
-    rtc_timer_id_t rtcp_timer_id;
-
-    /* Rate controller (created on connection, fed by RTCP RR) */
-    rtc_rate_controller_t *rate_ctrl;
-
-    /* Fast SSRC → receiver lookup (populated on first RTP packet per stream).
-     * Hot path: O(1) average via rtc_u32_map (Fibonacci hash + linear probing). */
-    rtc_u32_map_t recv_map;
-
-    /* Fast SSRC → sender lookup. Populated eagerly in add_track when the
-     * sender's SSRC is allocated. Used to demux RTCP RR report blocks back
-     * to the originating local sender (so an audio RR doesn't perturb a
-     * video sender's rate controller, and vice versa). */
-    rtc_u32_map_t send_map;
-
-    /* DTLS application-data receive buffer. Sized to the max DTLS record
-     * payload (64 KiB) so a single SCTP/data-channel chunk can never be
-     * truncated. Heap-allocated to keep struct rtc_peer_connection small. */
-    uint8_t *app_buf;
-    size_t app_buf_cap;
-
-    /* Transport-Wide Congestion Control (Phase 3.2) */
-    rtc_twcc_sender_t twcc_sender;     /* per-peer outbound seq history */
-    rtc_twcc_receiver_t twcc_receiver; /* per-peer inbound arrival history */
-    uint8_t twcc_ext_id_send;          /* extension id we use when sending (0 = disabled) */
-    uint8_t twcc_ext_id_recv;          /* extension id remote uses (0 = disabled) */
-    uint32_t twcc_local_ssrc;          /* sender_ssrc for feedback we emit */
-    uint32_t twcc_remote_ssrc;         /* media_ssrc for feedback we emit */
-    rtc_timer_id_t twcc_fb_timer_id;   /* feedback send timer */
-    bool twcc_have_packets;            /* set after first received tagged packet */
-
-    /* Bandwidth estimator (Phase 3.3). Consumes TWCC feedback + RR loss and
-     * exposes a per-peer target sending bitrate via on_bitrate_estimate.
-     * NULL when transport-cc was not negotiated. */
-    rtc_bwe_t *bwe;
-    rtc_on_bitrate_estimate_fn on_bitrate_estimate;
-    void *on_bitrate_estimate_user;
-};
-
 /* ---- Forward declarations ---- */
 static int peer_dc_send(const uint8_t *data, size_t len, void *user);
 static void peer_rtcp_timer(void *user);
+#ifdef MRTC_ENABLE_TWCC
 static void peer_twcc_fb_timer(void *user);
-static void peer_bwe_bitrate_cb(uint32_t bitrate_bps, void *user);
-
-/* Internal handlers from rtc_track.c (declared here for peer connection dispatch) */
-void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_seqs, int count);
-void rtc_rtp_sender_handle_pli(rtc_rtp_sender_t *sender);
-void rtc_rtp_sender_handle_remb(rtc_rtp_sender_t *sender, uint32_t bitrate_bps);
+#endif
 
 /* ---- RTCP periodic send timer (fires on transport thread every 5 seconds) ---- */
 
@@ -252,7 +72,9 @@ static void peer_rtcp_timer(void *user) {
 
 /* ---- TWCC feedback timer (fires every 100ms on transport thread) ---- */
 
-#define TWCC_FB_INTERVAL_MS 100
+#ifdef MRTC_ENABLE_TWCC
+
+#  define TWCC_FB_INTERVAL_MS 100
 
 static void peer_twcc_fb_timer(void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
@@ -283,39 +105,17 @@ static void peer_twcc_fb_timer(void *user) {
         &pc->transport, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
 }
 
+#endif /* MRTC_ENABLE_TWCC */
+
 /* ---- BWE bitrate callback trampoline ---- */
 
+#ifdef MRTC_ENABLE_TWCC
 static void peer_bwe_bitrate_cb(uint32_t bitrate_bps, void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
     if (pc->on_bitrate_estimate)
         pc->on_bitrate_estimate(bitrate_bps, pc->on_bitrate_estimate_user);
 }
-
-/* ---- State helpers ---- */
-
-static void peer_set_signaling(rtc_peer_connection_t *pc, rtc_signaling_state_t s) {
-    pc->signaling_state = s;
-    if (pc->on_signaling_state)
-        pc->on_signaling_state(s, pc->on_signaling_state_user);
-}
-
-static void peer_set_ice_gathering(rtc_peer_connection_t *pc, rtc_ice_gathering_state_t s) {
-    pc->ice_gathering_state = s;
-    if (pc->on_ice_gathering_state)
-        pc->on_ice_gathering_state(s, pc->on_ice_gathering_state_user);
-}
-
-static void peer_set_ice_connection(rtc_peer_connection_t *pc, rtc_ice_connection_state_t s) {
-    pc->ice_connection_state = s;
-    if (pc->on_ice_connection_state)
-        pc->on_ice_connection_state(s, pc->on_ice_connection_state_user);
-}
-
-static void peer_set_connection(rtc_peer_connection_t *pc, rtc_connection_state_t s) {
-    pc->connection_state = s;
-    if (pc->on_connection_state)
-        pc->on_connection_state(s, pc->on_connection_state_user);
-}
+#endif
 
 /* ---- DTLS send callback ---- */
 
@@ -326,7 +126,7 @@ static int peer_dtls_send(const uint8_t *data, size_t len, void *user) {
 
 /* ---- Complete connection (called on transport thread after DTLS connects) ---- */
 
-static void peer_complete_connection(rtc_peer_connection_t *pc) {
+void peer_complete_connection(rtc_peer_connection_t *pc) {
     /* Export SRTP keys */
     int rc = rtc_dtls_export_srtp_keys(&pc->dtls);
     if (rc != RTC_OK) {
@@ -360,32 +160,35 @@ static void peer_complete_connection(rtc_peer_connection_t *pc) {
         return;
     }
 
-    /* Wire up senders to SRTP + transport, and to TWCC sender if negotiated */
+    /* Wire up senders to SRTP + transport */
     for (int i = 0; i < pc->transceiver_count; i++) {
         struct rtc_rtp_sender *s = &pc->transceivers[i].sender;
         if (s->active) {
             s->srtp = &pc->srtp_send;
             s->transport = &pc->transport;
+#ifdef MRTC_ENABLE_TWCC
             if (pc->twcc_ext_id_send != 0) {
                 s->twcc = &pc->twcc_sender;
                 s->twcc_ext_id = pc->twcc_ext_id_send;
-                /* Use any active sender's SSRC as the feedback sender_ssrc */
                 if (pc->twcc_local_ssrc == 0)
                     pc->twcc_local_ssrc = s->rtp_session.ssrc;
             }
+#endif
         }
     }
 
-    /* Create rate controllers and NACK buffers per sender */
+    /* Create NACK buffers and rate controllers per sender */
     for (int i = 0; i < pc->transceiver_count; i++) {
         struct rtc_rtp_sender *s = &pc->transceivers[i].sender;
         if (s->active && s->kind == RTC_KIND_VIDEO) {
+#ifdef MRTC_ENABLE_RATE_CONTROL
             rtc_rate_control_config_t rc_cfg = {
                 .target_bitrate_kbps = 500,
                 .min_bitrate_kbps = 100,
                 .max_bitrate_kbps = 2500,
             };
             s->rate_ctrl = rtc_rate_control_create(&rc_cfg);
+#endif
             s->nack_buf = rtc_nack_buf_create(NACK_BUF_DEFAULT_SIZE);
         }
     }
@@ -410,6 +213,7 @@ static void peer_complete_connection(rtc_peer_connection_t *pc) {
                                                 peer_rtcp_timer, pc);
 
     /* Start TWCC feedback timer if negotiated for inbound. */
+#ifdef MRTC_ENABLE_TWCC
     if (pc->twcc_ext_id_recv != 0) {
         rtc_twcc_receiver_init(&pc->twcc_receiver);
         pc->twcc_fb_timer_id =
@@ -419,6 +223,7 @@ static void peer_complete_connection(rtc_peer_connection_t *pc) {
     /* Bind the BWE bitrate callback through a per-peer trampoline. */
     if (pc->bwe)
         rtc_bwe_on_bitrate_change(pc->bwe, peer_bwe_bitrate_cb, pc);
+#endif
 }
 
 /* ---- DTLS retransmission timer (fires on transport thread) ---- */
@@ -516,239 +321,6 @@ static void peer_connect_timer(void *user) {
                             peer_ice_check_timer, pc);
 }
 
-/* ---- Transport recv callback (fires on transport thread) ---- */
-
-static void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t len,
-                                const rtc_addr_t *from, void *user) {
-    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
-    (void)from;
-
-    switch (type) {
-        case RTC_PKT_STUN:
-            rtc_ice_handle_stun(&pc->ice, data, len, from);
-            break;
-
-        case RTC_PKT_DTLS:
-            /* Only process DTLS after connection has started (both desc set) */
-            if (!pc->connect_started)
-                break;
-            rtc_dtls_recv(&pc->dtls, data, len);
-            /* Check if DTLS just completed the handshake */
-            if (pc->dtls.state == RTC_DTLS_STATE_CONNECTED &&
-                pc->connection_state == RTC_CONNECTION_CONNECTING) {
-                peer_complete_connection(pc);
-            }
-            /* Check for DTLS application data (data channel messages) */
-            if (pc->dtls.state == RTC_DTLS_STATE_CONNECTED) {
-                int app_len;
-                while ((app_len = SSL_read(pc->dtls.ssl, pc->app_buf, (int)pc->app_buf_cap)) > 0) {
-                    rtc_dc_manager_recv(&pc->dc_manager, pc->app_buf, (size_t)app_len);
-                }
-            }
-            break;
-
-        case RTC_PKT_RTP:
-            if (pc->connection_state == RTC_CONNECTION_CONNECTED && len > 12) {
-                uint8_t buf[2048];
-                if (len > sizeof(buf))
-                    break;
-                memcpy(buf, data, len);
-
-                /* SRTP unprotect (recv ctx only touched on transport thread) */
-                size_t pkt_len = len;
-                int rc = rtc_srtp_unprotect(&pc->srtp_recv, buf, &pkt_len);
-                if (rc != RTC_OK) {
-                    RTC_LOG_WARN("Peer: SRTP unprotect failed");
-                    break;
-                }
-
-                /* Parse RTP header */
-                rtc_rtp_packet_t pkt;
-                rc = rtc_rtp_parse(&pkt, buf, pkt_len);
-                if (rc != RTC_OK)
-                    break;
-
-                /* Fast path: O(1) SSRC → receiver lookup */
-                struct rtc_rtp_receiver *r =
-                    (struct rtc_rtp_receiver *)rtc_u32_map_get(&pc->recv_map, pkt.header.ssrc);
-
-                /* Slow path: match by payload type on first packet per SSRC */
-                if (!r) {
-                    for (int i = 0; i < pc->transceiver_count; i++) {
-                        struct rtc_rtp_receiver *rx = &pc->transceivers[i].receiver;
-                        if (rx->active && rx->on_frame &&
-                            rx->codec.payload_type == pkt.header.payload_type) {
-                            r = rx;
-                            r->ssrc = pkt.header.ssrc;
-                            rtc_u32_map_set(&pc->recv_map, pkt.header.ssrc, r);
-                            break;
-                        }
-                    }
-                }
-
-                if (r) {
-                    rtc_rtcp_stats_on_rtp_recv(&r->rtcp_stats, pkt.header.seq, pkt.header.timestamp,
-                                               pkt.header.ssrc, r->codec.clock_rate);
-                    r->on_frame(pkt.payload, pkt.payload_len, pkt.header.seq, pkt.header.timestamp,
-                                pkt.header.ssrc, pkt.header.marker, r->on_frame_user);
-                }
-
-                /* Transport-CC arrival recording */
-                if (pc->twcc_ext_id_recv != 0 && pkt.header.extension && pkt.ext_data &&
-                    pkt.ext_len > 0) {
-                    rtc_rtp_ext_t exts[RTC_RTP_EXT_MAX_ENTRIES];
-                    size_t cnt = RTC_RTP_EXT_MAX_ENTRIES;
-                    if (rtc_rtp_ext_parse_body(pkt.ext_data, pkt.ext_len, exts, &cnt) == RTC_OK) {
-                        const rtc_rtp_ext_t *e = rtc_rtp_ext_find(exts, cnt, pc->twcc_ext_id_recv);
-                        if (e) {
-                            uint16_t tseq = rtc_rtp_ext_read_transport_cc(e);
-                            rtc_twcc_receiver_on_packet(&pc->twcc_receiver, tseq, rtc_time_us());
-                            if (pc->twcc_remote_ssrc == 0)
-                                pc->twcc_remote_ssrc = pkt.header.ssrc;
-                            pc->twcc_have_packets = true;
-                        }
-                    }
-                }
-            }
-            break;
-
-        case RTC_PKT_RTCP:
-            if (pc->connection_state == RTC_CONNECTION_CONNECTED && len > 8) {
-                uint8_t buf[2048];
-                if (len > sizeof(buf))
-                    break;
-                memcpy(buf, data, len);
-
-                /* SRTCP unprotect */
-                size_t pkt_len = len;
-                int rc = rtc_srtp_unprotect_rtcp(&pc->srtp_recv, buf, &pkt_len);
-                if (rc != RTC_OK) {
-                    RTC_LOG_WARN("Peer: SRTCP unprotect failed");
-                    break;
-                }
-
-                /* Extract PT and FMT for dispatch */
-                uint8_t pt, fmt;
-                if (!rtc_rtcp_get_pt_fmt(buf, pkt_len, &pt, &fmt))
-                    break;
-
-                if (pt == RTCP_PT_SR) {
-                    /* Parse SR and store last SR NTP for DLSR calc */
-                    rtc_rtcp_packet_t rtcp;
-                    rc = rtc_rtcp_parse(&rtcp, buf, pkt_len);
-                    if (rc != RTC_OK)
-                        break;
-                    uint32_t lsr = (rtcp.sr.ntp_sec & 0xFFFF) << 16 | (rtcp.sr.ntp_frac >> 16);
-                    struct rtc_rtp_receiver *r =
-                        (struct rtc_rtp_receiver *)rtc_u32_map_get(&pc->recv_map, rtcp.sender_ssrc);
-                    if (r) {
-                        r->rtcp_stats.last_sr_ntp = lsr;
-                        r->rtcp_stats.last_sr_recv_time = rtc_time_ms();
-                    }
-                } else if (pt == RTCP_PT_RR) {
-                    /* Extract feedback and feed to rate controller + BWE */
-                    rtc_rtcp_packet_t rtcp;
-                    rc = rtc_rtcp_parse(&rtcp, buf, pkt_len);
-                    if (rc != RTC_OK)
-                        break;
-                    if (pc->bwe && rtcp.report_count > 0)
-                        rtc_bwe_on_loss(pc->bwe, rtcp.reports[0].fraction_lost);
-                    for (int i = 0; i < rtcp.report_count; i++) {
-                        const rtc_rtcp_rr_block_t *rr = &rtcp.reports[i];
-
-                        /* Compute RTT from delay_since_sr */
-                        int rtt_ms = 0;
-                        if (rr->last_sr != 0) {
-                            uint64_t now_ms = rtc_time_ms();
-                            uint32_t now_sec = (uint32_t)(now_ms / 1000);
-                            uint32_t now_frac = (uint32_t)((now_ms % 1000) * 4294967ULL);
-                            uint32_t now_compact = (now_sec & 0xFFFF) << 16 | (now_frac >> 16);
-                            uint32_t rtt_ntp = now_compact - rr->last_sr - rr->delay_since_sr;
-                            rtt_ms = (int)((rtt_ntp * 1000ULL) >> 16);
-                            if (rtt_ms < 0)
-                                rtt_ms = 0;
-                        }
-
-                        /* Route to per-sender rate controller via send_map */
-                        struct rtc_rtp_sender *sender =
-                            (struct rtc_rtp_sender *)rtc_u32_map_get(&pc->send_map, rr->ssrc);
-                        if (sender && sender->rate_ctrl) {
-                            rtc_rate_control_on_rtcp_rr(sender->rate_ctrl, rr->fraction_lost,
-                                                        rtt_ms, (int)rr->jitter);
-                        } else if (pc->rate_ctrl) {
-                            /* Fallback: shared rate controller */
-                            rtc_rate_control_on_rtcp_rr(pc->rate_ctrl, rr->fraction_lost, rtt_ms,
-                                                        (int)rr->jitter);
-                        }
-                    }
-                } else if (pt == RTCP_PT_RTPFB && fmt == RTCP_FMT_NACK) {
-                    /* NACK — retransmit lost packets */
-                    rtc_rtcp_nack_t nack;
-                    if (rtc_rtcp_parse_nack(&nack, buf, pkt_len) == RTC_OK) {
-                        struct rtc_rtp_sender *sender = (struct rtc_rtp_sender *)rtc_u32_map_get(
-                            &pc->send_map, nack.media_ssrc);
-                        if (sender)
-                            rtc_rtp_sender_handle_nack(sender, nack.lost_seqs, nack.lost_count);
-                    }
-                } else if (pt == RTCP_PT_RTPFB && fmt == 15) {
-                    /* Transport-CC feedback — feed each reported packet to BWE. */
-                    rtc_rtcp_twcc_t tw;
-                    if (rtc_rtcp_parse_twcc(&tw, buf, pkt_len) == RTC_OK) {
-                        RTC_LOG_DBG("Peer: TWCC feedback base=%u count=%d fb_pkt=%u",
-                                    (unsigned)tw.base_seq, tw.item_count,
-                                    (unsigned)tw.fb_pkt_count);
-                        if (pc->bwe) {
-                            for (int i = 0; i < tw.item_count; i++) {
-                                const rtc_twcc_sent_pkt_t *s =
-                                    rtc_twcc_sender_lookup(&pc->twcc_sender, tw.items[i].seq);
-                                if (!s)
-                                    continue;
-                                uint64_t recv_us =
-                                    tw.items[i].received ? tw.items[i].recv_time_us : 0;
-                                rtc_bwe_on_packet_feedback(pc->bwe, s->send_time_us, recv_us,
-                                                           s->size);
-                            }
-                        }
-                    }
-                } else if (pt == RTCP_PT_PSFB && fmt == RTCP_FMT_PLI) {
-                    /* PLI — request keyframe */
-                    rtc_rtcp_pli_t pli;
-                    if (rtc_rtcp_parse_pli(&pli, buf, pkt_len) == RTC_OK) {
-                        struct rtc_rtp_sender *sender =
-                            (struct rtc_rtp_sender *)rtc_u32_map_get(&pc->send_map, pli.media_ssrc);
-                        if (sender)
-                            rtc_rtp_sender_handle_pli(sender);
-                    }
-                } else if (pt == RTCP_PT_PSFB && fmt == RTCP_FMT_FIR) {
-                    /* FIR — request keyframe (same effect as PLI) */
-                    rtc_rtcp_fir_t fir;
-                    if (rtc_rtcp_parse_fir(&fir, buf, pkt_len) == RTC_OK) {
-                        struct rtc_rtp_sender *sender =
-                            (struct rtc_rtp_sender *)rtc_u32_map_get(&pc->send_map, fir.media_ssrc);
-                        if (sender)
-                            rtc_rtp_sender_handle_pli(sender);
-                    }
-                } else if (pt == RTCP_PT_PSFB && fmt == RTCP_FMT_REMB) {
-                    /* REMB — cap bitrate */
-                    rtc_rtcp_remb_t remb;
-                    if (rtc_rtcp_parse_remb(&remb, buf, pkt_len) == RTC_OK) {
-                        for (int i = 0; i < remb.ssrc_count; i++) {
-                            struct rtc_rtp_sender *sender =
-                                (struct rtc_rtp_sender *)rtc_u32_map_get(&pc->send_map,
-                                                                         remb.media_ssrcs[i]);
-                            if (sender)
-                                rtc_rtp_sender_handle_remb(sender, remb.bitrate_bps);
-                        }
-                    }
-                }
-            }
-            break;
-
-        default:
-            break;
-    }
-}
-
 /* ---- Helper: parse STUN server URL like "stun:host:port" or just IP ---- */
 
 static void parse_stun_url(const char *url, char *host, size_t host_len, uint16_t *port) {
@@ -823,11 +395,12 @@ static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
         m->mid_index = t->mid_index;
         m->ssrc = t->sender.rtp_session.ssrc;
 
-        /* Advertise transport-cc on audio/video using a stable id (5). The
-         * answerer must echo this id back in their SDP. */
+        /* Advertise transport-cc on audio/video */
+#ifdef MRTC_ENABLE_TWCC
         if (m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) {
             rtc_sdp_media_add_extmap(m, 5, RTC_EXT_URI_TRANSPORT_CC);
         }
+#endif
 
         sdp->media_count++;
     }
@@ -970,27 +543,33 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc) {
     rtc_u32_map_free(&pc->send_map);
     rtc_sdp_close(&pc->local_sdp);
     rtc_sdp_close(&pc->remote_sdp);
+#ifdef MRTC_ENABLE_RATE_CONTROL
     if (pc->rate_ctrl) {
         rtc_rate_control_destroy(pc->rate_ctrl);
         pc->rate_ctrl = NULL;
     }
-    /* Destroy per-sender rate controllers and NACK buffers */
+#endif
+    /* Destroy per-sender resources */
     for (int i = 0; i < pc->transceiver_count; i++) {
         struct rtc_rtp_sender *s = &pc->transceivers[i].sender;
+#ifdef MRTC_ENABLE_RATE_CONTROL
         if (s->rate_ctrl) {
             rtc_rate_control_destroy(s->rate_ctrl);
             s->rate_ctrl = NULL;
         }
+#endif
         if (s->nack_buf) {
             rtc_nack_buf_destroy(s->nack_buf);
             s->nack_buf = NULL;
         }
     }
 
+#ifdef MRTC_ENABLE_TWCC
     if (pc->bwe) {
         rtc_bwe_destroy(pc->bwe);
         pc->bwe = NULL;
     }
+#endif
 
     pc->connection_state = RTC_CONNECTION_CLOSED;
     pc->signaling_state = RTC_SIGNALING_CLOSED;
@@ -1264,9 +843,8 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
         }
     }
 
-    /* Transport-CC extmap negotiation. Pick the first non-zero id we see
-     * across audio/video m-sections as the active id (both directions).
-     * When negotiated, create the per-peer GCC bandwidth estimator. */
+    /* Transport-CC extmap negotiation */
+#ifdef MRTC_ENABLE_TWCC
     for (int i = 0; i < sdp.media_count; i++) {
         const rtc_sdp_media_t *m = &sdp.media[i];
         if (m->media_type != RTC_MEDIA_AUDIO && m->media_type != RTC_MEDIA_VIDEO)
@@ -1291,6 +869,7 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
             break;
         }
     }
+#endif
 
     /* Try to start connection if both descriptions set */
     peer_try_connect(pc);
@@ -1415,8 +994,13 @@ void rtc_peer_connection_on_bitrate_estimate(rtc_peer_connection_t *pc,
                                              rtc_on_bitrate_estimate_fn fn, void *user) {
     if (!pc)
         return;
+#ifdef MRTC_ENABLE_TWCC
     pc->on_bitrate_estimate = fn;
     pc->on_bitrate_estimate_user = user;
+#else
+    (void)fn;
+    (void)user;
+#endif
 }
 
 /* ---- State getters ---- */

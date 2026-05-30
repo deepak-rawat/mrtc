@@ -171,7 +171,7 @@ Key functions: `rtc_srtp_init()`, `rtc_srtp_protect()`, `rtc_srtp_unprotect()`
 
 **RTP header extensions (RFC 8285):** `rtc_rtp_ext.h/c` implements the one-byte form (ids 1–14, lengths 1–16). Helpers exist for `abs-send-time` (24-bit 6.18 fixed-point) and `transport-cc` (16-bit transport-wide seq).
 
-**RTCP:** Sender Reports (SR) with NTP timestamps, Receiver Reports (RR) with jitter/loss/delay stats. Feedback messages: NACK / PLI / FIR / REMB (RFC 4585 + 5104) and Transport-CC (PT=205 FMT=15, draft-holmer-rmcat-transport-wide-cc) build + parse. SRTCP protect/unprotect for all outgoing/incoming RTCP. A 5s periodic timer emits SR/RR per active transceiver; a separate 100ms timer emits TWCC feedback when negotiated.
+**RTCP:** Sender Reports (SR) with NTP timestamps, Receiver Reports (RR) with jitter/loss/delay stats. Feedback messages: NACK / PLI / FIR (RFC 4585 + 5104) and Transport-CC (PT=205 FMT=15, draft-holmer-rmcat-transport-wide-cc) build + parse. SRTCP protect/unprotect for all outgoing/incoming RTCP. A 5s periodic timer emits SR/RR per active transceiver; a separate 100ms timer emits TWCC feedback when negotiated.
 
 Statistics tracked:
 ```
@@ -301,7 +301,7 @@ struct rtc_peer_connection {
 | `test_transport` | Socket init, packet demux, timer management |
 | `test_peer` | Full peer connection lifecycle, offer/answer |
 | `test_rtcp` | SR/RR build/parse, jitter statistics |
-| `test_rtcp_feedback` | NACK / PLI / FIR / REMB build + parse |
+| `test_rtcp_feedback` | NACK / PLI / FIR build + parse |
 | `test_nack_buf` | NACK ring buffer store/lookup, wraparound |
 | `test_twcc` | TWCC sender ring, receiver window, feedback round-trip |
 | `test_bwe` | GCC steady increase, delay-induced decrease, loss clamp, callback |

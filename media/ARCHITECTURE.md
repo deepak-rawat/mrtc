@@ -130,7 +130,7 @@ AIMD (Additive Increase, Multiplicative Decrease) bitrate adaptation.
 - Increases bitrate when loss is low, decreases on high loss
 - Requests keyframes from encoder when needed
 
-Note: Will be replaced by rtc-layer bandwidth estimation (GCC/REMB) in future.
+Note: Will be replaced by rtc-layer bandwidth estimation (GCC) in future.
 
 ### Media Pipeline (`media_pipeline.h/c`)
 

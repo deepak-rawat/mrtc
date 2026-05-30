@@ -1,5 +1,5 @@
 /*
- * test_rtcp_feedback.c - RTCP feedback packet tests (NACK, PLI, FIR, REMB).
+ * test_rtcp_feedback.c - RTCP feedback packet tests (NACK, PLI, FIR).
  *
  * Tests build/parse round-trips, edge cases, and wire format compliance
  * for all four feedback packet types added in Phase 2.
@@ -192,119 +192,6 @@ TEST(fir_parse_short) {
 }
 
 /* ================================================================== */
-/*  REMB Tests                                                         */
-/* ================================================================== */
-
-TEST(remb_build_single_ssrc) {
-    uint8_t buf[128];
-    size_t len;
-    uint32_t ssrcs[] = {0x12345678};
-
-    int rc = rtc_rtcp_build_remb(buf, sizeof(buf), &len, 0xAAAA, ssrcs, 1, 1000000);
-    ASSERT_EQ(rc, RTC_OK);
-    /* header(4) + sender(4) + media(4) + REMB(4) + num+br(4) + 1 ssrc(4) = 24 */
-    ASSERT_EQ((int)len, 24);
-    /* Verify REMB identifier */
-    ASSERT_EQ(buf[12], 'R');
-    ASSERT_EQ(buf[13], 'E');
-    ASSERT_EQ(buf[14], 'M');
-    ASSERT_EQ(buf[15], 'B');
-    printf("    REMB single SSRC: %zu bytes\n", len);
-}
-
-TEST(remb_build_multi_ssrc) {
-    uint8_t buf[128];
-    size_t len;
-    uint32_t ssrcs[] = {0x11, 0x22, 0x33, 0x44};
-
-    int rc = rtc_rtcp_build_remb(buf, sizeof(buf), &len, 0xAAAA, ssrcs, 4, 2000000);
-    ASSERT_EQ(rc, RTC_OK);
-    /* 20 + 4*4 = 36 */
-    ASSERT_EQ((int)len, 36);
-    printf("    REMB multi SSRC: %zu bytes\n", len);
-}
-
-TEST(remb_roundtrip) {
-    uint8_t buf[128];
-    size_t len;
-    uint32_t ssrcs[] = {0xDEADBEEF, 0xCAFEBABE};
-    uint32_t bitrate = 1500000; /* 1.5 Mbps */
-
-    int rc = rtc_rtcp_build_remb(buf, sizeof(buf), &len, 0xAAAA, ssrcs, 2, bitrate);
-    ASSERT_EQ(rc, RTC_OK);
-
-    rtc_rtcp_remb_t parsed;
-    rc = rtc_rtcp_parse_remb(&parsed, buf, len);
-    ASSERT_EQ(rc, RTC_OK);
-    ASSERT_EQ(parsed.sender_ssrc, 0xAAAA);
-    ASSERT_EQ(parsed.ssrc_count, 2);
-    ASSERT_EQ(parsed.media_ssrcs[0], 0xDEADBEEF);
-    ASSERT_EQ(parsed.media_ssrcs[1], 0xCAFEBABE);
-
-    /* Bitrate may have rounding due to mantissa/exp encoding.
-     * Check within 1% tolerance. */
-    int diff = (int)parsed.bitrate_bps - (int)bitrate;
-    if (diff < 0) diff = -diff;
-    ASSERT(diff < (int)(bitrate / 100));
-
-    printf("    REMB roundtrip: %u bps (original: %u, diff: %d)\n",
-           parsed.bitrate_bps, bitrate, diff);
-}
-
-TEST(remb_roundtrip_large_bitrate) {
-    uint8_t buf[128];
-    size_t len;
-    uint32_t ssrcs[] = {0x11};
-    uint32_t bitrate = 10000000; /* 10 Mbps */
-
-    int rc = rtc_rtcp_build_remb(buf, sizeof(buf), &len, 0xBB, ssrcs, 1, bitrate);
-    ASSERT_EQ(rc, RTC_OK);
-
-    rtc_rtcp_remb_t parsed;
-    rc = rtc_rtcp_parse_remb(&parsed, buf, len);
-    ASSERT_EQ(rc, RTC_OK);
-
-    int diff = (int)parsed.bitrate_bps - (int)bitrate;
-    if (diff < 0) diff = -diff;
-    ASSERT(diff < (int)(bitrate / 100));
-    printf("    REMB large: %u bps (original: %u)\n", parsed.bitrate_bps, bitrate);
-}
-
-TEST(remb_roundtrip_small_bitrate) {
-    uint8_t buf[128];
-    size_t len;
-    uint32_t ssrcs[] = {0x11};
-    uint32_t bitrate = 50000; /* 50 Kbps */
-
-    int rc = rtc_rtcp_build_remb(buf, sizeof(buf), &len, 0xCC, ssrcs, 1, bitrate);
-    ASSERT_EQ(rc, RTC_OK);
-
-    rtc_rtcp_remb_t parsed;
-    rc = rtc_rtcp_parse_remb(&parsed, buf, len);
-    ASSERT_EQ(rc, RTC_OK);
-
-    /* Small bitrate should be exact (mantissa fits in 18 bits) */
-    ASSERT_EQ(parsed.bitrate_bps, bitrate);
-    printf("    REMB small: %u bps (exact)\n", parsed.bitrate_bps);
-}
-
-TEST(remb_parse_bad_id) {
-    uint8_t buf[128];
-    size_t len;
-    uint32_t ssrcs[] = {0x11};
-
-    int rc = rtc_rtcp_build_remb(buf, sizeof(buf), &len, 0xAA, ssrcs, 1, 1000000);
-    ASSERT_EQ(rc, RTC_OK);
-
-    /* Corrupt the "REMB" identifier */
-    buf[12] = 'X';
-
-    rtc_rtcp_remb_t parsed;
-    ASSERT(rtc_rtcp_parse_remb(&parsed, buf, len) != RTC_OK);
-    printf("    REMB bad identifier: correctly rejected\n");
-}
-
-/* ================================================================== */
 /*  Detection / Utility Tests                                          */
 /* ================================================================== */
 
@@ -362,14 +249,6 @@ int main(void) {
     RUN_TEST(fir_build);
     RUN_TEST(fir_roundtrip);
     RUN_TEST(fir_parse_short);
-
-    /* REMB */
-    RUN_TEST(remb_build_single_ssrc);
-    RUN_TEST(remb_build_multi_ssrc);
-    RUN_TEST(remb_roundtrip);
-    RUN_TEST(remb_roundtrip_large_bitrate);
-    RUN_TEST(remb_roundtrip_small_bitrate);
-    RUN_TEST(remb_parse_bad_id);
 
     /* Utility */
     RUN_TEST(is_rtcp_extended);

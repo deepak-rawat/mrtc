@@ -15,6 +15,10 @@ endif()
 option(MRTC_BUILD_TESTS "Build test executables" ON)
 option(MRTC_ENABLE_ASAN "Enable AddressSanitizer (Debug builds)" OFF)
 
+# Feature toggles
+option(MRTC_ENABLE_TWCC "Transport-wide CC + GCC bandwidth estimator" ON)
+option(MRTC_ENABLE_RATE_CONTROL "RR-based AIMD sender rate control" ON)
+
 # Compiler warning flags applied to all targets in this project
 function(mrtc_set_warnings target)
     if(MSVC)

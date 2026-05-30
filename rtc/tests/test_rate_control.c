@@ -107,50 +107,6 @@ TEST(rc_high_rtt_penalty) {
 }
 
 /* ------------------------------------------------------------------ */
-TEST(rc_remb_caps_bitrate) {
-    rtc_rate_control_config_t cfg = {
-        .target_bitrate_kbps = 2000, .min_bitrate_kbps = 100, .max_bitrate_kbps = 5000};
-    rtc_rate_controller_t *rc = rtc_rate_control_create(&cfg);
-
-    ASSERT_EQ(rtc_rate_control_get_bitrate(rc), 2000);
-
-    /* REMB at 1000 kbps should cap */
-    rtc_rate_control_on_remb(rc, 1000000); /* 1 Mbps */
-    ASSERT_EQ(rtc_rate_control_get_bitrate(rc), 1000);
-
-    printf("    REMB caps: 2000 → 1000 kbps\n");
-    rtc_rate_control_destroy(rc);
-}
-
-/* ------------------------------------------------------------------ */
-TEST(rc_remb_no_increase) {
-    rtc_rate_control_config_t cfg = {
-        .target_bitrate_kbps = 1000, .min_bitrate_kbps = 100, .max_bitrate_kbps = 5000};
-    rtc_rate_controller_t *rc = rtc_rate_control_create(&cfg);
-
-    /* REMB at 5000 kbps — current is 1000, should NOT increase */
-    rtc_rate_control_on_remb(rc, 5000000);
-    ASSERT_EQ(rtc_rate_control_get_bitrate(rc), 1000);
-
-    printf("    REMB no increase: stays at 1000 kbps\n");
-    rtc_rate_control_destroy(rc);
-}
-
-/* ------------------------------------------------------------------ */
-TEST(rc_remb_respects_min) {
-    rtc_rate_control_config_t cfg = {
-        .target_bitrate_kbps = 500, .min_bitrate_kbps = 200, .max_bitrate_kbps = 5000};
-    rtc_rate_controller_t *rc = rtc_rate_control_create(&cfg);
-
-    /* REMB at 10 kbps — should clamp to min (200) */
-    rtc_rate_control_on_remb(rc, 10000);
-    ASSERT_EQ(rtc_rate_control_get_bitrate(rc), 200);
-
-    printf("    REMB respects min: clamped to 200 kbps\n");
-    rtc_rate_control_destroy(rc);
-}
-
-/* ------------------------------------------------------------------ */
 TEST(rc_per_sender_independent) {
     rtc_rate_control_config_t cfg = {
         .target_bitrate_kbps = 1000, .min_bitrate_kbps = 100, .max_bitrate_kbps = 5000};
@@ -188,9 +144,6 @@ int main(void) {
     RUN_TEST(rc_clamp_min_max);
     RUN_TEST(rc_keyframe_on_spike);
     RUN_TEST(rc_high_rtt_penalty);
-    RUN_TEST(rc_remb_caps_bitrate);
-    RUN_TEST(rc_remb_no_increase);
-    RUN_TEST(rc_remb_respects_min);
     RUN_TEST(rc_per_sender_independent);
 
     TEST_SUMMARY();

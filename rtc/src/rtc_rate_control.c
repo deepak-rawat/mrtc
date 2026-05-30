@@ -68,24 +68,6 @@ void rtc_rate_control_on_rtcp_rr(rtc_rate_controller_t *rc, int fraction_lost, i
     atomic_store_explicit(&rc->current_bitrate_kbps, bitrate, memory_order_release);
 }
 
-void rtc_rate_control_on_remb(rtc_rate_controller_t *rc, uint32_t bitrate_bps) {
-    if (!rc)
-        return;
-
-    int remb_kbps = (int)(bitrate_bps / 1000);
-    if (remb_kbps < 1)
-        remb_kbps = 1;
-
-    /* REMB acts as a ceiling — cap current bitrate if it exceeds REMB */
-    int current = atomic_load_explicit(&rc->current_bitrate_kbps, memory_order_relaxed);
-    if (current > remb_kbps) {
-        int capped = remb_kbps;
-        if (capped < rc->min_bitrate_kbps)
-            capped = rc->min_bitrate_kbps;
-        atomic_store_explicit(&rc->current_bitrate_kbps, capped, memory_order_release);
-    }
-}
-
 int rtc_rate_control_get_bitrate(rtc_rate_controller_t *rc) {
     return atomic_load_explicit(&rc->current_bitrate_kbps, memory_order_acquire);
 }

@@ -33,9 +33,6 @@ void rtc_rate_control_on_rtcp_rr(rtc_rate_controller_t *rc, int fraction_lost, /
                                                                                   255=100%) */
                                  int rtt_ms, int jitter);
 
-/* Called when REMB arrives — caps bitrate to receiver's estimated max */
-void rtc_rate_control_on_remb(rtc_rate_controller_t *rc, uint32_t bitrate_bps);
-
 /* Called before each encode — returns recommended bitrate in kbps */
 int rtc_rate_control_get_bitrate(rtc_rate_controller_t *rc);
 

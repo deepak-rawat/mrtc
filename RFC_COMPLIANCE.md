@@ -201,7 +201,6 @@ Files: `rtc/src/rtc_sdp.c`, `rtc/include/rtc/rtc_sdp.h`
 | Generic NACK (negative acknowledgement) | ❌ Not implemented |
 | PLI (Picture Loss Indication) | ❌ Not implemented |
 | FIR (Full Intra Request) | ❌ Not implemented |
-| REMB (Receiver Estimated Maximum Bitrate) | ❌ Not implemented |
 | NACK retransmit buffer | ❌ Not implemented |
 | `a=rtcp-fb:` SDP negotiation | ❌ Not implemented |
 
@@ -706,7 +705,7 @@ successors, ordered by priority.
 
 ### Phase B: RTCP & Feedback (aligns with ROADMAP Phase 2)
 
-#### B1 — RTCP Feedback: NACK/PLI/FIR/REMB (RFC 4585 + RFC 5506)
+#### B1 — RTCP Feedback: NACK/PLI/FIR (RFC 4585 + RFC 5506)
 - **Why now:** Required for video quality and browser interop.
 - **Work:**
   - Implement Generic NACK (PT=205, FMT=1), PLI (PT=206, FMT=1), FIR (PT=206, FMT=4)

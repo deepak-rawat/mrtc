@@ -40,7 +40,7 @@ with `a=extmap:` negotiation), data channels (wire protocol with OPEN/ACK
 handshake, up to 16 concurrent channels), peer connection with automatic
 ICE→DTLS→SRTP on both descriptions set. STUN binding, TURN client (allocate,
 channel bind, channel data). Per-sender AIMD rate control driven by RTCP RR.
-RTCP feedback (NACK / PLI / FIR / REMB) with per-video NACK retransmit buffer.
+RTCP feedback (NACK / PLI / FIR) with per-video NACK retransmit buffer.
 Transport-Wide Congestion Control end-to-end (draft-holmer-rmcat-transport-wide-cc):
 sender tagging, periodic feedback, parser. Per-peer Google Congestion Control
 bandwidth estimator (delay trendline + loss controller) exposed via
@@ -127,16 +127,15 @@ Required prerequisite for Phase 2.5 (per-sender RR demux).
 
 ---
 
-### Phase 2: RTCP Feedback (NACK, PLI, REMB) — ✅ COMPLETE
+### Phase 2: RTCP Feedback (NACK, PLI, FIR) — ✅ COMPLETE
 
-**2.1 — NACK/PLI/FIR/REMB build + parse**
+**2.1 — NACK/PLI/FIR build + parse**
 
 Extend `rtc_rtcp.c`:
 ```c
 int rtc_rtcp_build_nack(buf, len, sender_ssrc, media_ssrc, lost_seqs, count);
 int rtc_rtcp_build_pli(buf, len, sender_ssrc, media_ssrc);
 int rtc_rtcp_build_fir(buf, len, sender_ssrc, media_ssrc, seq_nr);
-int rtc_rtcp_build_remb(buf, len, sender_ssrc, media_ssrcs, count, bitrate_bps);
 ```
 
 **2.2 — NACK buffer**
@@ -154,14 +153,11 @@ const uint8_t *rtc_nack_buf_get(buf, seq, out_len);
 
 ```c
 typedef void (*rtc_on_pli_fn)(void *user);
-typedef void (*rtc_on_remb_fn)(uint32_t bitrate_bps, void *user);
 
 void rtc_rtp_sender_on_pli(sender, fn, user);
-void rtc_rtp_sender_on_remb(sender, fn, user);
 ```
 
-Media pipeline wires: `on_pli` → `video_encoder_request_keyframe()`,
-`on_remb` → `video_encoder_set_bitrate()`.
+Media pipeline wires: `on_pli` → `video_encoder_request_keyframe()`.
 
 **2.4 — RTCP dispatch in peer connection**
 
