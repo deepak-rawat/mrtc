@@ -105,7 +105,28 @@ typedef struct rtc_transport {
      * both write and read sides to prevent torn reads of remote_addr. */
     rtc_addr_t remote_addr;
     _Atomic bool remote_addr_set;
+
+    /* Lightweight counters (atomic so reads from any thread are valid).
+     * recv_drain_full counts how often the recv loop hit RECV_BATCH and
+     * left packets in the kernel buffer — a signal of sustained bursts. */
+    _Atomic uint64_t pkts_recv;
+    _Atomic uint64_t bytes_recv;
+    _Atomic uint64_t pkts_sent;
+    _Atomic uint64_t bytes_sent;
+    _Atomic uint64_t send_errors;
+    _Atomic uint64_t recv_drain_full;
 } rtc_transport_t;
+
+/* Snapshot of transport counters. */
+typedef struct {
+    uint64_t pkts_recv;
+    uint64_t bytes_recv;
+    uint64_t pkts_sent;
+    uint64_t bytes_sent;
+    uint64_t send_errors;
+    uint64_t recv_drain_full;
+    int timer_slot_hwm;
+} rtc_transport_stats_t;
 
 /*
  * Create UDP socket, install the recv callback, and start the poller
@@ -138,6 +159,9 @@ rtc_socket_t rtc_transport_get_socket(const rtc_transport_t *t);
 
 /* Get the local bound address */
 int rtc_transport_get_local_addr(rtc_transport_t *t, rtc_addr_t *out);
+
+/* Read a snapshot of internal counters. Lock-free. */
+void rtc_transport_get_stats(const rtc_transport_t *t, rtc_transport_stats_t *out);
 
 /* Stop thread, close socket, free resources */
 void rtc_transport_close(rtc_transport_t *t);

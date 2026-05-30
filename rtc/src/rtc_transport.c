@@ -137,6 +137,7 @@ static void *transport_thread_fn(void *arg) {
 
         if (n > 0) {
             rtc_socket_t s = atomic_load_explicit(&t->sock, memory_order_acquire);
+            int drained = 0;
             for (int i = 0; i < RTC_TRANSPORT_RECV_BATCH; i++) {
                 struct sockaddr_storage from_store;
                 socklen_t fromlen = sizeof(from_store);
@@ -145,6 +146,10 @@ static void *transport_thread_fn(void *arg) {
                                        (struct sockaddr *)&from_store, &fromlen);
                 if (len <= 0)
                     break; /* EWOULDBLOCK or error — socket drained */
+                drained++;
+
+                atomic_fetch_add_explicit(&t->pkts_recv, 1, memory_order_relaxed);
+                atomic_fetch_add_explicit(&t->bytes_recv, (uint64_t)len, memory_order_relaxed);
 
                 /* Truncation heuristic: a perfectly-full buffer is
                  * suspicious since RTC_TRANSPORT_BUF_SIZE is sized for
@@ -163,6 +168,8 @@ static void *transport_thread_fn(void *arg) {
                     t->on_recv(type, buf, (size_t)len, &from, t->recv_user);
                 }
             }
+            if (drained == RTC_TRANSPORT_RECV_BATCH)
+                atomic_fetch_add_explicit(&t->recv_drain_full, 1, memory_order_relaxed);
         }
 
         timer_fire_expired(t->timers, RTC_TRANSPORT_MAX_TIMERS, &t->mutex);
@@ -280,12 +287,20 @@ int rtc_transport_send(rtc_transport_t *t, const uint8_t *data, size_t len,
      * of using a freed/reused descriptor. Caller is still expected to
      * stop sending before/around close — this just hardens the boundary. */
     rtc_socket_t s = atomic_load_explicit(&t->sock, memory_order_acquire);
-    if (s == RTC_INVALID_SOCKET)
+    if (s == RTC_INVALID_SOCKET) {
+        atomic_fetch_add_explicit(&t->send_errors, 1, memory_order_relaxed);
         return RTC_ERR_SOCKET;
+    }
 
     ssize_t sent = sendto(s, (const char *)data, (int)len, 0,
                           (const struct sockaddr *)&dest->addr, dest->len);
-    return (sent > 0) ? RTC_OK : RTC_ERR_SOCKET;
+    if (sent > 0) {
+        atomic_fetch_add_explicit(&t->pkts_sent, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&t->bytes_sent, (uint64_t)sent, memory_order_relaxed);
+        return RTC_OK;
+    }
+    atomic_fetch_add_explicit(&t->send_errors, 1, memory_order_relaxed);
+    return RTC_ERR_SOCKET;
 }
 
 int rtc_transport_send_to_remote(rtc_transport_t *t, const uint8_t *data, size_t len) {
@@ -325,6 +340,16 @@ rtc_socket_t rtc_transport_get_socket(const rtc_transport_t *t) {
 int rtc_transport_get_local_addr(rtc_transport_t *t, rtc_addr_t *out) {
     *out = t->local_addr;
     return RTC_OK;
+}
+
+void rtc_transport_get_stats(const rtc_transport_t *t, rtc_transport_stats_t *out) {
+    out->pkts_recv = atomic_load_explicit(&t->pkts_recv, memory_order_relaxed);
+    out->bytes_recv = atomic_load_explicit(&t->bytes_recv, memory_order_relaxed);
+    out->pkts_sent = atomic_load_explicit(&t->pkts_sent, memory_order_relaxed);
+    out->bytes_sent = atomic_load_explicit(&t->bytes_sent, memory_order_relaxed);
+    out->send_errors = atomic_load_explicit(&t->send_errors, memory_order_relaxed);
+    out->recv_drain_full = atomic_load_explicit(&t->recv_drain_full, memory_order_relaxed);
+    out->timer_slot_hwm = t->timer_slot_hwm;
 }
 
 void rtc_transport_close(rtc_transport_t *t) {
