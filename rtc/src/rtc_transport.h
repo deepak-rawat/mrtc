@@ -17,7 +17,10 @@
 #include <stdatomic.h>
 
 #define RTC_TRANSPORT_MAX_TIMERS 16
-#define RTC_TRANSPORT_BUF_SIZE   2048
+
+/* Recv buffer sized for jumbo frames so DTLS records / RTP packets near
+ * the jumbo MTU are not silently truncated. */
+#define RTC_TRANSPORT_BUF_SIZE   9216
 
 /* Max packets drained per poll wakeup before yielding to timers.
  * Bounds worst-case timer lateness under packet bursts. */
@@ -61,8 +64,9 @@ typedef struct {
 typedef int rtc_timer_id_t;
 
 typedef struct rtc_transport {
-    /* Socket */
-    rtc_socket_t sock;
+    /* Socket. Atomic so concurrent senders that race with close see
+     * RTC_INVALID_SOCKET and return an error instead of using a freed fd. */
+    _Atomic rtc_socket_t sock;
     rtc_addr_t local_addr;
 
     /* Poller */

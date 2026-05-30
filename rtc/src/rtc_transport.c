@@ -98,14 +98,22 @@ static void *transport_thread_fn(void *arg) {
         int n = rtc_poller_wait(&t->poller, timeout);
 
         if (n > 0) {
+            rtc_socket_t s = atomic_load_explicit(&t->sock, memory_order_acquire);
             for (int i = 0; i < RTC_TRANSPORT_RECV_BATCH; i++) {
                 struct sockaddr_storage from_store;
                 socklen_t fromlen = sizeof(from_store);
 
-                ssize_t len = recvfrom(t->sock, (char *)buf, sizeof(buf), 0,
+                ssize_t len = recvfrom(s, (char *)buf, sizeof(buf), 0,
                                        (struct sockaddr *)&from_store, &fromlen);
                 if (len <= 0)
                     break; /* EWOULDBLOCK or error — socket drained */
+
+                /* Truncation heuristic: a perfectly-full buffer is
+                 * suspicious since RTC_TRANSPORT_BUF_SIZE is sized for
+                 * jumbo frames. Real WebRTC traffic never reaches this. */
+                if ((size_t)len == sizeof(buf))
+                    RTC_LOG_WARN("Transport: recvfrom filled buffer (%zd bytes) — "
+                                 "possible packet truncation", len);
 
                 rtc_addr_t from;
                 memcpy(&from.addr, &from_store, fromlen);
@@ -131,11 +139,11 @@ static void *transport_thread_fn(void *arg) {
 
 int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *user) {
     memset(t, 0, sizeof(*t));
-    t->sock = RTC_INVALID_SOCKET;
+    atomic_store_explicit(&t->sock, RTC_INVALID_SOCKET, memory_order_relaxed);
 
     /* Create UDP socket */
-    t->sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (t->sock == RTC_INVALID_SOCKET) {
+    rtc_socket_t s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == RTC_INVALID_SOCKET) {
         RTC_LOG_ERR("Transport: failed to create socket");
         return RTC_ERR_SOCKET;
     }
@@ -146,42 +154,38 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
     bind_addr.sin_family = AF_INET;
     bind_addr.sin_addr.s_addr = INADDR_ANY;
     bind_addr.sin_port = 0;
-    if (bind(t->sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
+    if (bind(s, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
         RTC_LOG_ERR("Transport: bind failed");
-        rtc_close_socket(t->sock);
-        t->sock = RTC_INVALID_SOCKET;
+        rtc_close_socket(s);
         return RTC_ERR_SOCKET;
     }
 
-    /* Store local address */
-    t->local_addr.len = sizeof(struct sockaddr_in);
-    if (getsockname(t->sock, (struct sockaddr *)&t->local_addr.addr, &t->local_addr.len) != 0) {
-        rtc_close_socket(t->sock);
-        t->sock = RTC_INVALID_SOCKET;
+    /* Store local address. Pass the full storage size so future IPv6
+     * sockets get the correct length written back by getsockname. */
+    t->local_addr.len = sizeof(t->local_addr.addr);
+    if (getsockname(s, (struct sockaddr *)&t->local_addr.addr, &t->local_addr.len) != 0) {
+        rtc_close_socket(s);
         return RTC_ERR_SOCKET;
     }
 
     /* Set non-blocking for use with poller */
-    int rc = rtc_set_nonblocking(t->sock);
+    int rc = rtc_set_nonblocking(s);
     if (rc != RTC_OK) {
-        rtc_close_socket(t->sock);
-        t->sock = RTC_INVALID_SOCKET;
+        rtc_close_socket(s);
         return rc;
     }
 
     /* Init poller and register socket */
     rc = rtc_poller_init(&t->poller);
     if (rc != RTC_OK) {
-        rtc_close_socket(t->sock);
-        t->sock = RTC_INVALID_SOCKET;
+        rtc_close_socket(s);
         return rc;
     }
 
-    rc = rtc_poller_add(&t->poller, t->sock);
+    rc = rtc_poller_add(&t->poller, s);
     if (rc != RTC_OK) {
         rtc_poller_close(&t->poller);
-        rtc_close_socket(t->sock);
-        t->sock = RTC_INVALID_SOCKET;
+        rtc_close_socket(s);
         return rc;
     }
 
@@ -192,14 +196,16 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
     t->on_recv = on_recv;
     t->recv_user = user;
 
-    /* Start background thread */
-    t->running = true;
+    /* Publish socket and running flag, then start background thread. */
+    atomic_store_explicit(&t->sock, s, memory_order_release);
+    atomic_store_explicit(&t->running, true, memory_order_release);
+
     rc = rtc_thread_create(&t->thread, transport_thread_fn, t);
     if (rc != RTC_OK) {
-        t->running = false;
+        atomic_store_explicit(&t->running, false, memory_order_relaxed);
+        atomic_store_explicit(&t->sock, RTC_INVALID_SOCKET, memory_order_relaxed);
         rtc_poller_close(&t->poller);
-        rtc_close_socket(t->sock);
-        t->sock = RTC_INVALID_SOCKET;
+        rtc_close_socket(s);
         rtc_mutex_destroy(&t->mutex);
         return rc;
     }
@@ -210,10 +216,14 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
 
 int rtc_transport_send(rtc_transport_t *t, const uint8_t *data, size_t len,
                        const rtc_addr_t *dest) {
-    if (t->sock == RTC_INVALID_SOCKET)
+    /* Snapshot fd: lets a send racing with close return an error instead
+     * of using a freed/reused descriptor. Caller is still expected to
+     * stop sending before/around close — this just hardens the boundary. */
+    rtc_socket_t s = atomic_load_explicit(&t->sock, memory_order_acquire);
+    if (s == RTC_INVALID_SOCKET)
         return RTC_ERR_SOCKET;
 
-    ssize_t sent = sendto(t->sock, (const char *)data, (int)len, 0,
+    ssize_t sent = sendto(s, (const char *)data, (int)len, 0,
                           (const struct sockaddr *)&dest->addr, dest->len);
     return (sent > 0) ? RTC_OK : RTC_ERR_SOCKET;
 }
@@ -260,7 +270,7 @@ void rtc_transport_cancel_timer(rtc_transport_t *t, rtc_timer_id_t id) {
 }
 
 rtc_socket_t rtc_transport_get_socket(const rtc_transport_t *t) {
-    return t->sock;
+    return atomic_load_explicit(&t->sock, memory_order_acquire);
 }
 
 int rtc_transport_get_local_addr(rtc_transport_t *t, rtc_addr_t *out) {
@@ -269,22 +279,21 @@ int rtc_transport_get_local_addr(rtc_transport_t *t, rtc_addr_t *out) {
 }
 
 void rtc_transport_close(rtc_transport_t *t) {
-    if (!t->running && t->sock == RTC_INVALID_SOCKET)
+    /* Idempotent: only the thread that flips running true -> false runs
+     * the shutdown sequence. Concurrent / repeated close calls no-op. */
+    bool was_running = atomic_exchange_explicit(&t->running, false, memory_order_acq_rel);
+    if (!was_running)
         return;
 
-    /* Signal thread to stop */
-    t->running = false;
-
-    /* Join thread */
+    /* Join thread (it observes running==false and exits its loop). */
     rtc_thread_join(&t->thread);
 
     /* Cleanup */
     rtc_poller_close(&t->poller);
 
-    if (t->sock != RTC_INVALID_SOCKET) {
-        rtc_close_socket(t->sock);
-        t->sock = RTC_INVALID_SOCKET;
-    }
+    rtc_socket_t s = atomic_exchange_explicit(&t->sock, RTC_INVALID_SOCKET, memory_order_acq_rel);
+    if (s != RTC_INVALID_SOCKET)
+        rtc_close_socket(s);
 
     rtc_mutex_destroy(&t->mutex);
 
