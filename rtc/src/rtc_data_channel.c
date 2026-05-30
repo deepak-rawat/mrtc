@@ -236,7 +236,7 @@ int rtc_dc_manager_recv(rtc_dc_manager_t *mgr, const uint8_t *data, size_t len) 
     /* data[3] is reserved */
     uint16_t payload_len = (uint16_t)((uint16_t)data[4] << 8 | data[5]);
 
-    if (RTC_DC_HEADER_SIZE + payload_len > len)
+    if ((size_t)RTC_DC_HEADER_SIZE + payload_len > len)
         return RTC_ERR_INVALID;
 
     const uint8_t *payload = data + RTC_DC_HEADER_SIZE;

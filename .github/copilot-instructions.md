@@ -74,6 +74,47 @@ Uses modern EVP APIs (3.0+). Avoid deprecated functions like `HMAC()` or low-lev
 ### Testing
 Tests use a minimal harness (`tests/test_harness.h`) with `TEST()`, `RUN_TEST()`, `ASSERT*` macros. No external test framework. Each test is a standalone executable.
 
+## Build Warnings Policy
+
+**Treat all compiler warnings as bugs to fix, not noise to ignore.** When a
+build emits warnings, resolve them in the same change that surfaced them.
+Never silence a warning by disabling the flag or by reformatting the message
+away — fix the underlying issue.
+
+Common warnings and the preferred fix:
+
+- **`-Wunused-variable` / `-Wunused-but-set-variable`**: Remove the variable
+  if it is truly dead. If it is only used inside a conditional compilation
+  block (e.g. `#ifndef _WIN32`), move its declaration inside the same
+  `#ifdef` so it does not exist on platforms that do not use it.
+- **`-Wunused-parameter`**: For callbacks with a fixed signature (e.g.
+  libwebsockets `lws_callback_function`, pthread thread functions), add
+  `(void)param;` at the top of the function body. Do not rename the
+  parameter or remove it from the signature.
+- **`-Wsign-compare`**: Cast the smaller/narrower side to the wider unsigned
+  type at the comparison site (e.g. `(size_t)RTC_DC_HEADER_SIZE + payload_len > len`).
+  Do not change the underlying types of unrelated APIs just to silence one
+  comparison.
+- **`-Wunused-function`**: Delete the function. If it is intentionally kept
+  for future use, that justification belongs in a commit message, not in
+  the tree — remove it and recover from git history if needed later.
+- **`-Wformat` / `-Wformat-security`**: Fix the format string. Never pass a
+  non-literal as the format argument to `printf`-family functions.
+- **`-Wimplicit-fallthrough`**: Add an explicit `break;` or a `/* fall
+  through */` comment recognized by the compiler.
+- **`-Wmaybe-uninitialized`**: Initialize the variable at declaration. Do
+  not add `= 0` blindly — first check whether a control-flow path really
+  can leave it unset, and if so fix that path.
+
+After fixing warnings, re-run the build and confirm the output is clean
+before reporting the task done. A clean build is:
+
+```bash
+cd build && ninja 2>&1 | grep -E "warning|error" || echo "Clean build"
+```
+
+If that prints `Clean build`, the tree is warning-free.
+
 ## Formatting (no external clang-format required)
 
 `clang-format` CLI is **not** installed. The repo's `.clang-format` is applied

@@ -98,6 +98,7 @@ static void dispatch_message(signaling_client_t *sc, const char *data, size_t le
 
 static int callback_client(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in,
                            size_t len) {
+    (void)user;
     signaling_client_t *sc = (signaling_client_t *)lws_context_user(lws_get_context(wsi));
     if (!sc)
         return 0;

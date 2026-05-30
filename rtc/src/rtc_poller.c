@@ -120,7 +120,9 @@ int rtc_poller_wait(rtc_poller_t *p, int timeout_ms) {
 
     fd_set readfds;
     FD_ZERO(&readfds);
+#  ifndef _WIN32
     int max_fd = 0;
+#  endif
     for (int i = 0; i < p->fd_count; i++) {
         FD_SET(p->fds[i], &readfds);
 #  ifndef _WIN32
