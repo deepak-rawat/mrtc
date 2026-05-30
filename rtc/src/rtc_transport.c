@@ -34,19 +34,23 @@ static rtc_pkt_type_t transport_classify(const uint8_t *data, size_t len) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Timer helpers                                                      */
+/*  Timer subsystem                                                    */
 /* ------------------------------------------------------------------ */
+/* Self-contained: operates on a caller-provided rtc_timer_t[] array,
+ * mutex, and optional HWM counter. Transport composes one but the code
+ * has no other transport coupling. */
 
-/* Compute timeout_ms for the poller based on nearest timer deadline.
- * Must be called with mutex held. Returns -1 if no timers. */
-static int transport_next_timeout_ms(rtc_transport_t *t) {
+/* Compute next poller timeout (ms) from the nearest active deadline.
+ * Caller must hold the mutex. Returns a default poll interval when no
+ * timers are scheduled. */
+static int timer_next_timeout_ms(const rtc_timer_t *timers, int max) {
     uint64_t earliest = UINT64_MAX;
-    for (int i = 0; i < RTC_TRANSPORT_MAX_TIMERS; i++) {
-        if (t->timers[i].active && t->timers[i].deadline_ms < earliest)
-            earliest = t->timers[i].deadline_ms;
+    for (int i = 0; i < max; i++) {
+        if (timers[i].active && timers[i].deadline_ms < earliest)
+            earliest = timers[i].deadline_ms;
     }
     if (earliest == UINT64_MAX)
-        return 100; /* default poll interval */
+        return 100; /* default poll interval when no timers */
 
     uint64_t now = rtc_time_ms();
     if (now >= earliest)
@@ -56,31 +60,65 @@ static int transport_next_timeout_ms(rtc_transport_t *t) {
     return (diff > (uint64_t)INT32_MAX) ? INT32_MAX : (int)diff;
 }
 
-/* Fire any expired timers. Must be called with mutex held.
- * Collects callbacks first, then fires outside the lock. */
-static void transport_fire_timers(rtc_transport_t *t) {
+/* Fire any expired timers. Collects under the lock, then invokes callbacks
+ * outside it so user code cannot deadlock against the timer subsystem. */
+static void timer_fire_expired(rtc_timer_t *timers, int max, rtc_mutex_t *mutex) {
     uint64_t now = rtc_time_ms();
 
-    /* Collect expired timers (up to max) */
     rtc_timer_fn fns[RTC_TRANSPORT_MAX_TIMERS];
     void *users[RTC_TRANSPORT_MAX_TIMERS];
     int count = 0;
 
-    rtc_mutex_lock(&t->mutex);
-    for (int i = 0; i < RTC_TRANSPORT_MAX_TIMERS; i++) {
-        if (t->timers[i].active && now >= t->timers[i].deadline_ms) {
-            fns[count] = t->timers[i].fn;
-            users[count] = t->timers[i].user;
+    rtc_mutex_lock(mutex);
+    for (int i = 0; i < max; i++) {
+        if (timers[i].active && now >= timers[i].deadline_ms) {
+            fns[count] = timers[i].fn;
+            users[count] = timers[i].user;
             count++;
-            t->timers[i].active = false;
+            timers[i].active = false;
         }
     }
-    rtc_mutex_unlock(&t->mutex);
+    rtc_mutex_unlock(mutex);
 
-    /* Fire callbacks outside the lock */
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count; i++)
         fns[i](users[i]);
+}
+
+/* Allocate a timer slot. Returns slot index >= 0 or -1 if all are in use.
+ * Updates *hwm with the new high-water mark of slots in use. */
+static rtc_timer_id_t timer_add(rtc_timer_t *timers, int max, rtc_mutex_t *mutex, int *hwm,
+                                uint64_t deadline_ms, rtc_timer_fn fn, void *user) {
+    rtc_mutex_lock(mutex);
+    int free_slot = -1;
+    int in_use = 0;
+    for (int i = 0; i < max; i++) {
+        if (timers[i].active) {
+            in_use++;
+        } else if (free_slot < 0) {
+            free_slot = i;
+        }
     }
+    if (free_slot < 0) {
+        rtc_mutex_unlock(mutex);
+        return -1;
+    }
+    timers[free_slot].deadline_ms = deadline_ms;
+    timers[free_slot].fn = fn;
+    timers[free_slot].user = user;
+    timers[free_slot].active = true;
+    in_use++;
+    if (hwm && in_use > *hwm)
+        *hwm = in_use;
+    rtc_mutex_unlock(mutex);
+    return free_slot;
+}
+
+static void timer_cancel(rtc_timer_t *timers, int max, rtc_mutex_t *mutex, rtc_timer_id_t id) {
+    if (id < 0 || id >= max)
+        return;
+    rtc_mutex_lock(mutex);
+    timers[id].active = false;
+    rtc_mutex_unlock(mutex);
 }
 
 /* ------------------------------------------------------------------ */
@@ -92,7 +130,7 @@ static void *transport_thread_fn(void *arg) {
 
     while (t->running) {
         rtc_mutex_lock(&t->mutex);
-        int timeout = transport_next_timeout_ms(t);
+        int timeout = timer_next_timeout_ms(t->timers, RTC_TRANSPORT_MAX_TIMERS);
         rtc_mutex_unlock(&t->mutex);
 
         int n = rtc_poller_wait(&t->poller, timeout);
@@ -127,7 +165,7 @@ static void *transport_thread_fn(void *arg) {
             }
         }
 
-        transport_fire_timers(t);
+        timer_fire_expired(t->timers, RTC_TRANSPORT_MAX_TIMERS, &t->mutex);
     }
 
     return NULL;
@@ -267,28 +305,17 @@ void rtc_transport_set_remote(rtc_transport_t *t, const rtc_addr_t *addr) {
 
 rtc_timer_id_t rtc_transport_add_timer(rtc_transport_t *t, uint64_t deadline_ms, rtc_timer_fn fn,
                                        void *user) {
-    rtc_mutex_lock(&t->mutex);
-    for (int i = 0; i < RTC_TRANSPORT_MAX_TIMERS; i++) {
-        if (!t->timers[i].active) {
-            t->timers[i].deadline_ms = deadline_ms;
-            t->timers[i].fn = fn;
-            t->timers[i].user = user;
-            t->timers[i].active = true;
-            rtc_mutex_unlock(&t->mutex);
-            return i;
-        }
-    }
-    rtc_mutex_unlock(&t->mutex);
-    RTC_LOG_WARN("Transport: no free timer slots");
-    return -1;
+    rtc_timer_id_t id = timer_add(t->timers, RTC_TRANSPORT_MAX_TIMERS, &t->mutex,
+                                  &t->timer_slot_hwm, deadline_ms, fn, user);
+    if (id < 0)
+        RTC_LOG_WARN("Transport: no free timer slots (max=%d) — caller will"
+                     " silently lose this scheduling; raise RTC_TRANSPORT_MAX_TIMERS",
+                     RTC_TRANSPORT_MAX_TIMERS);
+    return id;
 }
 
 void rtc_transport_cancel_timer(rtc_transport_t *t, rtc_timer_id_t id) {
-    if (id < 0 || id >= RTC_TRANSPORT_MAX_TIMERS)
-        return;
-    rtc_mutex_lock(&t->mutex);
-    t->timers[id].active = false;
-    rtc_mutex_unlock(&t->mutex);
+    timer_cancel(t->timers, RTC_TRANSPORT_MAX_TIMERS, &t->mutex, id);
 }
 
 rtc_socket_t rtc_transport_get_socket(const rtc_transport_t *t) {
@@ -319,5 +346,6 @@ void rtc_transport_close(rtc_transport_t *t) {
 
     rtc_mutex_destroy(&t->mutex);
 
-    RTC_LOG_INFO("Transport: closed");
+    RTC_LOG_INFO("Transport: closed (timer slot hwm=%d/%d)", t->timer_slot_hwm,
+                 RTC_TRANSPORT_MAX_TIMERS);
 }

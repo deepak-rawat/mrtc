@@ -79,7 +79,7 @@ typedef struct rtc_transport {
     /* Thread */
     rtc_thread_t thread;
     _Atomic bool running; /* set false from any thread to stop poller loop */
-    rtc_mutex_t mutex;
+    rtc_mutex_t mutex; /* protects timers[] and timer_slot_hwm */
 
     /* Packet callback. Installed by rtc_transport_init() before the
      * background thread starts; never changed. Read unlocked on the hot
@@ -87,9 +87,11 @@ typedef struct rtc_transport {
     rtc_transport_recv_fn on_recv;
     void *recv_user;
 
-    /* Timers */
+    /* Timer slots and the high-water mark of how many were ever in use
+     * simultaneously. HWM is logged on close to surface near-exhaustion
+     * before it bites (add_timer returning -1 silently breaks features). */
     rtc_timer_t timers[RTC_TRANSPORT_MAX_TIMERS];
-    int timer_count;
+    int timer_slot_hwm;
 
     /* Selected remote address (set by ICE after connectivity checks).
      *
