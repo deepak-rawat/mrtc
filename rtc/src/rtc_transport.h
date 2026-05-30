@@ -26,6 +26,10 @@
  * Bounds worst-case timer lateness under packet bursts. */
 #define RTC_TRANSPORT_RECV_BATCH 16
 
+/* Requested kernel socket buffer size (bytes). The kernel may clamp this
+ * to a system maximum; the actual value is logged at init time. */
+#define RTC_TRANSPORT_SOCKBUF_BYTES (1 * 1024 * 1024)
+
 /* Packet classification per RFC 7983 */
 typedef enum {
     RTC_PKT_STUN,         /* first byte [0, 3]     */

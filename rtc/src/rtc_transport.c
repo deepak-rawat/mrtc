@@ -175,6 +175,22 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
         return rc;
     }
 
+    /* Request larger kernel socket buffers to absorb video bursts and
+     * avoid drops between drain iterations. The kernel may clamp; we log
+     * the actual value so misconfiguration is visible. */
+    int wanted = RTC_TRANSPORT_SOCKBUF_BYTES;
+    (void)setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char *)&wanted, sizeof(wanted));
+    (void)setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char *)&wanted, sizeof(wanted));
+    int got_rcv = 0, got_snd = 0;
+    socklen_t optlen = sizeof(int);
+    (void)getsockopt(s, SOL_SOCKET, SO_RCVBUF, (char *)&got_rcv, &optlen);
+    optlen = sizeof(int);
+    (void)getsockopt(s, SOL_SOCKET, SO_SNDBUF, (char *)&got_snd, &optlen);
+    if (got_rcv > 0 && got_rcv < wanted)
+        RTC_LOG_WARN("Transport: SO_RCVBUF clamped to %d (requested %d)", got_rcv, wanted);
+    if (got_snd > 0 && got_snd < wanted)
+        RTC_LOG_WARN("Transport: SO_SNDBUF clamped to %d (requested %d)", got_snd, wanted);
+
     /* Init poller and register socket */
     rc = rtc_poller_init(&t->poller);
     if (rc != RTC_OK) {
@@ -210,7 +226,13 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
         return rc;
     }
 
-    RTC_LOG_INFO("Transport: initialized (socket bound, thread started)");
+    char ipbuf[64];
+    uint16_t port = 0;
+    if (rtc_addr_to_string(&t->local_addr, ipbuf, sizeof(ipbuf), &port) == RTC_OK)
+        RTC_LOG_INFO("Transport: bound %s:%u (rcvbuf=%d sndbuf=%d)", ipbuf, port, got_rcv,
+                     got_snd);
+    else
+        RTC_LOG_INFO("Transport: initialized (rcvbuf=%d sndbuf=%d)", got_rcv, got_snd);
     return RTC_OK;
 }
 
