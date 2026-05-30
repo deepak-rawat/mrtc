@@ -129,9 +129,9 @@ static void *transport_thread_fn(void *arg) {
     uint8_t buf[RTC_TRANSPORT_BUF_SIZE];
 
     while (t->running) {
-        rtc_mutex_lock(&t->mutex);
+        rtc_mutex_lock(&t->timer_mutex);
         int timeout = timer_next_timeout_ms(t->timers, RTC_TRANSPORT_MAX_TIMERS);
-        rtc_mutex_unlock(&t->mutex);
+        rtc_mutex_unlock(&t->timer_mutex);
 
         int n = rtc_poller_wait(&t->poller, timeout);
 
@@ -156,7 +156,8 @@ static void *transport_thread_fn(void *arg) {
                  * jumbo frames. Real WebRTC traffic never reaches this. */
                 if ((size_t)len == sizeof(buf))
                     RTC_LOG_WARN("Transport: recvfrom filled buffer (%zd bytes) — "
-                                 "possible packet truncation", len);
+                                 "possible packet truncation",
+                                 len);
 
                 rtc_addr_t from;
                 memcpy(&from.addr, &from_store, fromlen);
@@ -172,7 +173,7 @@ static void *transport_thread_fn(void *arg) {
                 atomic_fetch_add_explicit(&t->recv_drain_full, 1, memory_order_relaxed);
         }
 
-        timer_fire_expired(t->timers, RTC_TRANSPORT_MAX_TIMERS, &t->mutex);
+        timer_fire_expired(t->timers, RTC_TRANSPORT_MAX_TIMERS, &t->timer_mutex);
     }
 
     return NULL;
@@ -251,7 +252,7 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
     }
 
     /* Init synchronization */
-    rtc_mutex_init(&t->mutex);
+    rtc_mutex_init(&t->timer_mutex);
 
     /* Wire up callback before the thread starts so no packet is missed. */
     t->on_recv = on_recv;
@@ -267,15 +268,14 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
         atomic_store_explicit(&t->sock, RTC_INVALID_SOCKET, memory_order_relaxed);
         rtc_poller_close(&t->poller);
         rtc_close_socket(s);
-        rtc_mutex_destroy(&t->mutex);
+        rtc_mutex_destroy(&t->timer_mutex);
         return rc;
     }
 
     char ipbuf[64];
     uint16_t port = 0;
     if (rtc_addr_to_string(&t->local_addr, ipbuf, sizeof(ipbuf), &port) == RTC_OK)
-        RTC_LOG_INFO("Transport: bound %s:%u (rcvbuf=%d sndbuf=%d)", ipbuf, port, got_rcv,
-                     got_snd);
+        RTC_LOG_INFO("Transport: bound %s:%u (rcvbuf=%d sndbuf=%d)", ipbuf, port, got_rcv, got_snd);
     else
         RTC_LOG_INFO("Transport: initialized (rcvbuf=%d sndbuf=%d)", got_rcv, got_snd);
     return RTC_OK;
@@ -292,8 +292,8 @@ int rtc_transport_send(rtc_transport_t *t, const uint8_t *data, size_t len,
         return RTC_ERR_SOCKET;
     }
 
-    ssize_t sent = sendto(s, (const char *)data, (int)len, 0,
-                          (const struct sockaddr *)&dest->addr, dest->len);
+    ssize_t sent =
+        sendto(s, (const char *)data, (int)len, 0, (const struct sockaddr *)&dest->addr, dest->len);
     if (sent > 0) {
         atomic_fetch_add_explicit(&t->pkts_sent, 1, memory_order_relaxed);
         atomic_fetch_add_explicit(&t->bytes_sent, (uint64_t)sent, memory_order_relaxed);
@@ -320,7 +320,7 @@ void rtc_transport_set_remote(rtc_transport_t *t, const rtc_addr_t *addr) {
 
 rtc_timer_id_t rtc_transport_add_timer(rtc_transport_t *t, uint64_t deadline_ms, rtc_timer_fn fn,
                                        void *user) {
-    rtc_timer_id_t id = timer_add(t->timers, RTC_TRANSPORT_MAX_TIMERS, &t->mutex,
+    rtc_timer_id_t id = timer_add(t->timers, RTC_TRANSPORT_MAX_TIMERS, &t->timer_mutex,
                                   &t->timer_slot_hwm, deadline_ms, fn, user);
     if (id < 0)
         RTC_LOG_WARN("Transport: no free timer slots (max=%d) — caller will"
@@ -330,7 +330,7 @@ rtc_timer_id_t rtc_transport_add_timer(rtc_transport_t *t, uint64_t deadline_ms,
 }
 
 void rtc_transport_cancel_timer(rtc_transport_t *t, rtc_timer_id_t id) {
-    timer_cancel(t->timers, RTC_TRANSPORT_MAX_TIMERS, &t->mutex, id);
+    timer_cancel(t->timers, RTC_TRANSPORT_MAX_TIMERS, &t->timer_mutex, id);
 }
 
 rtc_socket_t rtc_transport_get_socket(const rtc_transport_t *t) {
@@ -369,7 +369,7 @@ void rtc_transport_close(rtc_transport_t *t) {
     if (s != RTC_INVALID_SOCKET)
         rtc_close_socket(s);
 
-    rtc_mutex_destroy(&t->mutex);
+    rtc_mutex_destroy(&t->timer_mutex);
 
     RTC_LOG_INFO("Transport: closed (timer slot hwm=%d/%d)", t->timer_slot_hwm,
                  RTC_TRANSPORT_MAX_TIMERS);

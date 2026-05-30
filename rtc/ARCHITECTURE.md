@@ -284,7 +284,9 @@ struct rtc_peer_connection {
 - Peer connection uses C11 `_Atomic` state flags for cross-thread observation
   (plain reads/writes are seq_cst, giving acquire/release publication of any
   protocol state written before the state transition).
-- Transport mutex protects timer queue + callback registration
+- Transport `timer_mutex` protects the timer slot table; callback
+  registration is set-once at init (no lock needed) and remote-address
+  publication uses an atomic release/acquire flag.
 
 ## Tests
 
