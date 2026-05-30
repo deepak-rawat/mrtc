@@ -42,7 +42,9 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
     /* Update RTCP sender stats */
     rtc_rtcp_stats_on_rtp_send(&sender->rtcp_stats, pkt.header.timestamp, len);
 
-    /* SRTP protect (sender SRTP ctx only touched from main thread) */
+    /* SRTP protect. The sender's SRTP context is also touched by the
+     * transport thread (RTCP SR/RR + TWCC feedback timers), so this call
+     * relies on the per-context mutex inside rtc_srtp_protect. */
     size_t pkt_len = pkt.buf_len;
     rc = rtc_srtp_protect(sender->srtp, pkt.buf, &pkt_len, sizeof(pkt.buf));
     if (rc != RTC_OK)

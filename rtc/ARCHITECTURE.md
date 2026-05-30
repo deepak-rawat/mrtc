@@ -163,6 +163,15 @@ AES-128-CM encryption with HMAC-SHA1-80 authentication (RFC 3711).
 - Per-packet: derive session key via PRF, encrypt payload, append auth tag
 - Rollover counter (ROC) tracks sequence number wrap-around
 
+**Thread safety.** `rtc_srtp_protect` / `rtc_srtp_unprotect` /
+`rtc_srtp_protect_rtcp` / `rtc_srtp_unprotect_rtcp` serialize on a per-context
+mutex (`rtc_srtp_ctx_t::lock`). The send-side context is touched by both the
+encoder thread (RTP send) and the transport thread (RTCP SR/RR + TWCC
+feedback timers, NACK retransmits); concurrent updates of `roc` / `last_seq`
+/ `srtcp_index` would otherwise reuse the AES-CM keystream, which breaks
+confidentiality. `init` and `close` are not thread-safe and must not race
+with protect/unprotect calls.
+
 Key functions: `rtc_srtp_init()`, `rtc_srtp_protect()`, `rtc_srtp_unprotect()`
 
 ### RTP / RTCP (`rtc_rtp.h/c`, `rtc_rtcp.h/c`, `rtc_rtp_ext.h/c`)

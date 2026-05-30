@@ -184,6 +184,12 @@ int rtc_srtp_init(rtc_srtp_ctx_t *ctx, const uint8_t *master_key, size_t key_len
                   const uint8_t *master_salt, size_t salt_len) {
     memset(ctx, 0, sizeof(*ctx));
 
+    /* Init the per-context lock before any field that protect/unprotect
+     * touches. Failure here is fatal — without the lock the context is
+     * unsafe to use from multiple threads, which is the documented contract. */
+    if (rtc_mutex_init(&ctx->lock) != RTC_OK)
+        return RTC_ERR_GENERIC;
+
     if (key_len > SRTP_MAX_KEY_LEN)
         key_len = SRTP_MAX_KEY_LEN;
     if (salt_len > SRTP_MAX_SALT_LEN)
@@ -290,6 +296,8 @@ int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_
     if (*len > buf_cap || buf_cap - *len < SRTP_AUTH_TAG_LEN)
         return RTC_ERR_NOMEM;
 
+    rtc_mutex_lock(&ctx->lock);
+
     /* Parse RTP header for SSRC and sequence number */
     uint16_t seq = ((uint16_t)buf[2] << 8) | buf[3];
     uint32_t ssrc =
@@ -308,19 +316,25 @@ int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_
     uint8_t cc = buf[0] & 0x0F;
     hdr_len += (size_t)cc * 4;
     if (buf[0] & 0x10) { /* extension bit */
-        if (hdr_len + 4 > *len)
+        if (hdr_len + 4 > *len) {
+            rtc_mutex_unlock(&ctx->lock);
             return RTC_ERR_INVALID;
+        }
         uint16_t ext_len = ((uint16_t)buf[hdr_len + 2] << 8) | buf[hdr_len + 3];
         hdr_len += 4 + (size_t)ext_len * 4;
     }
-    if (hdr_len > *len)
+    if (hdr_len > *len) {
+        rtc_mutex_unlock(&ctx->lock);
         return RTC_ERR_INVALID;
+    }
 
     /* Encrypt payload (not header) */
     int rc = srtp_aes_cm(ctx->session_key, ctx->session_salt, ssrc, ctx->roc, seq, buf + hdr_len,
                          *len - hdr_len);
-    if (rc != RTC_OK)
+    if (rc != RTC_OK) {
+        rtc_mutex_unlock(&ctx->lock);
         return rc;
+    }
 
     /* Compute authentication tag: HMAC-SHA1 over (header + encrypted payload + ROC) */
     uint8_t roc_buf[4];
@@ -331,13 +345,16 @@ int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_
 
     uint8_t hmac[20];
     rc = srtp_hmac_sha1(ctx->session_auth_key, 20, buf, *len, roc_buf, 4, hmac, sizeof(hmac));
-    if (rc != RTC_OK)
+    if (rc != RTC_OK) {
+        rtc_mutex_unlock(&ctx->lock);
         return rc;
+    }
 
     /* Append truncated (80-bit / 10 byte) tag */
     memcpy(buf + *len, hmac, SRTP_AUTH_TAG_LEN);
     *len += SRTP_AUTH_TAG_LEN;
 
+    rtc_mutex_unlock(&ctx->lock);
     return RTC_OK;
 }
 
@@ -346,6 +363,8 @@ int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
         return RTC_ERR_SRTP;
     if (*len < 12 + SRTP_AUTH_TAG_LEN)
         return RTC_ERR_INVALID;
+
+    rtc_mutex_lock(&ctx->lock);
 
     size_t srtp_len = *len - SRTP_AUTH_TAG_LEN;
     uint8_t *tag = buf + srtp_len;
@@ -370,10 +389,13 @@ int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     uint8_t hmac[20];
     int hrc =
         srtp_hmac_sha1(ctx->session_auth_key, 20, buf, srtp_len, roc_buf, 4, hmac, sizeof(hmac));
-    if (hrc != RTC_OK)
+    if (hrc != RTC_OK) {
+        rtc_mutex_unlock(&ctx->lock);
         return hrc;
+    }
 
     if (memcmp(hmac, tag, SRTP_AUTH_TAG_LEN) != 0) {
+        rtc_mutex_unlock(&ctx->lock);
         RTC_LOG_ERR("SRTP: authentication failed");
         return RTC_ERR_SRTP;
     }
@@ -385,27 +407,35 @@ int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     rtc_srtp_replay_t *replay =
         srtp_replay_for_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS, &ctx->replay_lru_tick, ssrc);
     int replay_rc = srtp_replay_check(replay, pkt_index);
-    if (replay_rc != RTC_OK)
+    if (replay_rc != RTC_OK) {
+        rtc_mutex_unlock(&ctx->lock);
         return replay_rc;
+    }
 
     /* Determine header length */
     size_t hdr_len = 12;
     uint8_t cc = buf[0] & 0x0F;
     hdr_len += (size_t)cc * 4;
     if (buf[0] & 0x10) {
-        if (hdr_len + 4 > srtp_len)
+        if (hdr_len + 4 > srtp_len) {
+            rtc_mutex_unlock(&ctx->lock);
             return RTC_ERR_INVALID;
+        }
         uint16_t ext_len = ((uint16_t)buf[hdr_len + 2] << 8) | buf[hdr_len + 3];
         hdr_len += 4 + (size_t)ext_len * 4;
     }
-    if (hdr_len > srtp_len)
+    if (hdr_len > srtp_len) {
+        rtc_mutex_unlock(&ctx->lock);
         return RTC_ERR_INVALID;
+    }
 
     /* Decrypt payload */
     int rc = srtp_aes_cm(ctx->session_key, ctx->session_salt, ssrc, roc, seq, buf + hdr_len,
                          srtp_len - hdr_len);
-    if (rc != RTC_OK)
+    if (rc != RTC_OK) {
+        rtc_mutex_unlock(&ctx->lock);
         return rc;
+    }
 
     /* Update state */
     if (seq > ctx->last_seq || (ctx->last_seq - seq) > 0x8000) {
@@ -414,6 +444,7 @@ int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     }
 
     *len = srtp_len;
+    rtc_mutex_unlock(&ctx->lock);
     return RTC_OK;
 }
 
@@ -469,6 +500,8 @@ int rtc_srtp_protect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t
     if (*len > buf_cap || buf_cap - *len < 4 + SRTP_AUTH_TAG_LEN)
         return RTC_ERR_NOMEM;
 
+    rtc_mutex_lock(&ctx->lock);
+
     /* Parse SSRC from byte 4..7 of RTCP packet */
     uint32_t ssrc =
         ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) | ((uint32_t)buf[6] << 8) | buf[7];
@@ -479,8 +512,10 @@ int rtc_srtp_protect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t
     if (*len > 8) {
         int rc = srtcp_aes_cm(ctx->rtcp_session_key, ctx->rtcp_session_salt, ssrc, index, buf + 8,
                               *len - 8);
-        if (rc != RTC_OK)
+        if (rc != RTC_OK) {
+            rtc_mutex_unlock(&ctx->lock);
             return rc;
+        }
     }
 
     /* Append 4-byte SRTCP index with E-flag (bit 31 = 1 means encrypted) */
@@ -496,14 +531,17 @@ int rtc_srtp_protect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t
     uint8_t hmac[20];
     int rc =
         srtp_hmac_sha1(ctx->rtcp_session_auth_key, 20, buf, auth_len, NULL, 0, hmac, sizeof(hmac));
-    if (rc != RTC_OK)
+    if (rc != RTC_OK) {
+        rtc_mutex_unlock(&ctx->lock);
         return rc;
+    }
 
     /* Append truncated 80-bit auth tag */
     memcpy(buf + auth_len, hmac, SRTP_AUTH_TAG_LEN);
     *len = auth_len + SRTP_AUTH_TAG_LEN;
 
     ctx->srtcp_index++;
+    rtc_mutex_unlock(&ctx->lock);
     return RTC_OK;
 }
 
@@ -513,6 +551,8 @@ int rtc_srtp_unprotect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     /* Minimum: 8 (header+SSRC) + 4 (SRTCP index) + 10 (auth tag) */
     if (*len < 8 + 4 + SRTP_AUTH_TAG_LEN)
         return RTC_ERR_INVALID;
+
+    rtc_mutex_lock(&ctx->lock);
 
     size_t total = *len;
     size_t auth_start = total - SRTP_AUTH_TAG_LEN;
@@ -530,10 +570,13 @@ int rtc_srtp_unprotect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     uint8_t hmac[20];
     int rc = srtp_hmac_sha1(ctx->rtcp_session_auth_key, 20, buf, auth_input_len, NULL, 0, hmac,
                             sizeof(hmac));
-    if (rc != RTC_OK)
+    if (rc != RTC_OK) {
+        rtc_mutex_unlock(&ctx->lock);
         return rc;
+    }
 
     if (memcmp(hmac, tag, SRTP_AUTH_TAG_LEN) != 0) {
+        rtc_mutex_unlock(&ctx->lock);
         RTC_LOG_ERR("SRTCP: authentication failed");
         return RTC_ERR_SRTP;
     }
@@ -545,8 +588,10 @@ int rtc_srtp_unprotect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     rtc_srtp_replay_t *replay = srtp_replay_for_ssrc(ctx->rtcp_replay, SRTP_REPLAY_MAX_STREAMS,
                                                      &ctx->replay_lru_tick, sender_ssrc);
     int replay_rc = srtp_replay_check(replay, (uint64_t)index);
-    if (replay_rc != RTC_OK)
+    if (replay_rc != RTC_OK) {
+        rtc_mutex_unlock(&ctx->lock);
         return replay_rc;
+    }
 
     /* The plaintext RTCP packet length is everything before the SRTCP index */
     size_t rtcp_len = idx_start;
@@ -557,14 +602,21 @@ int rtc_srtp_unprotect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
             ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) | ((uint32_t)buf[6] << 8) | buf[7];
         rc = srtcp_aes_cm(ctx->rtcp_session_key, ctx->rtcp_session_salt, ssrc, index, buf + 8,
                           rtcp_len - 8);
-        if (rc != RTC_OK)
+        if (rc != RTC_OK) {
+            rtc_mutex_unlock(&ctx->lock);
             return rc;
+        }
     }
 
     *len = rtcp_len;
+    rtc_mutex_unlock(&ctx->lock);
     return RTC_OK;
 }
 
 void rtc_srtp_close(rtc_srtp_ctx_t *ctx) {
+    /* Destroy lock only if init ran (otherwise the field is zeroed memory,
+     * which is UB to DeleteCriticalSection on Windows). */
+    if (ctx->initialized)
+        rtc_mutex_destroy(&ctx->lock);
     memset(ctx, 0, sizeof(*ctx));
 }

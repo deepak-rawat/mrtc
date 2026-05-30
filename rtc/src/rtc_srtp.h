@@ -47,7 +47,17 @@ typedef struct {
     rtc_srtp_replay_t replay;
 } rtc_srtp_replay_entry_t;
 
+/* Thread safety: rtc_srtp_protect / rtc_srtp_unprotect / rtc_srtp_protect_rtcp
+ * / rtc_srtp_unprotect_rtcp may be called concurrently from any thread; the
+ * context serializes them internally with `lock`. Required because the
+ * encoder thread (RTP send) and transport thread (RTCP SR/RR/TWCC timers,
+ * NACK retransmit) share the same sender context, and concurrent updates of
+ * `roc`/`last_seq`/`srtcp_index` would otherwise cause IV reuse — fatal for
+ * AES-CM. Init / close are not thread-safe and must not race with anything. */
 typedef struct {
+    /* Serializes the four protect/unprotect entry points. */
+    rtc_mutex_t lock;
+
     /* Master key + salt (from DTLS export) */
     uint8_t master_key[SRTP_MAX_KEY_LEN];
     uint8_t master_salt[SRTP_MAX_SALT_LEN];
