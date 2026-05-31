@@ -24,6 +24,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* ------------------------------------------------------------------ */
 /*  Address-family normalization (dual-stack helpers)                  */
@@ -210,6 +211,36 @@ static void timer_cancel(rtc_timer_t *timers, int max, rtc_mutex_t *mutex, rtc_t
 #  define RTC_TRANSPORT_HAS_PKTINFO 0
 #endif
 
+/* Linux-only: recvmmsg drains up to RECV_BATCH packets in a single
+ * syscall. The per-packet PKTINFO and SO_RXQ_OVFL cmsgs are still
+ * parsed individually. Other POSIX (macOS, BSD) lack recvmmsg and fall
+ * through to the per-packet recvmsg path.
+ *
+ * TODO-perf (sendmmsg): batches outbound packets in one syscall. Only
+ * useful with a sender queue (NACK retransmits, pacer). Today every
+ * caller sends one packet at a time, so it would be no-ops.
+ *
+ * TODO-perf (UDP_SEGMENT / GSO): kernel-side fragmentation for SFU /
+ * TURN workloads. Compile behind MRTC_ENABLE_UDP_GSO when we add an SFU
+ * build target. */
+#ifdef __linux__
+#  define RTC_TRANSPORT_HAS_RECVMMSG 1
+#else
+#  define RTC_TRANSPORT_HAS_RECVMMSG 0
+#endif
+
+#if RTC_TRANSPORT_HAS_RECVMMSG
+/* Per-slot scratch for recvmmsg: data, source, cmsg buffer all live
+ * contiguously per slot for cache friendliness. */
+typedef struct {
+    uint8_t data[RTC_TRANSPORT_BUF_SIZE];
+    struct sockaddr_storage from;
+    uint8_t cbuf[CMSG_SPACE(sizeof(struct in6_pktinfo)) + CMSG_SPACE(sizeof(uint32_t))];
+    struct iovec iov;
+    struct mmsghdr mh;
+} mmsg_slot_t;
+#endif
+
 #if RTC_TRANSPORT_HAS_PKTINFO
 /* Drain one packet via recvmsg; on success, write the local-iface address
  * into *local_out (true means cmsg present, IPv4-mapped form for v4).
@@ -308,6 +339,71 @@ static void *transport_thread_fn(void *arg) {
         for (int e = 0; e < n; e++) {
             if (evs[e].fd != s || !(evs[e].events & RTC_POLLER_EV_READ))
                 continue;
+#if RTC_TRANSPORT_HAS_RECVMMSG
+            /* Linux fast path: drain a burst in one syscall. The slot
+             * arena is heap-allocated (16 * 9216 byte data buffers).
+             * Falls through to per-packet recvmsg below only if this
+             * branch is compiled out (non-Linux). */
+            {
+                mmsg_slot_t *slots = (mmsg_slot_t *)t->recv_batch_arena;
+                struct mmsghdr hdrs[RTC_TRANSPORT_RECV_BATCH];
+                for (int i = 0; i < RTC_TRANSPORT_RECV_BATCH; i++) {
+                    slots[i].iov.iov_base = slots[i].data;
+                    slots[i].iov.iov_len = sizeof(slots[i].data);
+                    memset(&hdrs[i], 0, sizeof(hdrs[i]));
+                    hdrs[i].msg_hdr.msg_name = &slots[i].from;
+                    hdrs[i].msg_hdr.msg_namelen = sizeof(slots[i].from);
+                    hdrs[i].msg_hdr.msg_iov = &slots[i].iov;
+                    hdrs[i].msg_hdr.msg_iovlen = 1;
+                    hdrs[i].msg_hdr.msg_control = slots[i].cbuf;
+                    hdrs[i].msg_hdr.msg_controllen = sizeof(slots[i].cbuf);
+                }
+                int nrecv = recvmmsg(s, hdrs, RTC_TRANSPORT_RECV_BATCH, MSG_DONTWAIT, NULL);
+                if (nrecv > 0) {
+                    for (int i = 0; i < nrecv; i++) {
+                        size_t plen = hdrs[i].msg_len;
+                        atomic_fetch_add_explicit(&t->pkts_recv, 1, memory_order_relaxed);
+                        atomic_fetch_add_explicit(&t->bytes_recv, (uint64_t)plen,
+                                                  memory_order_relaxed);
+                        if (plen == sizeof(slots[i].data))
+                            RTC_LOG_WARN("Transport: recvmmsg slot filled (%zu bytes); "
+                                         "possible packet truncation",
+                                         plen);
+
+                        struct msghdr *mh = &hdrs[i].msg_hdr;
+                        for (struct cmsghdr *c = CMSG_FIRSTHDR(mh); c; c = CMSG_NXTHDR(mh, c)) {
+                            if (c->cmsg_level == IPPROTO_IPV6 && c->cmsg_type == IPV6_PKTINFO) {
+                                const struct in6_pktinfo *pi =
+                                    (const struct in6_pktinfo *)CMSG_DATA(c);
+                                memcpy(&t->last_local_v6, &pi->ipi6_addr, sizeof(pi->ipi6_addr));
+                                atomic_store_explicit(&t->last_local_valid, true,
+                                                      memory_order_release);
+                            }
+#  ifdef SO_RXQ_OVFL
+                            else if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SO_RXQ_OVFL) {
+                                uint32_t v;
+                                memcpy(&v, CMSG_DATA(c), sizeof(v));
+                                atomic_store_explicit(&t->recv_kernel_drops, (uint64_t)v,
+                                                      memory_order_relaxed);
+                            }
+#  endif
+                        }
+
+                        rtc_addr_t from;
+                        memcpy(&from.addr, &slots[i].from, hdrs[i].msg_hdr.msg_namelen);
+                        from.len = hdrs[i].msg_hdr.msg_namelen;
+                        addr_unmap_v4(&from);
+
+                        rtc_pkt_type_t type = transport_classify(slots[i].data, plen);
+                        if (t->on_recv)
+                            t->on_recv(type, slots[i].data, plen, &from, t->recv_user);
+                    }
+                    if (nrecv == RTC_TRANSPORT_RECV_BATCH)
+                        atomic_fetch_add_explicit(&t->recv_drain_full, 1, memory_order_relaxed);
+                }
+                continue; /* burst processed; skip per-packet path below */
+            }
+#endif
             int drained = 0;
             for (int i = 0; i < RTC_TRANSPORT_RECV_BATCH; i++) {
                 struct sockaddr_storage from_store;
@@ -531,6 +627,18 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
     /* Init synchronization */
     rtc_mutex_init(&t->timer_mutex);
 
+#if RTC_TRANSPORT_HAS_RECVMMSG
+    /* Heap arena for the recvmmsg batch: too big for the thread stack
+     * (16 * 9216 ≈ 144KB). One allocation for the transport's lifetime. */
+    t->recv_batch_arena = calloc(RTC_TRANSPORT_RECV_BATCH, sizeof(mmsg_slot_t));
+    if (!t->recv_batch_arena) {
+        rtc_mutex_destroy(&t->timer_mutex);
+        rtc_poller_close(&t->poller);
+        rtc_close_socket(s);
+        return RTC_ERR_NOMEM;
+    }
+#endif
+
     /* Wire up callback before the thread starts so no packet is missed. */
     t->on_recv = on_recv;
     t->recv_user = user;
@@ -546,6 +654,10 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
         rtc_poller_close(&t->poller);
         rtc_close_socket(s);
         rtc_mutex_destroy(&t->timer_mutex);
+#if RTC_TRANSPORT_HAS_RECVMMSG
+        free(t->recv_batch_arena);
+        t->recv_batch_arena = NULL;
+#endif
         return rc;
     }
 
@@ -742,6 +854,11 @@ void rtc_transport_close(rtc_transport_t *t) {
         rtc_close_socket(s);
 
     rtc_mutex_destroy(&t->timer_mutex);
+
+#if RTC_TRANSPORT_HAS_RECVMMSG
+    free(t->recv_batch_arena);
+    t->recv_batch_arena = NULL;
+#endif
 
     RTC_LOG_INFO("Transport: closed (timer slot hwm=%d/%d)", t->timer_slot_hwm,
                  RTC_TRANSPORT_MAX_TIMERS);

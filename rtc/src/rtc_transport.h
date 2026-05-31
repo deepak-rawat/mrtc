@@ -144,6 +144,11 @@ typedef struct rtc_transport {
      * meaningful at all. */
     uint8_t last_local_v6[16];
     _Atomic bool last_local_valid;
+
+    /* Linux recvmmsg batch arena. Allocated in init, freed in close.
+     * Sized for RTC_TRANSPORT_RECV_BATCH packets at full BUF_SIZE so a
+     * single syscall can pull a whole burst. NULL on non-Linux. */
+    void *recv_batch_arena;
 } rtc_transport_t;
 
 /* Snapshot of transport counters. */

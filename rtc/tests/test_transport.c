@@ -416,8 +416,8 @@ TEST(transport_v4_sender_seen_as_v4) {
     pkt[5] = 0x12;
     pkt[6] = 0xA4;
     pkt[7] = 0x42; /* STUN magic cookie */
-    int sent = sendto(sender, (const char *)pkt, sizeof(pkt), 0, (struct sockaddr *)&dst,
-                      sizeof(dst));
+    int sent =
+        sendto(sender, (const char *)pkt, sizeof(pkt), 0, (struct sockaddr *)&dst, sizeof(dst));
     ASSERT_EQ(sent, (int)sizeof(pkt));
 
     bool got = wait_for_recv(1, 2000);
@@ -463,8 +463,8 @@ TEST(transport_v6_sender_seen_as_v6) {
     pkt[5] = 0x12;
     pkt[6] = 0xA4;
     pkt[7] = 0x42;
-    int sent = sendto(sender, (const char *)pkt, sizeof(pkt), 0, (struct sockaddr *)&dst,
-                      sizeof(dst));
+    int sent =
+        sendto(sender, (const char *)pkt, sizeof(pkt), 0, (struct sockaddr *)&dst, sizeof(dst));
     if (sent < 0) {
         /* IPv6 loopback may not be available (rare). Skip. */
         printf("    skipped (v6 loopback unreachable)\n");
@@ -578,6 +578,59 @@ TEST(transport_send_after_close_returns_error) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Phase 4: high-rate recv burst exercises the drain path             */
+/*           (recvmmsg batch on Linux, per-packet elsewhere)           */
+/* ------------------------------------------------------------------ */
+
+TEST(transport_recv_burst) {
+    /* Send a burst of packets back-to-back from a separate sender
+     * socket and verify they're all received. This stresses the drain
+     * loop's batching behavior on Linux (recvmmsg) and the per-packet
+     * recvmsg / recvfrom path elsewhere. A few may be dropped under
+     * extreme bursts on slow hosts (kernel buffer); we accept >= 90%. */
+    rtc_transport_t t;
+    g_recv_count = 0;
+    int rc = rtc_transport_init(&t, test_recv_callback, NULL);
+    ASSERT_EQ(rc, RTC_OK);
+
+    rtc_addr_t self;
+    get_loopback_addr(&t, &self);
+
+    rtc_socket_t sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ASSERT(sender != RTC_INVALID_SOCKET);
+
+    const int N = 64;
+    uint8_t pkt[64];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x80; /* RTP-ish */
+    pkt[1] = 96;
+    for (int i = 0; i < N; i++) {
+        int sent = sendto(sender, (const char *)pkt, sizeof(pkt), 0,
+                          (const struct sockaddr *)&self.addr, self.len);
+        ASSERT_EQ(sent, (int)sizeof(pkt));
+    }
+
+    /* Wait up to 2s for at least 90% to arrive. */
+    int target = (N * 9) / 10;
+    bool got = wait_for_recv(target, 2000);
+    ASSERT(got);
+
+    rtc_transport_stats_t st;
+    rtc_transport_get_stats(&t, &st);
+    printf("    burst N=%d: pkts_recv=%llu drain_full=%llu kdrops=%llu\n", N,
+           (unsigned long long)st.pkts_recv, (unsigned long long)st.recv_drain_full,
+           (unsigned long long)st.recv_kernel_drops);
+
+    rtc_close_socket(sender);
+    rtc_transport_close(&t);
+}
+
+/* TODO-test (Linux only): assert recv_drain_full ticks up specifically
+ * via the recvmmsg path. Requires controlled bursts >= RECV_BATCH and
+ * a way to distinguish the batch vs. per-packet path at the API level.
+ * The current test exercises whichever path is compiled in. */
+
+/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Transport Layer Tests\n");
@@ -601,6 +654,7 @@ int main(void) {
     RUN_TEST(transport_socket_leak_regression);
     RUN_TEST(transport_stats_counters);
     RUN_TEST(transport_send_after_close_returns_error);
+    RUN_TEST(transport_recv_burst);
 
     rtc_cond_destroy(&g_cond);
     rtc_mutex_destroy(&g_mutex);
