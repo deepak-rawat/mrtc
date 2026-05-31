@@ -491,6 +491,93 @@ TEST(transport_v6_sender_seen_as_v6) {
  * exercised on a single-interface CI runner. */
 
 /* ------------------------------------------------------------------ */
+/*  Phase 3: production hardening (stats, EAGAIN, socket-leak)         */
+/* ------------------------------------------------------------------ */
+
+TEST(transport_socket_leak_regression) {
+    /* Open/close many transports in sequence. If init or close leaks a
+     * file descriptor (or fails to drain wake/poller resources), this
+     * eventually exhausts process limits and the loop fails. 200 cycles
+     * is well below the Windows ~512-socket default and the Linux 1024
+     * default — any cycle failing means a leak. */
+    const int N = 200;
+    for (int i = 0; i < N; i++) {
+        rtc_transport_t t;
+        int rc = rtc_transport_init(&t, NULL, NULL);
+        if (rc != RTC_OK) {
+            printf("    leak detected: init failed at iter %d (rc=%d)\n", i, rc);
+            ASSERT_EQ(rc, RTC_OK);
+        }
+        rtc_transport_close(&t);
+    }
+    printf("    %d open/close cycles OK (no fd leak)\n", N);
+}
+
+TEST(transport_stats_counters) {
+    rtc_transport_t t;
+    g_recv_count = 0;
+    int rc = rtc_transport_init(&t, test_recv_callback, NULL);
+    ASSERT_EQ(rc, RTC_OK);
+
+    /* Send a packet to ourselves. */
+    rtc_addr_t self;
+    get_loopback_addr(&t, &self);
+    uint8_t pkt[20];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[4] = 0x21;
+    pkt[5] = 0x12;
+    pkt[6] = 0xA4;
+    pkt[7] = 0x42;
+    rc = rtc_transport_send(&t, pkt, sizeof(pkt), &self);
+    ASSERT_EQ(rc, RTC_OK);
+
+    bool got = wait_for_recv(1, 2000);
+    ASSERT(got);
+
+    rtc_transport_stats_t st;
+    rtc_transport_get_stats(&t, &st);
+    ASSERT(st.pkts_sent >= 1);
+    ASSERT(st.bytes_sent >= sizeof(pkt));
+    ASSERT(st.pkts_recv >= 1);
+    ASSERT(st.bytes_recv >= sizeof(pkt));
+    ASSERT_EQ((int)st.send_errors, 0);
+    ASSERT_EQ((int)st.send_would_block, 0);
+    printf("    stats: sent=%llu/%llub recv=%llu/%llub err=%llu wb=%llu kdrops=%llu\n",
+           (unsigned long long)st.pkts_sent, (unsigned long long)st.bytes_sent,
+           (unsigned long long)st.pkts_recv, (unsigned long long)st.bytes_recv,
+           (unsigned long long)st.send_errors, (unsigned long long)st.send_would_block,
+           (unsigned long long)st.recv_kernel_drops);
+
+    rtc_transport_close(&t);
+}
+
+TEST(transport_send_after_close_returns_error) {
+    /* The C2 fd-atomic guard should turn a send-after-close into a
+     * clean RTC_ERR_SOCKET, not UB / crash. */
+    rtc_transport_t t;
+    int rc = rtc_transport_init(&t, NULL, NULL);
+    ASSERT_EQ(rc, RTC_OK);
+
+    rtc_addr_t self;
+    get_loopback_addr(&t, &self);
+
+    rtc_transport_close(&t);
+
+    uint8_t pkt[16] = {0};
+    pkt[4] = 0x21;
+    pkt[5] = 0x12;
+    pkt[6] = 0xA4;
+    pkt[7] = 0x42;
+    rc = rtc_transport_send(&t, pkt, sizeof(pkt), &self);
+    ASSERT_EQ(rc, RTC_ERR_SOCKET);
+
+    rtc_transport_stats_t st;
+    rtc_transport_get_stats(&t, &st);
+    ASSERT_EQ((int)st.send_errors, 1);
+    printf("    send-after-close cleanly returned RTC_ERR_SOCKET\n");
+}
+
+/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Transport Layer Tests\n");
@@ -511,6 +598,9 @@ int main(void) {
     RUN_TEST(transport_v6_dualstack_socket);
     RUN_TEST(transport_v4_sender_seen_as_v4);
     RUN_TEST(transport_v6_sender_seen_as_v6);
+    RUN_TEST(transport_socket_leak_regression);
+    RUN_TEST(transport_stats_counters);
+    RUN_TEST(transport_send_after_close_returns_error);
 
     rtc_cond_destroy(&g_cond);
     rtc_mutex_destroy(&g_mutex);

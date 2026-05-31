@@ -212,16 +212,19 @@ static void timer_cancel(rtc_timer_t *timers, int max, rtc_mutex_t *mutex, rtc_t
 
 #if RTC_TRANSPORT_HAS_PKTINFO
 /* Drain one packet via recvmsg; on success, write the local-iface address
- * into *local_out (true means cmsg present, IPv4-mapped form for v4). */
+ * into *local_out (true means cmsg present, IPv4-mapped form for v4).
+ * Also surfaces SO_RXQ_OVFL on Linux as *kdrops_out (kernel drop count
+ * since the last cmsg; 0 elsewhere). */
 static ssize_t recv_one_with_pktinfo(rtc_socket_t s, uint8_t *buf, size_t buflen,
                                      struct sockaddr_storage *from, socklen_t *fromlen,
-                                     struct in6_addr *local_out, bool *local_valid_out) {
+                                     struct in6_addr *local_out, bool *local_valid_out,
+                                     uint32_t *kdrops_out) {
     struct iovec iov;
     iov.iov_base = buf;
     iov.iov_len = buflen;
 
-    /* Enough for one IPV6_PKTINFO cmsg with alignment slack. */
-    uint8_t cbuf[CMSG_SPACE(sizeof(struct in6_pktinfo))];
+    /* Enough for one IPV6_PKTINFO and one SO_RXQ_OVFL cmsg with slack. */
+    uint8_t cbuf[CMSG_SPACE(sizeof(struct in6_pktinfo)) + CMSG_SPACE(sizeof(uint32_t))];
 
     struct msghdr mh;
     memset(&mh, 0, sizeof(mh));
@@ -238,17 +241,55 @@ static ssize_t recv_one_with_pktinfo(rtc_socket_t s, uint8_t *buf, size_t buflen
 
     *fromlen = mh.msg_namelen;
     *local_valid_out = false;
+    *kdrops_out = 0;
 
     for (struct cmsghdr *c = CMSG_FIRSTHDR(&mh); c; c = CMSG_NXTHDR(&mh, c)) {
         if (c->cmsg_level == IPPROTO_IPV6 && c->cmsg_type == IPV6_PKTINFO) {
             const struct in6_pktinfo *pi = (const struct in6_pktinfo *)CMSG_DATA(c);
             *local_out = pi->ipi6_addr;
             *local_valid_out = true;
-            break;
         }
+#  ifdef SO_RXQ_OVFL
+        else if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SO_RXQ_OVFL) {
+            uint32_t v;
+            memcpy(&v, CMSG_DATA(c), sizeof(v));
+            *kdrops_out = v;
+        }
+#  endif
     }
     return n;
 }
+
+/* Drain ICMP errors from MSG_ERRQUEUE so they don't pile up and cause
+ * the next sendto to return ECONNREFUSED. Called opportunistically. */
+#  ifdef __linux__
+static void drain_err_queue(rtc_socket_t s) {
+    for (;;) {
+        uint8_t buf[256];
+        uint8_t cbuf[256];
+        struct sockaddr_storage from;
+        struct iovec iov = {.iov_base = buf, .iov_len = sizeof(buf)};
+        struct msghdr mh;
+        memset(&mh, 0, sizeof(mh));
+        mh.msg_name = &from;
+        mh.msg_namelen = sizeof(from);
+        mh.msg_iov = &iov;
+        mh.msg_iovlen = 1;
+        mh.msg_control = cbuf;
+        mh.msg_controllen = sizeof(cbuf);
+        ssize_t n = recvmsg(s, &mh, MSG_ERRQUEUE | MSG_DONTWAIT);
+        if (n < 0)
+            break;
+        /* Errors logged at DBG only — surfacing here as INFO would be
+         * very noisy under packet loss / NAT churn. */
+        RTC_LOG_DBG("Transport: drained ICMP error (%zd bytes)", n);
+    }
+}
+#  else
+static void drain_err_queue(rtc_socket_t s) {
+    (void)s;
+}
+#  endif
 #endif /* RTC_TRANSPORT_HAS_PKTINFO */
 
 static void *transport_thread_fn(void *arg) {
@@ -276,8 +317,9 @@ static void *transport_thread_fn(void *arg) {
 #if RTC_TRANSPORT_HAS_PKTINFO
                 struct in6_addr local6;
                 bool local_valid = false;
+                uint32_t kdrops = 0;
                 len = recv_one_with_pktinfo(s, buf, sizeof(buf), &from_store, &fromlen, &local6,
-                                            &local_valid);
+                                            &local_valid, &kdrops);
                 if (len > 0 && local_valid) {
                     /* Atomic 128-bit store is non-portable; the addr is
                      * only used by senders as a best-effort source pin.
@@ -285,6 +327,13 @@ static void *transport_thread_fn(void *arg) {
                      * iface (same as today). Acceptable. */
                     memcpy(&t->last_local_v6, &local6, sizeof(local6));
                     atomic_store_explicit(&t->last_local_valid, true, memory_order_release);
+                }
+                if (kdrops) {
+                    /* SO_RXQ_OVFL reports the absolute drop counter
+                     * since the socket opened; storing it directly is
+                     * fine \u2014 monotonic, no overflow concerns at u64. */
+                    atomic_store_explicit(&t->recv_kernel_drops, (uint64_t)kdrops,
+                                          memory_order_relaxed);
                 }
 #else
                 len = recvfrom(s, (char *)buf, sizeof(buf), 0, (struct sockaddr *)&from_store,
@@ -392,6 +441,69 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
     int wanted = RTC_TRANSPORT_SOCKBUF_BYTES;
     (void)setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char *)&wanted, sizeof(wanted));
     (void)setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char *)&wanted, sizeof(wanted));
+
+    /* Production socket options. All are best-effort: most are quietly
+     * ignored or unsupported on some platforms, which is fine — they're
+     * optimizations, not correctness. */
+
+    /* SO_REUSEADDR: lets us re-bind quickly after a restart. Common
+     * WebRTC practice; harmless for ephemeral-port binds. */
+    {
+        int on = 1;
+        (void)setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&on, sizeof(on));
+    }
+
+    /* DSCP EF (0xB8 / decimal 184) for expedited forwarding on
+     * cooperating networks. IPV6_TCLASS is the v6 counterpart. On
+     * Windows DSCP marking requires the qWAVE API which we don't link;
+     * setsockopt here is silently ignored. TODO-test on Windows. */
+#ifndef _WIN32
+    {
+        int tos = 0xB8;
+        (void)setsockopt(s, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+        (void)setsockopt(s, IPPROTO_IPV6, IPV6_TCLASS, &tos, sizeof(tos));
+    }
+#endif
+
+    /* Disable path-MTU fragmentation. On Linux IP_MTU_DISCOVER = DO sets
+     * the DF bit; on BSD/Windows IP_DONTFRAG. Forces oversized DTLS to
+     * surface as EMSGSIZE / ICMP "fragmentation needed" instead of being
+     * silently fragmented and probably dropped by middleboxes. */
+#ifdef __linux__
+    {
+        int do_pmtu = IP_PMTUDISC_DO;
+        (void)setsockopt(s, IPPROTO_IP, IP_MTU_DISCOVER, &do_pmtu, sizeof(do_pmtu));
+        int do_pmtu6 = IPV6_PMTUDISC_DO;
+        (void)setsockopt(s, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &do_pmtu6, sizeof(do_pmtu6));
+    }
+#elif defined(_WIN32)
+    {
+        DWORD df = 1;
+        (void)setsockopt(s, IPPROTO_IP, IP_DONTFRAGMENT, (const char *)&df, sizeof(df));
+    }
+#elif defined(IP_DONTFRAG) /* BSD / macOS */
+    {
+        int on = 1;
+        (void)setsockopt(s, IPPROTO_IP, IP_DONTFRAG, &on, sizeof(on));
+    }
+#endif
+
+    /* Linux: IP_RECVERR / IPV6_RECVERR queues ICMP errors (e.g. remote
+     * "port unreachable") on the socket's MSG_ERRQUEUE. Without this,
+     * the kernel returns ECONNREFUSED on the NEXT sendto and keeps
+     * doing so until the queue is drained — wedging the send path when
+     * a peer dies. We enable the option and drain the error queue
+     * opportunistically below. */
+#ifdef __linux__
+    {
+        int on = 1;
+        (void)setsockopt(s, IPPROTO_IP, IP_RECVERR, &on, sizeof(on));
+        (void)setsockopt(s, IPPROTO_IPV6, IPV6_RECVERR, &on, sizeof(on));
+        /* Also enable kernel-drop notifications so we can attribute
+         * receive losses to overflow vs. drop-on-the-wire. */
+        (void)setsockopt(s, SOL_SOCKET, SO_RXQ_OVFL, &on, sizeof(on));
+    }
+#endif
     int got_rcv = 0, got_snd = 0;
     socklen_t optlen = sizeof(int);
     (void)getsockopt(s, SOL_SOCKET, SO_RCVBUF, (char *)&got_rcv, &optlen);
@@ -470,7 +582,28 @@ int rtc_transport_send(rtc_transport_t *t, const uint8_t *data, size_t len,
         atomic_fetch_add_explicit(&t->bytes_sent, (uint64_t)sent, memory_order_relaxed);
         return RTC_OK;
     }
-    atomic_fetch_add_explicit(&t->send_errors, 1, memory_order_relaxed);
+
+    /* Distinguish "kernel SNDBUF momentarily full" from real failures.
+     * EAGAIN/EWOULDBLOCK is transient and recoverable; callers that
+     * implement pacing should retry rather than treat as a hard error.
+     * Counted separately so it doesn't false-alarm in dashboards. */
+#ifdef _WIN32
+    int err = WSAGetLastError();
+    bool would_block = (err == WSAEWOULDBLOCK);
+#else
+    bool would_block = (errno == EAGAIN || errno == EWOULDBLOCK);
+#endif
+    if (would_block) {
+        atomic_fetch_add_explicit(&t->send_would_block, 1, memory_order_relaxed);
+    } else {
+        atomic_fetch_add_explicit(&t->send_errors, 1, memory_order_relaxed);
+    }
+#if RTC_TRANSPORT_HAS_PKTINFO
+    /* A real error often correlates with a queued ICMP unreachable that
+     * would otherwise wedge subsequent sends. Drain to unblock. */
+    if (!would_block)
+        drain_err_queue(s);
+#endif
     return RTC_ERR_SOCKET;
 }
 
@@ -525,7 +658,13 @@ int rtc_transport_send_to_remote(rtc_transport_t *t, const uint8_t *data, size_t
             atomic_fetch_add_explicit(&t->bytes_sent, (uint64_t)sent, memory_order_relaxed);
             return RTC_OK;
         }
-        atomic_fetch_add_explicit(&t->send_errors, 1, memory_order_relaxed);
+        bool would_block = (errno == EAGAIN || errno == EWOULDBLOCK);
+        if (would_block) {
+            atomic_fetch_add_explicit(&t->send_would_block, 1, memory_order_relaxed);
+        } else {
+            atomic_fetch_add_explicit(&t->send_errors, 1, memory_order_relaxed);
+            drain_err_queue(s);
+        }
         return RTC_ERR_SOCKET;
     }
 #endif
@@ -575,7 +714,9 @@ void rtc_transport_get_stats(const rtc_transport_t *t, rtc_transport_stats_t *ou
     out->pkts_sent = atomic_load_explicit(&t->pkts_sent, memory_order_relaxed);
     out->bytes_sent = atomic_load_explicit(&t->bytes_sent, memory_order_relaxed);
     out->send_errors = atomic_load_explicit(&t->send_errors, memory_order_relaxed);
+    out->send_would_block = atomic_load_explicit(&t->send_would_block, memory_order_relaxed);
     out->recv_drain_full = atomic_load_explicit(&t->recv_drain_full, memory_order_relaxed);
+    out->recv_kernel_drops = atomic_load_explicit(&t->recv_kernel_drops, memory_order_relaxed);
     out->timer_slot_hwm = t->timer_slot_hwm;
 }
 

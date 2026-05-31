@@ -49,6 +49,11 @@ typedef enum {
  *
  * Offload heavy work (video decoding, file I/O, application logic) to a
  * worker thread by enqueuing in this callback and returning immediately.
+ *
+ * BUFFER LIFETIME: `data` points into a transport-owned buffer that is
+ * reused for the NEXT packet. The callee MUST NOT retain `data` (or
+ * `from`) after returning. Copy into the callee's own storage if the
+ * payload needs to outlive the callback.
  */
 typedef void (*rtc_transport_recv_fn)(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                                       const rtc_addr_t *from, void *user);
@@ -63,6 +68,11 @@ typedef struct {
     void *user;
     bool active;
 } rtc_timer_t;
+
+/* TODO: replace the fixed-size timer array with a min-heap if
+ * RTC_TRANSPORT_MAX_TIMERS ever grows past ~32. Each poll-wakeup walks
+ * the array twice (next-deadline + fire-expired) so O(N) is fine at 16
+ * slots but becomes the loop at hundreds. */
 
 /* Timer handle (index + generation for ABA safety) */
 typedef int rtc_timer_id_t;
@@ -109,13 +119,22 @@ typedef struct rtc_transport {
 
     /* Lightweight counters (atomic so reads from any thread are valid).
      * recv_drain_full counts how often the recv loop hit RECV_BATCH and
-     * left packets in the kernel buffer — a signal of sustained bursts. */
+     * left packets in the kernel buffer — a signal of sustained bursts.
+     *
+     * Backpressure: a non-zero / growing recv_drain_full or
+     * recv_kernel_drops indicates the network is delivering faster than
+     * we can process. Higher layers (BWE, pacer) should monitor these
+     * via rtc_transport_get_stats() and reduce send rate when they
+     * grow. No callback hook yet — polling is sufficient at the cadence
+     * BWE already runs (sub-second). */
     _Atomic uint64_t pkts_recv;
     _Atomic uint64_t bytes_recv;
     _Atomic uint64_t pkts_sent;
     _Atomic uint64_t bytes_sent;
     _Atomic uint64_t send_errors;
+    _Atomic uint64_t send_would_block;
     _Atomic uint64_t recv_drain_full;
+    _Atomic uint64_t recv_kernel_drops;
 
     /* Source-pinning hint, populated from IPV6_PKTINFO cmsg on each recv
      * (POSIX). The 128-bit address is intentionally NOT atomic: a torn
@@ -134,7 +153,9 @@ typedef struct {
     uint64_t pkts_sent;
     uint64_t bytes_sent;
     uint64_t send_errors;
+    uint64_t send_would_block; /* EAGAIN/EWOULDBLOCK on sendto; transient */
     uint64_t recv_drain_full;
+    uint64_t recv_kernel_drops; /* SO_RXQ_OVFL counter (Linux only; else 0) */
     int timer_slot_hwm;
 } rtc_transport_stats_t;
 
