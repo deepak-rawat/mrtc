@@ -45,7 +45,7 @@ endif()
 if(MRTC_BUILD_TESTS)
     set(TEST_NAMES test_stun test_rtp test_srtp test_dtls test_ice test_sdp test_transport test_peer
                    test_sdp_video test_rtcp test_data_channel test_turn test_rate_control
-                   test_rtcp_feedback test_nack_buf test_rtp_ext)
+                   test_rtcp_feedback test_nack_buf test_rtp_ext test_poller)
     if(MRTC_ENABLE_TWCC)
         list(APPEND TEST_NAMES test_twcc test_bwe)
     endif()

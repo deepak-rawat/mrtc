@@ -127,16 +127,19 @@ static void timer_cancel(rtc_timer_t *timers, int max, rtc_mutex_t *mutex, rtc_t
 static void *transport_thread_fn(void *arg) {
     rtc_transport_t *t = (rtc_transport_t *)arg;
     uint8_t buf[RTC_TRANSPORT_BUF_SIZE];
+    rtc_poller_event_t evs[RTC_POLLER_MAX_EVENTS];
 
     while (t->running) {
         rtc_mutex_lock(&t->timer_mutex);
         int timeout = timer_next_timeout_ms(t->timers, RTC_TRANSPORT_MAX_TIMERS);
         rtc_mutex_unlock(&t->timer_mutex);
 
-        int n = rtc_poller_wait(&t->poller, timeout);
+        int n = rtc_poller_wait(&t->poller, evs, RTC_POLLER_MAX_EVENTS, timeout);
 
-        if (n > 0) {
-            rtc_socket_t s = atomic_load_explicit(&t->sock, memory_order_acquire);
+        rtc_socket_t s = atomic_load_explicit(&t->sock, memory_order_acquire);
+        for (int e = 0; e < n; e++) {
+            if (evs[e].fd != s || !(evs[e].events & RTC_POLLER_EV_READ))
+                continue;
             int drained = 0;
             for (int i = 0; i < RTC_TRANSPORT_RECV_BATCH; i++) {
                 struct sockaddr_storage from_store;
@@ -322,10 +325,16 @@ rtc_timer_id_t rtc_transport_add_timer(rtc_transport_t *t, uint64_t deadline_ms,
                                        void *user) {
     rtc_timer_id_t id = timer_add(t->timers, RTC_TRANSPORT_MAX_TIMERS, &t->timer_mutex,
                                   &t->timer_slot_hwm, deadline_ms, fn, user);
-    if (id < 0)
+    if (id < 0) {
         RTC_LOG_WARN("Transport: no free timer slots (max=%d) — caller will"
                      " silently lose this scheduling; raise RTC_TRANSPORT_MAX_TIMERS",
                      RTC_TRANSPORT_MAX_TIMERS);
+        return id;
+    }
+    /* Break the poll loop so the new (possibly sooner) deadline is
+     * observed promptly. Without this, the thread can sleep up to the
+     * previous timeout (default 100ms) before noticing. */
+    rtc_poller_wake(&t->poller);
     return id;
 }
 
@@ -358,6 +367,10 @@ void rtc_transport_close(rtc_transport_t *t) {
     bool was_running = atomic_exchange_explicit(&t->running, false, memory_order_acq_rel);
     if (!was_running)
         return;
+
+    /* Wake the poller so the thread observes running==false now, not
+     * after the next timeout. */
+    rtc_poller_wake(&t->poller);
 
     /* Join thread (it observes running==false and exits its loop). */
     rtc_thread_join(&t->thread);
