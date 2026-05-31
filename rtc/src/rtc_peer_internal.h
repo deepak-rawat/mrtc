@@ -55,6 +55,9 @@ struct rtc_rtp_sender {
     rtc_on_pli_fn on_pli;
     void *on_pli_user;
 
+    /* Rate limiters for inbound feedback (transport thread only). */
+    uint64_t last_pli_handled_ms;
+
 #ifdef MRTC_ENABLE_TWCC
     /* Transport-CC tagging (set after SDP negotiation) */
     void *twcc;          /* borrowed rtc_twcc_sender_t* */

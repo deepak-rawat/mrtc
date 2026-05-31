@@ -43,7 +43,8 @@ void rtc_nack_buf_destroy(rtc_nack_buf_t *buf) {
     free(buf);
 }
 
-void rtc_nack_buf_store(rtc_nack_buf_t *buf, const uint8_t *pkt, size_t len, uint16_t seq) {
+void rtc_nack_buf_store(rtc_nack_buf_t *buf, const uint8_t *pkt, size_t len, uint16_t seq,
+                        bool has_twcc, uint16_t twcc_seq) {
     if (!buf || !pkt || len == 0 || len > NACK_BUF_MAX_PKT_SIZE)
         return;
 
@@ -52,11 +53,14 @@ void rtc_nack_buf_store(rtc_nack_buf_t *buf, const uint8_t *pkt, size_t len, uin
     memcpy(slot->data, pkt, len);
     slot->len = len;
     slot->seq = seq;
+    slot->twcc_seq = twcc_seq;
+    slot->has_twcc = has_twcc;
+    slot->retransmit_count = 0;
     slot->used = true;
 }
 
-bool rtc_nack_buf_get(const rtc_nack_buf_t *buf, uint16_t seq,
-                      const uint8_t **out_pkt, size_t *out_len) {
+bool rtc_nack_buf_get(const rtc_nack_buf_t *buf, uint16_t seq, const uint8_t **out_pkt,
+                      size_t *out_len) {
     if (!buf || !out_pkt || !out_len)
         return false;
 
@@ -71,5 +75,36 @@ bool rtc_nack_buf_get(const rtc_nack_buf_t *buf, uint16_t seq,
 
     *out_pkt = slot->data;
     *out_len = slot->len;
+    return true;
+}
+
+bool rtc_nack_buf_retransmit(rtc_nack_buf_t *buf, uint16_t seq, const uint8_t **out_pkt,
+                             size_t *out_len, uint16_t *twcc_seq_out) {
+    if (!buf || !out_pkt || !out_len)
+        return false;
+
+    int idx = (int)seq & buf->mask;
+    rtc_nack_slot_t *slot = &buf->slots[idx];
+
+    if (!slot->used || slot->seq != seq) {
+        *out_pkt = NULL;
+        *out_len = 0;
+        if (twcc_seq_out)
+            *twcc_seq_out = 0;
+        return false;
+    }
+    if (slot->retransmit_count >= RTC_NACK_MAX_RETRANSMITS) {
+        *out_pkt = NULL;
+        *out_len = 0;
+        if (twcc_seq_out)
+            *twcc_seq_out = 0;
+        return false;
+    }
+
+    slot->retransmit_count++;
+    *out_pkt = slot->data;
+    *out_len = slot->len;
+    if (twcc_seq_out)
+        *twcc_seq_out = slot->has_twcc ? slot->twcc_seq : 0;
     return true;
 }

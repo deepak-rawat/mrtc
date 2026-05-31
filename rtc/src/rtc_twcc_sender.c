@@ -23,3 +23,9 @@ const rtc_twcc_sent_pkt_t *rtc_twcc_sender_lookup(const rtc_twcc_sender_t *s, ui
         return NULL;
     return e;
 }
+
+void rtc_twcc_sender_invalidate(rtc_twcc_sender_t *s, uint16_t seq) {
+    rtc_twcc_sent_pkt_t *e = &s->ring[seq & (RTC_TWCC_SENDER_RING - 1)];
+    if (e->seq == seq)
+        e->used = false;
+}

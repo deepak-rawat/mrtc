@@ -386,12 +386,16 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc) {
     if (pc->connection_state == RTC_CONNECTION_CLOSED)
         return;
 
+    /* Close the transport FIRST. This joins the I/O thread, after which no
+     * recv callback or timer can fire. Everything below this point is
+     * therefore safe to tear down without racing the transport thread. */
+    rtc_transport_close(&pc->transport);
+
     rtc_dc_manager_close(&pc->dc_manager);
     rtc_srtp_close(&pc->srtp_send);
     rtc_srtp_close(&pc->srtp_recv);
     rtc_dtls_close(&pc->dtls);
     rtc_ice_close(&pc->ice);
-    rtc_transport_close(&pc->transport);
     rtc_u32_map_free(&pc->recv_map);
     rtc_u32_map_free(&pc->send_map);
     rtc_sdp_close(&pc->local_sdp);
@@ -542,6 +546,11 @@ int rtc_peer_connection_create_answer(rtc_peer_connection_t *pc, rtc_desc_t *des
 int rtc_peer_connection_set_local_desc(rtc_peer_connection_t *pc, const rtc_desc_t *desc) {
     if (!pc || !desc)
         return RTC_ERR_INVALID;
+    /* Renegotiation is not supported: once the connection has started, the
+     * transport thread owns pc->ice / pc->dtls / pc->transceivers, and any
+     * further mutation from the app thread would race. */
+    if (pc->connect_started)
+        return RTC_ERR_INVALID;
 
     pc->local_desc = *desc;
     pc->has_local_desc = true;
@@ -592,6 +601,9 @@ int rtc_peer_connection_set_local_desc(rtc_peer_connection_t *pc, const rtc_desc
 
 int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_desc_t *desc) {
     if (!pc || !desc)
+        return RTC_ERR_INVALID;
+    /* Renegotiation is not supported — see rtc_peer_connection_set_local_desc. */
+    if (pc->connect_started)
         return RTC_ERR_INVALID;
 
     pc->remote_desc = *desc;

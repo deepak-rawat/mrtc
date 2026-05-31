@@ -66,9 +66,17 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
     }
 #endif
 
-    /* Store post-SRTP packet in NACK buffer for retransmission */
-    if (sender->nack_buf)
-        rtc_nack_buf_store(sender->nack_buf, pkt.buf, pkt_len, pkt.header.seq);
+    /* Store post-SRTP packet in NACK buffer for retransmission.
+     * Stash the TWCC seq (if any) so retransmits can invalidate the
+     * matching slot in the TWCC sender ring; otherwise BWE would pair
+     * the retransmit's arrival time with the original's send time. */
+    if (sender->nack_buf) {
+#ifdef MRTC_ENABLE_TWCC
+        rtc_nack_buf_store(sender->nack_buf, pkt.buf, pkt_len, pkt.header.seq, tagged, twcc_seq);
+#else
+        rtc_nack_buf_store(sender->nack_buf, pkt.buf, pkt_len, pkt.header.seq, false, 0);
+#endif
+    }
 
     /* Send via transport (sendto is thread-safe on UDP sockets) */
     rtc_transport_t *t = (rtc_transport_t *)sender->transport;
@@ -123,21 +131,39 @@ void rtc_rtp_sender_on_pli(rtc_rtp_sender_t *sender, rtc_on_pli_fn fn, void *use
 
 /* ---- Internal handlers (called by peer connection on RTCP feedback) ---- */
 
+/* Minimum interval between honored PLIs from the same remote (ms). Protects
+ * the encoder against keyframe storms from a buggy or hostile peer. */
+#define RTC_PLI_MIN_INTERVAL_MS 500
+
 void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_seqs, int count) {
     if (!sender || !lost_seqs || count <= 0)
         return;
+    if (!sender->nack_buf || !sender->transport)
+        goto notify;
 
-    /* Retransmit from NACK buffer */
-    if (sender->nack_buf && sender->transport) {
-        rtc_transport_t *t = (rtc_transport_t *)sender->transport;
-        for (int i = 0; i < count; i++) {
-            const uint8_t *pkt;
-            size_t pkt_len;
-            if (rtc_nack_buf_get(sender->nack_buf, lost_seqs[i], &pkt, &pkt_len))
-                rtc_transport_send_to_remote(t, pkt, pkt_len);
+    rtc_transport_t *t = (rtc_transport_t *)sender->transport;
+    for (int i = 0; i < count; i++) {
+        const uint8_t *pkt;
+        size_t pkt_len;
+        uint16_t twcc_seq = 0;
+        if (!rtc_nack_buf_retransmit(sender->nack_buf, lost_seqs[i], &pkt, &pkt_len, &twcc_seq))
+            continue; /* not in buffer or per-seq retransmit cap hit */
+        rtc_transport_send_to_remote(t, pkt, pkt_len);
+#ifdef MRTC_ENABLE_TWCC
+        /* The retransmit carries the original TWCC seq. Drop it from the
+         * sender ring so handle_rtcp_twcc skips this seq when feedback
+         * arrives — otherwise BWE pairs the retransmit's arrival time
+         * with the original's send time and underestimates bandwidth. */
+        if (twcc_seq != 0 && sender->twcc) {
+            rtc_twcc_sender_t *twcc = (rtc_twcc_sender_t *)sender->twcc;
+            rtc_twcc_sender_invalidate(twcc, twcc_seq);
         }
+#else
+        (void)twcc_seq;
+#endif
     }
 
+notify:
     /* Notify application callback */
     if (sender->on_nack)
         sender->on_nack(lost_seqs, count, sender->on_nack_user);
@@ -146,6 +172,14 @@ void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_s
 void rtc_rtp_sender_handle_pli(rtc_rtp_sender_t *sender) {
     if (!sender)
         return;
+
+    /* Rate-limit: a peer can legitimately request a keyframe, but at most
+     * once per RTC_PLI_MIN_INTERVAL_MS. Otherwise the encoder would be
+     * forced into back-to-back keyframes, blowing the bitrate budget. */
+    uint64_t now = rtc_time_ms();
+    if (now - sender->last_pli_handled_ms < RTC_PLI_MIN_INTERVAL_MS)
+        return;
+    sender->last_pli_handled_ms = now;
 
     /* Request keyframe via rate controller */
 #ifdef MRTC_ENABLE_RATE_CONTROL

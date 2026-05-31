@@ -38,4 +38,10 @@ uint16_t rtc_twcc_sender_assign(rtc_twcc_sender_t *s, uint64_t send_time_us, uin
  * ring slot no longer matches (overwritten / never set). */
 const rtc_twcc_sent_pkt_t *rtc_twcc_sender_lookup(const rtc_twcc_sender_t *s, uint16_t seq);
 
+/* Invalidate the ring slot for `seq` so future feedback referencing it is
+ * skipped by lookup(). Used on NACK retransmit: the retransmit packet carries
+ * the original transport-cc seq, so its feedback would otherwise be paired
+ * with the original send time and skew the bandwidth estimate. */
+void rtc_twcc_sender_invalidate(rtc_twcc_sender_t *s, uint16_t seq);
+
 #endif /* RTC_TWCC_SENDER_H */
