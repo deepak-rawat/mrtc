@@ -563,27 +563,47 @@ int rtc_peer_connection_set_local_desc(rtc_peer_connection_t *pc, const rtc_desc
             peer_set_signaling(pc, RTC_SIGNALING_STABLE);
     }
 
-    /* Fire ICE gathering callbacks for already-gathered candidates */
+    /* Fire ICE gathering callbacks for already-gathered candidates.
+     * Each candidate must be associated with an m-line via its mid. With
+     * BUNDLE the remote will dedupe to a single ICE transport; without
+     * BUNDLE each m-line needs its own copy. Emit one event per
+     * (candidate × transceiver). If there are no transceivers (e.g.,
+     * data-channel-only), emit once with the default mid "0". */
     peer_set_ice_gathering(pc, RTC_ICE_GATHERING_GATHERING);
     for (int i = 0; i < pc->ice.local_candidate_count; i++) {
-        if (pc->on_ice_candidate) {
+        if (!pc->on_ice_candidate)
+            continue;
+
+        rtc_ice_candidate_t *c = &pc->ice.local_candidates[i];
+        char ip[64];
+        uint16_t port;
+        rtc_addr_to_string(&c->addr, ip, sizeof(ip), &port);
+
+        const char *ctype = "host";
+        if (c->type == ICE_CANDIDATE_SRFLX)
+            ctype = "srflx";
+
+        char cand_line[sizeof(((rtc_ice_candidate_desc_t *)0)->candidate)];
+        snprintf(cand_line, sizeof(cand_line), "candidate:%s 1 udp %u %s %u typ %s", c->foundation,
+                 c->priority, ip, port, ctype);
+
+        int n_emit = pc->transceiver_count > 0 ? pc->transceiver_count : 1;
+        for (int j = 0; j < n_emit; j++) {
             rtc_ice_candidate_desc_t cand_desc;
             memset(&cand_desc, 0, sizeof(cand_desc));
+            memcpy(cand_desc.candidate, cand_line, sizeof(cand_desc.candidate));
 
-            rtc_ice_candidate_t *c = &pc->ice.local_candidates[i];
-            char ip[64];
-            uint16_t port;
-            rtc_addr_to_string(&c->addr, ip, sizeof(ip), &port);
-
-            const char *ctype = "host";
-            if (c->type == ICE_CANDIDATE_SRFLX)
-                ctype = "srflx";
-
-            snprintf(cand_desc.candidate, sizeof(cand_desc.candidate),
-                     "candidate:%s 1 udp %u %s %u typ %s", c->foundation, c->priority, ip, port,
-                     ctype);
-            snprintf(cand_desc.mid, sizeof(cand_desc.mid), "0");
-            cand_desc.mid_index = 0;
+            if (pc->transceiver_count > 0) {
+                const struct rtc_rtp_transceiver *t = &pc->transceivers[j];
+                size_t mlen = strnlen(t->mid, sizeof(cand_desc.mid) - 1);
+                memcpy(cand_desc.mid, t->mid, mlen);
+                cand_desc.mid[mlen] = '\0';
+                cand_desc.mid_index = t->mid_index;
+            } else {
+                cand_desc.mid[0] = '0';
+                cand_desc.mid[1] = '\0';
+                cand_desc.mid_index = 0;
+            }
 
             pc->on_ice_candidate(&cand_desc, pc->on_ice_candidate_user);
         }
