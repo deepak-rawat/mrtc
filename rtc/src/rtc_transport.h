@@ -116,6 +116,15 @@ typedef struct rtc_transport {
     _Atomic uint64_t bytes_sent;
     _Atomic uint64_t send_errors;
     _Atomic uint64_t recv_drain_full;
+
+    /* Source-pinning hint, populated from IPV6_PKTINFO cmsg on each recv
+     * (POSIX). The 128-bit address is intentionally NOT atomic: a torn
+     * read just means a single send goes out via the kernel default
+     * source (the prior behavior), which is no worse than skipping
+     * source pinning. last_local_valid gates whether the address is
+     * meaningful at all. */
+    uint8_t last_local_v6[16];
+    _Atomic bool last_local_valid;
 } rtc_transport_t;
 
 /* Snapshot of transport counters. */

@@ -4,11 +4,86 @@
  * Owns the UDP socket, runs a background poller thread,
  * classifies incoming packets per RFC 7983, and dispatches
  * to registered callbacks.
+ *
+ * Networking model:
+ *   - The UDP socket is AF_INET6 with IPV6_V6ONLY=0 (dual-stack), so a
+ *     single socket accepts both IPv4 and IPv6 traffic. IPv4 senders
+ *     appear at the kernel level as IPv4-mapped IPv6 addresses
+ *     (::ffff:a.b.c.d); we normalize those back to plain AF_INET before
+ *     delivering to callbacks so callers see familiar address shapes.
+ *   - On POSIX, recvmsg parses the IPV6_PKTINFO cmsg so we know which
+ *     local interface address the packet came in on. send_to_remote
+ *     uses sendmsg with a matching cmsg to pin the source IP — fixes
+ *     the classic multi-homed reply-from-wrong-interface bug.
+ *   - On Windows, source pinning is not yet implemented (WSARecvMsg /
+ *     WSASendMsg require GUID-indirected function pointer lookup). The
+ *     dual-stack v6 socket still works there; only PKTINFO is gated.
+ *     TODO-test: Windows PKTINFO.
  */
 #include "rtc_transport.h"
 
 #include <string.h>
 #include <stdio.h>
+
+/* ------------------------------------------------------------------ */
+/*  Address-family normalization (dual-stack helpers)                  */
+/* ------------------------------------------------------------------ */
+
+/* Convert an AF_INET6 IPv4-mapped address (::ffff:a.b.c.d) to plain
+ * AF_INET in place. No-op for genuine IPv6 or already-AF_INET. */
+static void addr_unmap_v4(rtc_addr_t *a) {
+    if (a->len < (socklen_t)sizeof(struct sockaddr_in6))
+        return;
+    struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&a->addr;
+    if (s6->sin6_family != AF_INET6)
+        return;
+    /* IN6_IS_ADDR_V4MAPPED test: first 80 bits 0, next 16 bits 0xFFFF. */
+    const uint8_t *b = s6->sin6_addr.s6_addr;
+    bool mapped = true;
+    for (int i = 0; i < 10; i++)
+        if (b[i] != 0) {
+            mapped = false;
+            break;
+        }
+    if (mapped && (b[10] != 0xFF || b[11] != 0xFF))
+        mapped = false;
+    if (!mapped)
+        return;
+
+    uint16_t port = s6->sin6_port;
+    uint32_t v4;
+    memcpy(&v4, &b[12], 4);
+
+    struct sockaddr_in *s4 = (struct sockaddr_in *)&a->addr;
+    memset(s4, 0, sizeof(*s4));
+    s4->sin_family = AF_INET;
+    s4->sin_port = port;
+    s4->sin_addr.s_addr = v4;
+    a->len = sizeof(struct sockaddr_in);
+}
+
+/* Convert a plain AF_INET address to IPv4-mapped AF_INET6 in place. The
+ * transport's socket is AF_INET6 dual-stack, so outbound to a v4 dest
+ * goes through the v4-mapped form (kernels reject mixed-family sendto). */
+static void addr_map_v4(rtc_addr_t *a) {
+    if (a->len < (socklen_t)sizeof(struct sockaddr_in))
+        return;
+    struct sockaddr_in *s4 = (struct sockaddr_in *)&a->addr;
+    if (s4->sin_family != AF_INET)
+        return;
+
+    uint16_t port = s4->sin_port;
+    uint32_t v4 = s4->sin_addr.s_addr;
+
+    struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&a->addr;
+    memset(s6, 0, sizeof(*s6));
+    s6->sin6_family = AF_INET6;
+    s6->sin6_port = port;
+    s6->sin6_addr.s6_addr[10] = 0xFF;
+    s6->sin6_addr.s6_addr[11] = 0xFF;
+    memcpy(&s6->sin6_addr.s6_addr[12], &v4, 4);
+    a->len = sizeof(struct sockaddr_in6);
+}
 
 /* ------------------------------------------------------------------ */
 /*  Packet classification per RFC 7983                                 */
@@ -124,6 +199,58 @@ static void timer_cancel(rtc_timer_t *timers, int max, rtc_mutex_t *mutex, rtc_t
 /* ------------------------------------------------------------------ */
 /*  Transport thread                                                   */
 /* ------------------------------------------------------------------ */
+
+/* recvmsg + PKTINFO is only available on POSIX in this revision. Windows
+ * uses WSARecvMsg which requires GUID-indirected function pointer lookup
+ * — left as a TODO. On Windows we fall back to recvfrom and skip the
+ * source-pinning step (last_local_valid stays false). */
+#ifndef _WIN32
+#  define RTC_TRANSPORT_HAS_PKTINFO 1
+#else
+#  define RTC_TRANSPORT_HAS_PKTINFO 0
+#endif
+
+#if RTC_TRANSPORT_HAS_PKTINFO
+/* Drain one packet via recvmsg; on success, write the local-iface address
+ * into *local_out (true means cmsg present, IPv4-mapped form for v4). */
+static ssize_t recv_one_with_pktinfo(rtc_socket_t s, uint8_t *buf, size_t buflen,
+                                     struct sockaddr_storage *from, socklen_t *fromlen,
+                                     struct in6_addr *local_out, bool *local_valid_out) {
+    struct iovec iov;
+    iov.iov_base = buf;
+    iov.iov_len = buflen;
+
+    /* Enough for one IPV6_PKTINFO cmsg with alignment slack. */
+    uint8_t cbuf[CMSG_SPACE(sizeof(struct in6_pktinfo))];
+
+    struct msghdr mh;
+    memset(&mh, 0, sizeof(mh));
+    mh.msg_name = from;
+    mh.msg_namelen = sizeof(*from);
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    mh.msg_control = cbuf;
+    mh.msg_controllen = sizeof(cbuf);
+
+    ssize_t n = recvmsg(s, &mh, 0);
+    if (n <= 0)
+        return n;
+
+    *fromlen = mh.msg_namelen;
+    *local_valid_out = false;
+
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(&mh); c; c = CMSG_NXTHDR(&mh, c)) {
+        if (c->cmsg_level == IPPROTO_IPV6 && c->cmsg_type == IPV6_PKTINFO) {
+            const struct in6_pktinfo *pi = (const struct in6_pktinfo *)CMSG_DATA(c);
+            *local_out = pi->ipi6_addr;
+            *local_valid_out = true;
+            break;
+        }
+    }
+    return n;
+}
+#endif /* RTC_TRANSPORT_HAS_PKTINFO */
+
 static void *transport_thread_fn(void *arg) {
     rtc_transport_t *t = (rtc_transport_t *)arg;
     uint8_t buf[RTC_TRANSPORT_BUF_SIZE];
@@ -144,9 +271,25 @@ static void *transport_thread_fn(void *arg) {
             for (int i = 0; i < RTC_TRANSPORT_RECV_BATCH; i++) {
                 struct sockaddr_storage from_store;
                 socklen_t fromlen = sizeof(from_store);
+                ssize_t len;
 
-                ssize_t len = recvfrom(s, (char *)buf, sizeof(buf), 0,
-                                       (struct sockaddr *)&from_store, &fromlen);
+#if RTC_TRANSPORT_HAS_PKTINFO
+                struct in6_addr local6;
+                bool local_valid = false;
+                len = recv_one_with_pktinfo(s, buf, sizeof(buf), &from_store, &fromlen, &local6,
+                                            &local_valid);
+                if (len > 0 && local_valid) {
+                    /* Atomic 128-bit store is non-portable; the addr is
+                     * only used by senders as a best-effort source pin.
+                     * Worst case under race: one send goes out the wrong
+                     * iface (same as today). Acceptable. */
+                    memcpy(&t->last_local_v6, &local6, sizeof(local6));
+                    atomic_store_explicit(&t->last_local_valid, true, memory_order_release);
+                }
+#else
+                len = recvfrom(s, (char *)buf, sizeof(buf), 0, (struct sockaddr *)&from_store,
+                               &fromlen);
+#endif
                 if (len <= 0)
                     break; /* EWOULDBLOCK or error — socket drained */
                 drained++;
@@ -165,6 +308,10 @@ static void *transport_thread_fn(void *arg) {
                 rtc_addr_t from;
                 memcpy(&from.addr, &from_store, fromlen);
                 from.len = fromlen;
+                /* Normalize v4-mapped to plain AF_INET so callers see the
+                 * address family they expect (ICE / SDP / STUN all key on
+                 * AF_INET for IPv4 peers). */
+                addr_unmap_v4(&from);
 
                 rtc_pkt_type_t type = transport_classify(buf, (size_t)len);
 
@@ -190,27 +337,33 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
     memset(t, 0, sizeof(*t));
     atomic_store_explicit(&t->sock, RTC_INVALID_SOCKET, memory_order_relaxed);
 
-    /* Create UDP socket */
-    rtc_socket_t s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    /* Dual-stack UDP socket: one fd accepts both IPv4 and IPv6 traffic.
+     * IPv4 senders arrive as IPv4-mapped IPv6 addresses; we unmap them
+     * before delivery to callbacks. */
+    rtc_socket_t s = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
     if (s == RTC_INVALID_SOCKET) {
         RTC_LOG_ERR("Transport: failed to create socket");
         return RTC_ERR_SOCKET;
     }
 
-    /* Bind to any available port */
-    struct sockaddr_in bind_addr;
+    int v6only = 0;
+    if (setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&v6only, sizeof(v6only)) != 0) {
+        RTC_LOG_WARN("Transport: IPV6_V6ONLY=0 failed; IPv4 traffic may not be accepted");
+    }
+
+    /* Bind to any available port on both families. */
+    struct sockaddr_in6 bind_addr;
     memset(&bind_addr, 0, sizeof(bind_addr));
-    bind_addr.sin_family = AF_INET;
-    bind_addr.sin_addr.s_addr = INADDR_ANY;
-    bind_addr.sin_port = 0;
+    bind_addr.sin6_family = AF_INET6;
+    bind_addr.sin6_addr = in6addr_any;
+    bind_addr.sin6_port = 0;
     if (bind(s, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
         RTC_LOG_ERR("Transport: bind failed");
         rtc_close_socket(s);
         return RTC_ERR_SOCKET;
     }
 
-    /* Store local address. Pass the full storage size so future IPv6
-     * sockets get the correct length written back by getsockname. */
+    /* Store local address (full storage size for v6). */
     t->local_addr.len = sizeof(t->local_addr.addr);
     if (getsockname(s, (struct sockaddr *)&t->local_addr.addr, &t->local_addr.len) != 0) {
         rtc_close_socket(s);
@@ -223,6 +376,15 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
         rtc_close_socket(s);
         return rc;
     }
+
+#if RTC_TRANSPORT_HAS_PKTINFO
+    /* Receive IPV6_PKTINFO cmsg so we know which local interface each
+     * packet arrived on. Required for correct multi-homed reply behavior. */
+    int on = 1;
+    if (setsockopt(s, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on, sizeof(on)) != 0) {
+        RTC_LOG_WARN("Transport: IPV6_RECVPKTINFO failed; reply source-pinning disabled");
+    }
+#endif
 
     /* Request larger kernel socket buffers to absorb video bursts and
      * avoid drops between drain iterations. The kernel may clamp; we log
@@ -295,8 +457,14 @@ int rtc_transport_send(rtc_transport_t *t, const uint8_t *data, size_t len,
         return RTC_ERR_SOCKET;
     }
 
+    /* Socket is AF_INET6 dual-stack. A v4 destination must be sent as
+     * v4-mapped v6 (::ffff:a.b.c.d) — kernels reject AF_INET sendto on
+     * a v6 socket. Local copy so we don't mutate the caller's struct. */
+    rtc_addr_t d = *dest;
+    addr_map_v4(&d);
+
     ssize_t sent =
-        sendto(s, (const char *)data, (int)len, 0, (const struct sockaddr *)&dest->addr, dest->len);
+        sendto(s, (const char *)data, (int)len, 0, (const struct sockaddr *)&d.addr, d.len);
     if (sent > 0) {
         atomic_fetch_add_explicit(&t->pkts_sent, 1, memory_order_relaxed);
         atomic_fetch_add_explicit(&t->bytes_sent, (uint64_t)sent, memory_order_relaxed);
@@ -311,6 +479,56 @@ int rtc_transport_send_to_remote(rtc_transport_t *t, const uint8_t *data, size_t
      * seeing true guarantees a fully-written remote_addr. */
     if (!atomic_load_explicit(&t->remote_addr_set, memory_order_acquire))
         return RTC_ERR_INVALID;
+
+#if RTC_TRANSPORT_HAS_PKTINFO
+    /* Source-pin to the local IP we last received traffic on (set by the
+     * recv loop from IPV6_PKTINFO cmsg). Falls back to the unpinned path
+     * if no recv has happened yet, in which case the kernel chooses the
+     * source IP via its routing table. */
+    if (atomic_load_explicit(&t->last_local_valid, memory_order_acquire)) {
+        rtc_socket_t s = atomic_load_explicit(&t->sock, memory_order_acquire);
+        if (s == RTC_INVALID_SOCKET) {
+            atomic_fetch_add_explicit(&t->send_errors, 1, memory_order_relaxed);
+            return RTC_ERR_SOCKET;
+        }
+
+        rtc_addr_t d = t->remote_addr;
+        addr_map_v4(&d);
+
+        struct iovec iov;
+        iov.iov_base = (void *)data;
+        iov.iov_len = len;
+
+        uint8_t cbuf[CMSG_SPACE(sizeof(struct in6_pktinfo))];
+        memset(cbuf, 0, sizeof(cbuf));
+
+        struct msghdr mh;
+        memset(&mh, 0, sizeof(mh));
+        mh.msg_name = (void *)&d.addr;
+        mh.msg_namelen = d.len;
+        mh.msg_iov = &iov;
+        mh.msg_iovlen = 1;
+        mh.msg_control = cbuf;
+        mh.msg_controllen = sizeof(cbuf);
+
+        struct cmsghdr *c = CMSG_FIRSTHDR(&mh);
+        c->cmsg_level = IPPROTO_IPV6;
+        c->cmsg_type = IPV6_PKTINFO;
+        c->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
+        struct in6_pktinfo *pi = (struct in6_pktinfo *)CMSG_DATA(c);
+        memcpy(&pi->ipi6_addr, &t->last_local_v6, sizeof(pi->ipi6_addr));
+        pi->ipi6_ifindex = 0; /* let kernel pick the egress iface */
+
+        ssize_t sent = sendmsg(s, &mh, 0);
+        if (sent > 0) {
+            atomic_fetch_add_explicit(&t->pkts_sent, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&t->bytes_sent, (uint64_t)sent, memory_order_relaxed);
+            return RTC_OK;
+        }
+        atomic_fetch_add_explicit(&t->send_errors, 1, memory_order_relaxed);
+        return RTC_ERR_SOCKET;
+    }
+#endif
     return rtc_transport_send(t, data, len, &t->remote_addr);
 }
 

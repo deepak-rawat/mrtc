@@ -79,13 +79,17 @@ int rtc_ice_init(rtc_ice_agent_t *agent, rtc_transport_t *transport, const char 
 
 /* Gather host candidates from local interfaces */
 static int ice_gather_host(rtc_ice_agent_t *agent) {
-    /* Get the port we bound to from the transport socket */
+    /* Get the port we bound to from the transport socket. Use
+     * sockaddr_storage because the transport's socket is AF_INET6
+     * (dual-stack) and a sockaddr_in is too small. sin_port / sin6_port
+     * happen to live at the same byte offset, so we can read the port
+     * via a sockaddr_in cast on the properly-sized buffer. */
     rtc_socket_t sock = rtc_transport_get_socket(agent->transport);
-    struct sockaddr_in local;
-    socklen_t local_len = sizeof(local);
-    if (getsockname(sock, (struct sockaddr *)&local, &local_len) != 0)
+    struct sockaddr_storage local_ss;
+    socklen_t local_len = sizeof(local_ss);
+    if (getsockname(sock, (struct sockaddr *)&local_ss, &local_len) != 0)
         return RTC_ERR_SOCKET;
-    uint16_t port = ntohs(local.sin_port);
+    uint16_t port = ntohs(((struct sockaddr_in *)&local_ss)->sin_port);
 
 #ifdef _WIN32
     /* Windows: use GetAdaptersAddresses */

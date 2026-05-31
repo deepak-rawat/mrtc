@@ -244,7 +244,7 @@ TEST(poller_wake_during_wait_with_socket) {
 
 TEST(poller_max_events_capacity) {
     /* The MAX_EVENTS bump means we must accept many concurrent fds. We
-     * don't test the exact cap (would need many fds and IDs) \u2014 just
+     * don't test the exact cap (would need many fds and IDs) — just
      * confirm a reasonable number can be added/removed without error. */
     rtc_poller_t p;
     ASSERT_EQ(rtc_poller_init(&p), RTC_OK);

@@ -87,16 +87,22 @@ static bool wait_for_timer(int target, int timeout_ms) {
     return true;
 }
 
-/* Helper: get the transport's local address for sending to self */
+/* Helper: get the transport's local address for sending to self.
+ * The transport's socket is AF_INET6 dual-stack, so getsockname must use
+ * a sockaddr_storage; sin_port / sin6_port share an offset so we can
+ * extract the port via a sockaddr_in cast after reading. We build a
+ * plain AF_INET 127.0.0.1 dest — the transport's send path v4-maps it
+ * for the v6 socket, and the recv path unmaps before delivery. */
 static void get_loopback_addr(rtc_transport_t *t, rtc_addr_t *out) {
-    struct sockaddr_in local;
-    socklen_t len = sizeof(local);
-    getsockname(rtc_transport_get_socket(t), (struct sockaddr *)&local, &len);
+    struct sockaddr_storage local_ss;
+    socklen_t len = sizeof(local_ss);
+    getsockname(rtc_transport_get_socket(t), (struct sockaddr *)&local_ss, &len);
+    uint16_t port = ((struct sockaddr_in *)&local_ss)->sin_port;
 
     memset(out, 0, sizeof(*out));
     struct sockaddr_in *s = (struct sockaddr_in *)&out->addr;
     s->sin_family = AF_INET;
-    s->sin_port = local.sin_port;
+    s->sin_port = port;
     s->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     out->len = sizeof(struct sockaddr_in);
 }
@@ -111,15 +117,17 @@ TEST(transport_init_close) {
     ASSERT(rtc_transport_get_socket(&t) != RTC_INVALID_SOCKET);
     ASSERT(t.running);
 
-    /* Verify socket is bound (has a port) */
+    /* Verify socket is bound (has a port). transport is AF_INET6
+     * dual-stack; sin_port and sin6_port share an offset so reading via
+     * sin_port on the sockaddr_storage works for both. */
     rtc_addr_t addr;
     rc = rtc_transport_get_local_addr(&t, &addr);
     ASSERT_EQ(rc, RTC_OK);
 
-    struct sockaddr_in *sin = (struct sockaddr_in *)&addr.addr;
-    ASSERT(ntohs(sin->sin_port) > 0);
+    uint16_t port = ntohs(((struct sockaddr_in *)&addr.addr)->sin_port);
+    ASSERT(port > 0);
 
-    printf("    transport bound to port %u\n", ntohs(sin->sin_port));
+    printf("    transport bound to port %u\n", port);
 
     rtc_transport_close(&t);
     ASSERT(!t.running);
@@ -343,6 +351,146 @@ TEST(transport_classify_rtcp) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Phase 2: dual-stack v6 socket + v4-mapped unmap                    */
+/* ------------------------------------------------------------------ */
+
+/* Capture the family of the most recent `from` so we can assert
+ * v4-mapped addresses get unmapped to AF_INET before delivery. */
+static _Atomic int g_recv_from_family;
+static void family_capturing_recv(rtc_pkt_type_t type, const uint8_t *data, size_t len,
+                                  const rtc_addr_t *from, void *user) {
+    (void)data;
+    (void)len;
+    (void)user;
+    rtc_mutex_lock(&g_mutex);
+    g_recv_type = type;
+    g_recv_len = len;
+    g_recv_from_family =
+        (from && from->len > 0) ? ((const struct sockaddr *)&from->addr)->sa_family : 0;
+    g_recv_count++;
+    rtc_cond_signal(&g_cond);
+    rtc_mutex_unlock(&g_mutex);
+}
+
+TEST(transport_v6_dualstack_socket) {
+    rtc_transport_t t;
+    int rc = rtc_transport_init(&t, NULL, NULL);
+    ASSERT_EQ(rc, RTC_OK);
+
+    /* The socket family must be AF_INET6 (dual-stack). */
+    rtc_addr_t addr;
+    rc = rtc_transport_get_local_addr(&t, &addr);
+    ASSERT_EQ(rc, RTC_OK);
+    int family = ((struct sockaddr *)&addr.addr)->sa_family;
+    ASSERT_EQ(family, AF_INET6);
+    printf("    transport bound as AF_INET6 (dual-stack)\n");
+
+    rtc_transport_close(&t);
+}
+
+TEST(transport_v4_sender_seen_as_v4) {
+    rtc_transport_t t;
+    g_recv_count = 0;
+    g_recv_from_family = -1;
+    int rc = rtc_transport_init(&t, family_capturing_recv, NULL);
+    ASSERT_EQ(rc, RTC_OK);
+
+    /* Read bound port via sockaddr_storage. */
+    struct sockaddr_storage local_ss;
+    socklen_t llen = sizeof(local_ss);
+    getsockname(rtc_transport_get_socket(&t), (struct sockaddr *)&local_ss, &llen);
+    uint16_t port = ((struct sockaddr_in *)&local_ss)->sin_port;
+
+    /* Independent AF_INET sender on loopback → transport's v6 socket. */
+    rtc_socket_t sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ASSERT(sender != RTC_INVALID_SOCKET);
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port = port;
+    dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    uint8_t pkt[20];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[4] = 0x21;
+    pkt[5] = 0x12;
+    pkt[6] = 0xA4;
+    pkt[7] = 0x42; /* STUN magic cookie */
+    int sent = sendto(sender, (const char *)pkt, sizeof(pkt), 0, (struct sockaddr *)&dst,
+                      sizeof(dst));
+    ASSERT_EQ(sent, (int)sizeof(pkt));
+
+    bool got = wait_for_recv(1, 2000);
+    ASSERT(got);
+    /* The kernel delivers this as IPv4-mapped IPv6; the transport must
+     * unmap to AF_INET before invoking the callback. */
+    ASSERT_EQ(atomic_load(&g_recv_from_family), AF_INET);
+    printf("    v4 sender on dual-stack: from unmapped to AF_INET\n");
+
+    rtc_close_socket(sender);
+    rtc_transport_close(&t);
+}
+
+TEST(transport_v6_sender_seen_as_v6) {
+    rtc_transport_t t;
+    g_recv_count = 0;
+    g_recv_from_family = -1;
+    int rc = rtc_transport_init(&t, family_capturing_recv, NULL);
+    ASSERT_EQ(rc, RTC_OK);
+
+    struct sockaddr_storage local_ss;
+    socklen_t llen = sizeof(local_ss);
+    getsockname(rtc_transport_get_socket(&t), (struct sockaddr *)&local_ss, &llen);
+    uint16_t port = ((struct sockaddr_in6 *)&local_ss)->sin6_port;
+
+    rtc_socket_t sender = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    if (sender == RTC_INVALID_SOCKET) {
+        /* Host has no IPv6 stack — skip this test rather than fail. */
+        printf("    skipped (no IPv6 stack)\n");
+        rtc_transport_close(&t);
+        return;
+    }
+
+    struct sockaddr_in6 dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin6_family = AF_INET6;
+    dst.sin6_port = port;
+    dst.sin6_addr = in6addr_loopback;
+
+    uint8_t pkt[20];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[4] = 0x21;
+    pkt[5] = 0x12;
+    pkt[6] = 0xA4;
+    pkt[7] = 0x42;
+    int sent = sendto(sender, (const char *)pkt, sizeof(pkt), 0, (struct sockaddr *)&dst,
+                      sizeof(dst));
+    if (sent < 0) {
+        /* IPv6 loopback may not be available (rare). Skip. */
+        printf("    skipped (v6 loopback unreachable)\n");
+        rtc_close_socket(sender);
+        rtc_transport_close(&t);
+        return;
+    }
+    ASSERT_EQ(sent, (int)sizeof(pkt));
+
+    bool got = wait_for_recv(1, 2000);
+    ASSERT(got);
+    /* Genuine v6 traffic stays AF_INET6. */
+    ASSERT_EQ(atomic_load(&g_recv_from_family), AF_INET6);
+    printf("    v6 sender stays AF_INET6\n");
+
+    rtc_close_socket(sender);
+    rtc_transport_close(&t);
+}
+
+/* TODO-test (POSIX/Linux only): IP_PKTINFO source-pinning. Requires a
+ * multi-homed host where two interfaces have distinct local addresses,
+ * and verifies that a reply sent via rtc_transport_send_to_remote goes
+ * back out the same interface the request arrived on. Cannot be
+ * exercised on a single-interface CI runner. */
+
+/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Transport Layer Tests\n");
@@ -360,6 +508,9 @@ int main(void) {
     RUN_TEST(transport_timer_cancel);
     RUN_TEST(transport_send_to_remote);
     RUN_TEST(transport_classify_rtcp);
+    RUN_TEST(transport_v6_dualstack_socket);
+    RUN_TEST(transport_v4_sender_seen_as_v4);
+    RUN_TEST(transport_v6_sender_seen_as_v6);
 
     rtc_cond_destroy(&g_cond);
     rtc_mutex_destroy(&g_mutex);
