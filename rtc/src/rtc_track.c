@@ -1,11 +1,15 @@
 /*
  * rtc_track.c - Track / Transceiver implementation.
  *
- * Sender send path, receiver callbacks, transceiver accessors.
- * Struct definitions are in rtc_peer_internal.h (shared with rtc_peer*.c).
+ * Sender send path, receiver callbacks, transceiver accessors, plus the
+ * per-transceiver lifecycle helpers called by rtc_peer.c (init/close/attach/
+ * arm/activate/emit_sr/emit_rr/fill_sdp_media).  Struct definitions are in
+ * rtc_peer_internal.h (shared with rtc_peer*.c).
  */
 #include "rtc_peer_internal.h"
+#include "rtc_rtp_ext.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* ---- RTCRtpSender ---- */
@@ -191,4 +195,158 @@ rtc_rtp_receiver_t *rtc_rtp_transceiver_receiver(rtc_rtp_transceiver_t *t) {
 
 const char *rtc_rtp_transceiver_mid(const rtc_rtp_transceiver_t *t) {
     return t ? t->mid : NULL;
+}
+
+/* ---- Per-transceiver lifecycle helpers (called by rtc_peer.c) ---- */
+
+void rtc_rtp_transceiver_init_slot(struct rtc_rtp_transceiver *t, int mid_index, rtc_kind_t kind,
+                                   const rtc_codec_t *codec) {
+    memset(t, 0, sizeof(*t));
+    t->used = true;
+    t->direction = RTC_DIR_SENDRECV;
+    t->mid_index = mid_index;
+    snprintf(t->mid, sizeof(t->mid), "%d", mid_index);
+
+    /* Sender */
+    t->sender.codec = *codec;
+    t->sender.kind = kind;
+    t->sender.active = true;
+    rtc_rtp_session_init(&t->sender.rtp_session, codec->payload_type, codec->clock_rate);
+    rtc_rtcp_stats_init(&t->sender.rtcp_stats, t->sender.rtp_session.ssrc);
+
+    /* Receiver (activated when remote description arrives). RTCP stats are
+     * initialized with the sender SSRC so the rtcp_stats struct is valid;
+     * the real receiver SSRC is patched in once it is learned from SDP. */
+    t->receiver.codec = *codec;
+    t->receiver.kind = kind;
+    t->receiver.active = false;
+    rtc_rtcp_stats_init(&t->receiver.rtcp_stats, t->sender.rtp_session.ssrc);
+}
+
+void rtc_rtp_transceiver_close_resources(struct rtc_rtp_transceiver *t) {
+    struct rtc_rtp_sender *s = &t->sender;
+#ifdef MRTC_ENABLE_RATE_CONTROL
+    if (s->rate_ctrl) {
+        rtc_rate_control_destroy(s->rate_ctrl);
+        s->rate_ctrl = NULL;
+    }
+#endif
+    if (s->nack_buf) {
+        rtc_nack_buf_destroy(s->nack_buf);
+        s->nack_buf = NULL;
+    }
+}
+
+void rtc_rtp_sender_attach(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
+                           rtc_transport_t *transport) {
+    if (!s || !s->active)
+        return;
+    s->srtp = srtp_send;
+    s->transport = transport;
+}
+
+void rtc_rtp_sender_attach_twcc(struct rtc_rtp_sender *s, void *twcc_sender, uint8_t ext_id) {
+#ifdef MRTC_ENABLE_TWCC
+    if (!s || !s->active || ext_id == 0)
+        return;
+    s->twcc = twcc_sender;
+    s->twcc_ext_id = ext_id;
+#else
+    (void)s;
+    (void)twcc_sender;
+    (void)ext_id;
+#endif
+}
+
+void rtc_rtp_sender_arm_video(struct rtc_rtp_sender *s) {
+    if (!s || !s->active || s->kind != RTC_KIND_VIDEO)
+        return;
+#ifdef MRTC_ENABLE_RATE_CONTROL
+    rtc_rate_control_config_t rc_cfg = {
+        .target_bitrate_kbps = 500,
+        .min_bitrate_kbps = 100,
+        .max_bitrate_kbps = 2500,
+    };
+    s->rate_ctrl = rtc_rate_control_create(&rc_cfg);
+#endif
+    s->nack_buf = rtc_nack_buf_create(NACK_BUF_DEFAULT_SIZE);
+}
+
+void rtc_rtp_receiver_activate(struct rtc_rtp_receiver *r) {
+    if (r)
+        r->active = true;
+}
+
+/* SR / RR build + SRTCP protect + send. The scratch buffer is sized to hold
+ * the largest RTCP packet plus the 4-byte SRTCP index trailer plus the auth
+ * tag (see rtc_srtp_protect_rtcp). */
+void rtc_rtp_sender_emit_sr(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
+                            rtc_transport_t *transport) {
+    if (!s || !s->active || s->rtcp_stats.packets_sent == 0)
+        return;
+    rtc_rtcp_packet_t pkt;
+    if (rtc_rtcp_build_sr(&pkt, &s->rtcp_stats) != RTC_OK)
+        return;
+    uint8_t buf[RTCP_MAX_PACKET + 4 + SRTP_AUTH_TAG_LEN];
+    if (pkt.buf_len > sizeof(buf))
+        return;
+    memcpy(buf, pkt.buf, pkt.buf_len);
+    size_t len = pkt.buf_len;
+    if (rtc_srtp_protect_rtcp(srtp_send, buf, &len, sizeof(buf)) != RTC_OK)
+        return;
+    rtc_transport_send_to_remote(transport, buf, len);
+    s->rtcp_stats.last_report_time = rtc_time_ms();
+}
+
+void rtc_rtp_receiver_emit_rr(struct rtc_rtp_receiver *r, rtc_srtp_ctx_t *srtp_send,
+                              rtc_transport_t *transport) {
+    if (!r || !r->active || r->rtcp_stats.packets_received == 0)
+        return;
+    rtc_rtcp_packet_t pkt;
+    if (rtc_rtcp_build_rr(&pkt, &r->rtcp_stats) != RTC_OK)
+        return;
+    uint8_t buf[RTCP_MAX_PACKET + 4 + SRTP_AUTH_TAG_LEN];
+    if (pkt.buf_len > sizeof(buf))
+        return;
+    memcpy(buf, pkt.buf, pkt.buf_len);
+    size_t len = pkt.buf_len;
+    if (rtc_srtp_protect_rtcp(srtp_send, buf, &len, sizeof(buf)) != RTC_OK)
+        return;
+    rtc_transport_send_to_remote(transport, buf, len);
+    r->rtcp_stats.last_report_time = rtc_time_ms();
+}
+
+void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc_sdp_media_t *m) {
+    memset(m, 0, sizeof(*m));
+
+    const char *mime = t->sender.codec.mime_type;
+    if (strncmp(mime, "audio/", 6) == 0) {
+        m->media_type = RTC_MEDIA_AUDIO;
+        size_t clen = strlen(mime + 6);
+        if (clen >= sizeof(m->codec_name))
+            clen = sizeof(m->codec_name) - 1;
+        memcpy(m->codec_name, mime + 6, clen);
+        m->codec_name[clen] = '\0';
+    } else if (strncmp(mime, "video/", 6) == 0) {
+        m->media_type = RTC_MEDIA_VIDEO;
+        size_t clen = strlen(mime + 6);
+        if (clen >= sizeof(m->codec_name))
+            clen = sizeof(m->codec_name) - 1;
+        memcpy(m->codec_name, mime + 6, clen);
+        m->codec_name[clen] = '\0';
+    } else {
+        m->media_type = RTC_MEDIA_APPLICATION;
+    }
+
+    m->payload_type = t->sender.codec.payload_type;
+    m->clockrate = (int)t->sender.codec.clock_rate;
+    m->channels = t->sender.codec.channels;
+    m->mid_index = t->mid_index;
+    m->ssrc = t->sender.rtp_session.ssrc;
+
+#ifdef MRTC_ENABLE_TWCC
+    if (m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) {
+        rtc_sdp_media_add_extmap(m, 5, RTC_EXT_URI_TRANSPORT_CC);
+    }
+#endif
 }

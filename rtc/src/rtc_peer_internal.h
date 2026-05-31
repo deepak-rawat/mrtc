@@ -205,13 +205,64 @@ static inline void peer_set_connection(rtc_peer_connection_t *pc, rtc_connection
 void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_seqs, int count);
 void rtc_rtp_sender_handle_pli(rtc_rtp_sender_t *sender);
 
+/* ---- Internal transceiver helpers from rtc_track.c ----
+ * These operate on a single transceiver/sender/receiver. The peer connection
+ * owns the array of transceivers and the SSRC maps; it loops over slots and
+ * calls these helpers for the per-slot work.
+ */
+
+/* Initialize a freshly-allocated transceiver slot: codec, kind, RTP session,
+ * RTCP stats, mid string. Sender starts active; receiver starts inactive
+ * (activated by rtc_rtp_receiver_activate when the remote description arrives). */
+void rtc_rtp_transceiver_init_slot(struct rtc_rtp_transceiver *t, int mid_index, rtc_kind_t kind,
+                                   const rtc_codec_t *codec);
+
+/* Free per-sender resources allocated by rtc_rtp_sender_arm_video. Idempotent. */
+void rtc_rtp_transceiver_close_resources(struct rtc_rtp_transceiver *t);
+
+/* Wire a sender to its SRTP send context + transport so it can send. */
+void rtc_rtp_sender_attach(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
+                           rtc_transport_t *transport);
+
+/* Bind transport-cc tagging on a sender (no-op when MRTC_ENABLE_TWCC is off). */
+void rtc_rtp_sender_attach_twcc(struct rtc_rtp_sender *s, void *twcc_sender, uint8_t ext_id);
+
+/* Allocate NACK ring + rate controller for a video sender. No-op for audio. */
+void rtc_rtp_sender_arm_video(struct rtc_rtp_sender *s);
+
+/* Flip a receiver to active (called after remote description is set). */
+void rtc_rtp_receiver_activate(struct rtc_rtp_receiver *r);
+
+/* Build SR / RR for a single sender or receiver, SRTCP-protect, send. */
+void rtc_rtp_sender_emit_sr(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
+                            rtc_transport_t *transport);
+void rtc_rtp_receiver_emit_rr(struct rtc_rtp_receiver *r, rtc_srtp_ctx_t *srtp_send,
+                              rtc_transport_t *transport);
+
+/* Serialize a single transceiver into an SDP m= section. */
+void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc_sdp_media_t *m);
+
 /* ---- Cross-TU function used by rtc_peer_packets.c, defined in rtc_peer.c ---- */
 
 void peer_complete_connection(rtc_peer_connection_t *pc);
 
-/* ---- Transport recv callback, defined in rtc_peer_packets.c ---- */
+/* ---- Entry points defined in rtc_peer_packets.c ---- */
 
+/* Transport recv callback (registered with rtc_transport_init). */
 void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                          const rtc_addr_t *from, void *user);
+
+/* RTCP send timer + interval (scheduled from peer_complete_connection). */
+#define RTCP_INTERVAL_MS 5000
+void peer_rtcp_timer(void *user);
+
+#ifdef MRTC_ENABLE_TWCC
+/* TWCC feedback send timer + interval. */
+#  define TWCC_FB_INTERVAL_MS 100
+void peer_twcc_fb_timer(void *user);
+
+/* BWE bitrate-change trampoline (registered with rtc_bwe_on_bitrate_change). */
+void peer_on_bwe_bitrate(uint32_t bitrate_bps, void *user);
+#endif
 
 #endif /* RTC_PEER_INTERNAL_H */
