@@ -18,7 +18,6 @@ and library dependency graph. Per-component design docs:
 - `rtc/ARCHITECTURE.md` — core WebRTC protocol stack
 - `media/ARCHITECTURE.md` — codecs, jitter buffer, media pipeline
 - `signaling/ARCHITECTURE.md` — WebSocket signaling client + server
-- `turn/ARCHITECTURE.md` — TURN relay server
 - `conference/ARCHITECTURE.md` — multi-peer conferencing
 - `app/conf_sdl/ARCHITECTURE.md` — SDL3 video conference application
 

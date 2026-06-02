@@ -4,7 +4,7 @@
  * Supports Binding Request/Response, MESSAGE-INTEGRITY, FINGERPRINT,
  * XOR-MAPPED-ADDRESS, and ICE-specific attributes.
  */
-#include "rtc/rtc_stun.h"
+#include "rtc_stun.h"
 
 #include <stdio.h>
 #include <stdlib.h>

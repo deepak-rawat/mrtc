@@ -13,7 +13,7 @@ orchestration on top. All public API functions use the `rtc_` prefix.
 
 ## Features
 
-- **STUN/ICE/TURN** — NAT traversal, candidate gathering, connectivity checks, relay
+- **STUN/ICE + TURN client support** — NAT traversal, candidate gathering, and connectivity checks using external TURN relay services
 - **DTLS 1.2 + SRTP/SRTCP** — encrypted media (AES-128-CM, HMAC-SHA1-80)
 - **RTP/RTCP** — media packets, sender/receiver reports, jitter/loss stats
 - **RTP header extensions** (RFC 8285 one-byte form) with SDP `a=extmap:` negotiation

@@ -9,7 +9,7 @@
  *   5. Live STUN binding to a real server (network required)
  */
 #include <rtc/rtc.h>
-#include <rtc/rtc_stun.h>
+#include "rtc_stun.h"
 #include "test_harness.h"
 
 /* ------------------------------------------------------------------ */

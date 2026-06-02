@@ -5,7 +5,7 @@
  * ChannelBind, and ChannelData send. Uses blocking sendto/recvfrom
  * on the transport socket for simplicity during gathering.
  */
-#include "rtc/rtc_turn.h"
+#include "rtc_turn.h"
 #include "rtc_transport.h"
 #include <string.h>
 #include <stdio.h>

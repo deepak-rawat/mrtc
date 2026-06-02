@@ -55,7 +55,6 @@ add_subdirectory(common)
 add_subdirectory(rtc)
 add_subdirectory(media)
 add_subdirectory(signaling)
-add_subdirectory(turn)
 add_subdirectory(conference)
 add_subdirectory(app)
 

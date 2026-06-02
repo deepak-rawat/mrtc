@@ -229,7 +229,7 @@ Files: `rtc/src/rtc_sdp.c`, `rtc/include/rtc/rtc_sdp.h`
 > STUN test vectors updated, nonce rotation required. Migration effort: **medium** —
 > current long-term auth (MD5) still works but new servers may require auth v2.
 
-Files: `rtc/src/rtc_stun.c`, `rtc/include/rtc/rtc_stun.h`
+Files: `rtc/src/rtc_stun.c`, `rtc/src/rtc_stun.h`
 
 ### Implemented
 
@@ -326,30 +326,19 @@ Files: `rtc/src/rtc_dtls.c`, `rtc/src/rtc_dtls.h`
 > Migration effort: **medium** — current UDP-only TURN client works but modern TURN servers
 > may require RFC 8489 long-term auth v2 and offer TURN-over-TLS.
 
-Files: `rtc/src/rtc_turn.c`, `rtc/include/rtc/rtc_turn.h`, `turn/turn_handler.c`, `turn/turn_server.c`
+Files: `rtc/src/rtc_turn.c`, `rtc/src/rtc_turn.h`
 
 ### Implemented (Client)
 
 | Section | Feature | Notes |
 |---------|---------|-------|
-| 6 | Allocate Request | With 401 challenge-response |
+| 6 | Allocate Request | With 401 challenge-response for external TURN services |
 | 7 | Refresh Request | Including lifetime=0 for deallocation |
 | 9 | CreatePermission Request | Single peer address |
 | 11 | ChannelBind Request | Channel number 0x4000 |
 | 11.4 | ChannelData framing | 4-byte header (channel + length) + payload |
 | — | Long-term credential mechanism | MD5(username:realm:password) |
 | — | 401 Unauthorized challenge response | Realm + nonce extraction and retry |
-
-### Implemented (Server)
-
-| Feature | Notes |
-|---------|-------|
-| Allocate handling | UDP relay socket allocation |
-| Refresh handling | Lifetime extension and deallocation |
-| CreatePermission | Permission storage per allocation |
-| ChannelBind | Channel ↔ peer address mapping |
-| ChannelData relay | Bidirectional forwarding |
-| Long-term credentials | MD5-based authentication |
 
 ### Not Implemented
 
@@ -689,7 +678,7 @@ successors, ordered by priority.
   - Implement SHA-256 based HMAC key derivation alongside MD5
   - Add `USERHASH` attribute (optional, privacy feature)
   - Support `NONCE` with `STUN-COOKIE` prefix for nonce rotation detection
-- **Files:** `rtc/src/rtc_stun.c`, `rtc/include/rtc/rtc_stun.h`
+- **Files:** `rtc/src/rtc_stun.c`, `rtc/src/rtc_stun.h`
 - **Effort:** Medium
 
 #### A3 — TURN → RFC 8656
@@ -700,7 +689,7 @@ successors, ordered by priority.
   - Wire TURN relay candidates into ICE gathering (`rtc_ice.c`)
   - Add allocation/permission/channel refresh timers
   - Fix TURN auth key truncation bug (pass `lt_key` as `uint8_t*` with explicit length, not `const char*`)
-- **Files:** `rtc/src/rtc_turn.c`, `rtc/include/rtc/rtc_turn.h`, `rtc/src/rtc_ice.c`, `turn/turn_handler.c`
+- **Files:** `rtc/src/rtc_turn.c`, `rtc/src/rtc_turn.h`, `rtc/src/rtc_ice.c`
 - **Effort:** Large
 
 ### Phase B: RTCP & Feedback (aligns with ROADMAP Phase 2)

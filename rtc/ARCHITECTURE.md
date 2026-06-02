@@ -84,7 +84,7 @@ rtc_cleanup();
 └────────────────────────────────────┘
 ```
 
-Each layer maps to a header/source pair in `include/rtc/` and `src/`.
+Public API lives in `include/rtc/`; internal/private helpers such as STUN/TURN live in `src/`.
 
 ## Module Details
 
@@ -125,7 +125,7 @@ Handles candidate gathering and connectivity checks.
 
 All ICE work runs on the transport thread via callbacks. Main thread reads `selected_remote` after `ICE_STATE_CONNECTED`.
 
-### STUN / TURN (`rtc_stun.h/c`, `rtc_turn.h/c`)
+### STUN / TURN (`rtc/src/rtc_stun.h/c`, `rtc/src/rtc_turn.h/c`)
 
 **STUN (RFC 5389):**
 - Binding Request/Response with MESSAGE-INTEGRITY (HMAC-SHA1) + FINGERPRINT

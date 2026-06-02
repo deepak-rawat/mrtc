@@ -3,7 +3,7 @@
  * ChannelData framing, long-term credential computation.
  */
 #include "test_harness.h"
-#include "rtc/rtc_stun.h"
+#include "rtc_stun.h"
 #include "rtc/rtc_common.h"
 #include <string.h>
 

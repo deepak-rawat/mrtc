@@ -22,7 +22,7 @@ and pipeline orchestration — it depends on `rtc` and uses its public types dir
 │    ├─ RTCPeerConnection, RTCRtpSender/Receiver            │
 │    ├─ ICE, DTLS 1.2, SRTP (AES-128-CM)                   │
 │    ├─ RTCP SR/RR, SDP, Data Channels                     │
-│    └─ STUN/TURN client                                    │
+│    └─ STUN client + external TURN relay support          │
 ├───────────────────────────────────────────────────────────┤
 │  signaling (WebSocket client + server)                    │
 ├───────────────────────────────────────────────────────────┤
@@ -55,9 +55,6 @@ sequence gap tracking.
 
 **Signaling** — WebSocket client/server (libwebsockets + cJSON), JSON protocol,
 meeting rooms, peer discovery, offer/answer/candidate relay.
-
-**TURN Server** — Minimal UDP TURN server for testing (allocate, refresh,
-create permission, channel bind/data, long-term credentials).
 
 **Conference** — High-level API orchestrating rtc + media + signaling.
 Push raw frames, receive decoded frames via callbacks. Automatic peer
@@ -296,7 +293,7 @@ int rtc_rtp_receiver_get_stats(receiver, out);
 | Test | Description |
 |------|-------------|
 | `test_loopback` | Two peer connections in one process, VP8 frame exchange |
-| `test_turn_relay` | Two ICE agents relay through in-process TURN server |
+| `test_turn_relay` | Two ICE agents relay through an external TURN service such as coturn |
 | `test_signaling_e2e` | Two signaling clients exchange offer/answer through server |
 | `test_peer_join_leave` | 3 peers join meeting, one leaves, verify remaining connected |
 
