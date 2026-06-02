@@ -69,14 +69,34 @@ Tests use a minimal harness (`tests/test_harness.h`) with `TEST()`, `RUN_TEST()`
 
 Keep commit messages short and to the point. Avoid verbose explanations.
 
-Preferred structure:
+Structure:
 
-```text
-<scope>: <concise summary>
+- **Subject** (first line): `<scope>: <concise summary>` in lowercase,
+  no trailing period, ideally <= 60 chars. Scope can be a module
+  (`rtc`, `media`, `signaling`) or `module/subarea` (`rtc/peer`,
+  `rtc/ice`).
+- **Blank line** between subject and body.
+- **Body**: free-form paragraphs explaining *why* and the user-visible
+  effect (not a diff narration). Wrap lines at ~72 chars. Multiple
+  paragraphs are fine, separated by single blank lines.
 
-<brief body line 1>
-<brief body line 2>
-```
+How to write it with `git commit`:
+
+- Prefer a single `-F -` heredoc so blank lines and wrapping survive
+  exactly as written:
+
+  ```bash
+  git commit -F - <<'EOF'
+  <scope>: <subject>
+
+  <body paragraph wrapped at ~72 chars>
+  EOF
+  ```
+
+- Do **not** use one `-m` flag per body line — each `-m` becomes its
+  own paragraph and inserts a blank line between them. If you must
+  use `-m`, pass exactly two: one for the subject and one for the
+  whole body (with `\n` for internal line breaks).
 
 ## Build Warnings Policy
 
