@@ -12,6 +12,7 @@
  *   8. Reject send before open
  */
 #include <rtc/rtc.h>
+#include "rtc_data_channel_internal.h"
 #include "test_harness.h"
 
 /* ---------- Test transport (loopback) ---------- */

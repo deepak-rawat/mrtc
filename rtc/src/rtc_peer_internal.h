@@ -10,6 +10,7 @@
 
 #include "rtc/rtc_peer.h"
 #include "rtc/rtc_u32_map.h"
+#include "rtc_data_channel_internal.h"
 #include "rtc_rtp.h"
 #include "rtc_rtp_ext.h"
 #include "rtc_rtcp.h"

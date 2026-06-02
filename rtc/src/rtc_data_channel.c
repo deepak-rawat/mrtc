@@ -9,7 +9,7 @@
  *   Remote   → Creator: ACK message
  *   Both sides transition to OPEN state.
  */
-#include "rtc/rtc_data_channel.h"
+#include "rtc_data_channel_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
