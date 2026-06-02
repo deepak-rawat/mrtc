@@ -45,14 +45,6 @@ Error codes are defined in `rtc_common.h`:
 - Threading helpers: `rtc_thread_create()`, `rtc_thread_join()`, `rtc_mutex_*()`, `rtc_cond_*()`
 - I/O poller: `rtc_poller_t` (epoll on Linux, kqueue on macOS, select on Windows)
 
-### Transport Layer Ownership
-- `rtc_transport_t` owns the UDP socket and runs a background thread with I/O poller
-- Classifies incoming packets per RFC 7983 (STUN/DTLS/RTP) and dispatches via callback
-- ICE agent borrows a pointer to transport (`rtc_transport_t *transport`), does NOT own it
-- Peer connection owns the transport (`rtc_transport_t transport` embedded in struct)
-- Send functions (`rtc_transport_send()`, `rtc_transport_send_to_remote()`) are thread-safe
-- Recv callback fires on the transport's background thread — callers must protect shared state
-
 ### Logging
 Use the logging macros from `rtc_common.h`:
 ```c
@@ -73,6 +65,19 @@ Uses modern EVP APIs (3.0+). Avoid deprecated functions like `HMAC()` or low-lev
 
 ### Testing
 Tests use a minimal harness (`tests/test_harness.h`) with `TEST()`, `RUN_TEST()`, `ASSERT*` macros. No external test framework. Each test is a standalone executable.
+
+## Commit Message Style
+
+Keep commit messages short and to the point. Avoid verbose explanations.
+
+Preferred structure:
+
+```text
+<scope>: <concise summary>
+
+<brief body line 1>
+<brief body line 2>
+```
 
 ## Build Warnings Policy
 
