@@ -928,6 +928,20 @@ rtc_connection_state_t rtc_peer_connection_connection_state(const rtc_peer_conne
     return pc ? pc->connection_state : RTC_CONNECTION_CLOSED;
 }
 
+/* ---- Identity / capability getters ---- */
+
+const char *rtc_peer_connection_local_fingerprint(const rtc_peer_connection_t *pc) {
+    return pc ? pc->dtls.local_fingerprint : "";
+}
+
+const char *rtc_peer_connection_remote_fingerprint(const rtc_peer_connection_t *pc) {
+    return (pc && pc->has_remote_desc) ? pc->remote_sdp.fingerprint : "";
+}
+
+bool rtc_peer_connection_can_trickle_ice_candidates(const rtc_peer_connection_t *pc) {
+    return (pc && pc->has_remote_desc) ? pc->remote_sdp.ice_options_trickle : false;
+}
+
 /* ---- Stats (getStats) ---- */
 
 int rtc_peer_connection_get_stats(const rtc_peer_connection_t *pc, rtc_stats_report_t *report) {

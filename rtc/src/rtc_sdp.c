@@ -153,6 +153,11 @@ int rtc_sdp_generate(rtc_sdp_t *sdp) {
     }
     SDP_WRITE(&p, &remain, "\r\n");
 
+    /* Advertise trickle ICE support (RFC 8839 §5.4). Always emit — mrtc
+     * gathers synchronously today but accepts add_ice_candidate calls. */
+    SDP_WRITE(&p, &remain, "a=ice-options:trickle\r\n");
+    sdp->ice_options_trickle = true;
+
     /* Write each media section */
     for (int i = 0; i < effective_media_count; i++) {
         int rc = sdp_write_media_section(&p, &remain, &effective_media[i], sdp);
@@ -331,6 +336,27 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
                 sdp->setup = RTC_SETUP_PASSIVE;
             else
                 sdp->setup = RTC_SETUP_ACTPASS;
+        }
+
+        /* ice-options (RFC 8839): note trickle support if advertised. */
+        if (sdp_line_starts_n(line, line_len, "a=ice-options:")) {
+            const char *val = line + 14;
+            size_t vlen = line_len - 14;
+            /* Scan space-separated tokens for "trickle". */
+            const char *q = val;
+            const char *qend = val + vlen;
+            while (q < qend) {
+                while (q < qend && (*q == ' ' || *q == '\t'))
+                    q++;
+                const char *tok = q;
+                while (q < qend && *q != ' ' && *q != '\t')
+                    q++;
+                size_t toklen = (size_t)(q - tok);
+                if (toklen == 7 && strncmp(tok, "trickle", 7) == 0) {
+                    sdp->ice_options_trickle = true;
+                    break;
+                }
+            }
         }
 
         /* mid */

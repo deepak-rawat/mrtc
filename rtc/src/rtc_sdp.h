@@ -91,6 +91,9 @@ typedef struct {
     char fingerprint[96];
     rtc_setup_role_t setup;
 
+    /* a=ice-options:trickle present (RFC 8839 §5.4). */
+    bool ice_options_trickle;
+
     /* Candidates (rtc_ice_candidate_t). Lazy-initialised on first add;
      * memset(&sdp, 0, sizeof(sdp)) is a valid empty state. Use
      * rtc_sdp_close() to release. */

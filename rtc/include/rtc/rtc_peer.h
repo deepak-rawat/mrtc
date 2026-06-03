@@ -214,4 +214,18 @@ rtc_ice_gathering_state_t rtc_peer_connection_ice_gathering_state(const rtc_peer
 rtc_ice_connection_state_t rtc_peer_connection_ice_connection_state(const rtc_peer_connection_t *pc);
 rtc_connection_state_t rtc_peer_connection_connection_state(const rtc_peer_connection_t *pc);
 
+/* ---- Identity / capability getters ---- */
+
+/* Local DTLS certificate fingerprint (SHA-256, hex with colons).
+ * Always returns a NUL-terminated string; never NULL after create. */
+const char *rtc_peer_connection_local_fingerprint(const rtc_peer_connection_t *pc);
+
+/* Remote DTLS certificate fingerprint as parsed from the remote SDP.
+ * Returns "" until set_remote_desc completes. */
+const char *rtc_peer_connection_remote_fingerprint(const rtc_peer_connection_t *pc);
+
+/* True if the remote peer advertised trickle ICE support
+ * (a=ice-options:trickle, RFC 8839 §5.4). False before set_remote_desc. */
+bool rtc_peer_connection_can_trickle_ice_candidates(const rtc_peer_connection_t *pc);
+
 #endif /* RTC_PEER_H */

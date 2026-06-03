@@ -420,6 +420,59 @@ TEST(peer_sender_parameters) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: identity getters (fingerprint, can_trickle)                  */
+/* ------------------------------------------------------------------ */
+TEST(peer_identity_getters) {
+    rtc_config_t config;
+    memset(&config, 0, sizeof(config));
+
+    rtc_peer_connection_t *pc = rtc_peer_connection_create(&config);
+    ASSERT(pc != NULL);
+
+    /* Local fingerprint is always available after create (DTLS cert
+     * is generated up-front). */
+    const char *fp = rtc_peer_connection_local_fingerprint(pc);
+    ASSERT(fp != NULL && fp[0] != '\0');
+    /* Sanity: SHA-256 hex with colons is exactly 95 chars (32 bytes * 2
+     * hex + 31 colons). */
+    ASSERT(strlen(fp) == 95);
+
+    /* Before set_remote_desc: remote fingerprint is "", trickle is false. */
+    ASSERT(rtc_peer_connection_remote_fingerprint(pc)[0] == '\0');
+    ASSERT(!rtc_peer_connection_can_trickle_ice_candidates(pc));
+
+    /* Locally generated offer includes a=ice-options:trickle. */
+    rtc_codec_t opus;
+    memset(&opus, 0, sizeof(opus));
+    opus.payload_type = 111;
+    strcpy(opus.mime_type, "audio/opus");
+    opus.clock_rate = 48000;
+    opus.channels = 2;
+    rtc_peer_connection_add_track(pc, RTC_KIND_AUDIO, &opus);
+    rtc_desc_t offer;
+    ASSERT_EQ(rtc_peer_connection_create_offer(pc, &offer), RTC_OK);
+    ASSERT(strstr(offer.sdp, "a=ice-options:trickle") != NULL);
+
+    /* Round-trip: feeding the offer back in as remote desc must flip
+     * can_trickle and populate the remote fingerprint. */
+    rtc_peer_connection_t *pc2 = rtc_peer_connection_create(&config);
+    ASSERT(pc2 != NULL);
+    rtc_peer_connection_add_track(pc2, RTC_KIND_AUDIO, &opus);
+    offer.type = RTC_SDP_OFFER;
+    ASSERT_EQ(rtc_peer_connection_set_remote_desc(pc2, &offer), RTC_OK);
+    ASSERT(rtc_peer_connection_can_trickle_ice_candidates(pc2));
+    ASSERT(strlen(rtc_peer_connection_remote_fingerprint(pc2)) > 0);
+
+    printf("    local_fp=%.20s... trickle=%d\n", fp,
+           (int)rtc_peer_connection_can_trickle_ice_candidates(pc2));
+
+    rtc_peer_connection_close(pc);
+    rtc_peer_connection_close(pc2);
+    rtc_peer_connection_destroy(pc);
+    rtc_peer_connection_destroy(pc2);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Peer Connection Tests (New API)\n");
@@ -437,6 +490,7 @@ int main(void) {
     RUN_TEST(peer_get_stats);
     RUN_TEST(peer_add_transceiver_remove_track);
     RUN_TEST(peer_sender_parameters);
+    RUN_TEST(peer_identity_getters);
 
     rtc_cleanup();
     TEST_SUMMARY();
