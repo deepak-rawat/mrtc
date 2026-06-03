@@ -473,6 +473,50 @@ TEST(peer_identity_getters) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: restart_ice rotates ufrag in the next offer                  */
+/* ------------------------------------------------------------------ */
+TEST(peer_restart_ice) {
+    rtc_config_t config;
+    memset(&config, 0, sizeof(config));
+
+    rtc_peer_connection_t *pc = rtc_peer_connection_create(&config);
+    ASSERT(pc != NULL);
+
+    rtc_codec_t opus;
+    memset(&opus, 0, sizeof(opus));
+    opus.payload_type = 111;
+    strcpy(opus.mime_type, "audio/opus");
+    opus.clock_rate = 48000;
+    opus.channels = 2;
+    rtc_peer_connection_add_track(pc, RTC_KIND_AUDIO, &opus);
+
+    rtc_desc_t offer1;
+    ASSERT_EQ(rtc_peer_connection_create_offer(pc, &offer1), RTC_OK);
+    const char *u1 = strstr(offer1.sdp, "a=ice-ufrag:");
+    ASSERT(u1 != NULL);
+    char ufrag1[32] = {0};
+    sscanf(u1, "a=ice-ufrag:%31[^\r\n]", ufrag1);
+
+    /* Restart and re-offer; ufrag must change. */
+    ASSERT_EQ(rtc_peer_connection_restart_ice(pc), RTC_OK);
+    rtc_desc_t offer2;
+    ASSERT_EQ(rtc_peer_connection_create_offer(pc, &offer2), RTC_OK);
+    const char *u2 = strstr(offer2.sdp, "a=ice-ufrag:");
+    ASSERT(u2 != NULL);
+    char ufrag2[32] = {0};
+    sscanf(u2, "a=ice-ufrag:%31[^\r\n]", ufrag2);
+
+    ASSERT(strcmp(ufrag1, ufrag2) != 0);
+    printf("    restart_ice: %s -> %s\n", ufrag1, ufrag2);
+
+    /* NULL is invalid. */
+    ASSERT_EQ(rtc_peer_connection_restart_ice(NULL), RTC_ERR_INVALID);
+
+    rtc_peer_connection_close(pc);
+    rtc_peer_connection_destroy(pc);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Peer Connection Tests (New API)\n");
@@ -491,6 +535,7 @@ int main(void) {
     RUN_TEST(peer_add_transceiver_remove_track);
     RUN_TEST(peer_sender_parameters);
     RUN_TEST(peer_identity_getters);
+    RUN_TEST(peer_restart_ice);
 
     rtc_cleanup();
     TEST_SUMMARY();

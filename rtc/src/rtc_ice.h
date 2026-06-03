@@ -67,6 +67,11 @@ typedef struct {
 int rtc_ice_init(rtc_ice_agent_t *agent, rtc_transport_t *transport, const char *stun_server,
                  uint16_t stun_port);
 
+/* Regenerate ufrag/pwd. Used by peer connection restart_ice() before
+ * the next offer/answer is generated. Caller must not invoke after
+ * connectivity checks have started. */
+int rtc_ice_restart_credentials(rtc_ice_agent_t *agent);
+
 /* Gather local candidates (host + srflx) */
 int rtc_ice_gather(rtc_ice_agent_t *agent);
 

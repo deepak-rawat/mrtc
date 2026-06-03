@@ -175,6 +175,12 @@ const rtc_desc_t *rtc_peer_connection_remote_desc(const rtc_peer_connection_t *p
 int rtc_peer_connection_add_ice_candidate(rtc_peer_connection_t *pc,
                                           const rtc_ice_candidate_desc_t *cand);
 
+/* Trigger an ICE restart: regenerates local ufrag/pwd so the next
+ * create_offer/create_answer carries fresh credentials. Must be called
+ * before the connection has started (this build does not support
+ * mid-session renegotiation). Returns RTC_ERR_INVALID otherwise. */
+int rtc_peer_connection_restart_ice(rtc_peer_connection_t *pc);
+
 /* ---- Data channels ---- */
 
 /* Create a data channel with the given label and options.

@@ -802,6 +802,14 @@ int rtc_peer_connection_add_ice_candidate(rtc_peer_connection_t *pc,
     return RTC_ERR_GENERIC;
 }
 
+int rtc_peer_connection_restart_ice(rtc_peer_connection_t *pc) {
+    if (!pc)
+        return RTC_ERR_INVALID;
+    if (pc->connect_started)
+        return RTC_ERR_INVALID;
+    return rtc_ice_restart_credentials(&pc->ice);
+}
+
 /* ---- Data channels ---- */
 
 /* Send callback for data channel manager (sends via DTLS) */

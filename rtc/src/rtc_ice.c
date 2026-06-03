@@ -77,6 +77,15 @@ int rtc_ice_init(rtc_ice_agent_t *agent, rtc_transport_t *transport, const char 
     return RTC_OK;
 }
 
+int rtc_ice_restart_credentials(rtc_ice_agent_t *agent) {
+    if (!agent)
+        return RTC_ERR_INVALID;
+    rtc_random_string(agent->ufrag, ICE_UFRAG_LEN);
+    rtc_random_string(agent->pwd, ICE_PWD_LEN);
+    RTC_LOG_INFO("ICE credentials restarted: ufrag=%s", agent->ufrag);
+    return RTC_OK;
+}
+
 /* Gather host candidates from local interfaces */
 static int ice_gather_host(rtc_ice_agent_t *agent) {
     /* Get the port we bound to from the transport socket. Use
