@@ -51,6 +51,10 @@ struct rtc_rtp_sender {
     rtc_nack_buf_t *nack_buf;
     bool active;
 
+    /* App-set send parameters (RTCRtpSendParameters subset). 0 = unbounded. */
+    uint32_t max_bitrate_bps;
+    bool send_active; /* defaults to true; setParameters can suspend */
+
     /* Feedback callbacks */
     rtc_on_nack_fn on_nack;
     void *on_nack_user;

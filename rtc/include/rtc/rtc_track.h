@@ -62,6 +62,28 @@ int rtc_rtp_sender_get_target_bitrate(const rtc_rtp_sender_t *sender);
 /* Returns true and clears if a keyframe was requested by rate control. */
 bool rtc_rtp_sender_should_keyframe(rtc_rtp_sender_t *sender);
 
+/* ---- RTCRtpSendParameters (spec subset) ---- */
+
+/* One per simulcast layer in the spec; we model just the primary layer. */
+typedef struct {
+    bool active;             /* false suppresses transmission */
+    uint32_t max_bitrate_bps; /* 0 = unbounded */
+} rtc_rtp_send_encoding_t;
+
+typedef struct {
+    rtc_rtp_send_encoding_t encodings[1];
+    int encoding_count;
+} rtc_rtp_send_params_t;
+
+/* Snapshot the sender's current send parameters. */
+int rtc_rtp_sender_get_parameters(const rtc_rtp_sender_t *sender, rtc_rtp_send_params_t *params);
+
+/* Apply send parameters. Affects future sends:
+ *   active=false   -> sender_send returns RTC_OK without transmitting
+ *   max_bitrate_bps -> clamps rtc_rtp_sender_get_target_bitrate
+ * Returns RTC_OK on success. */
+int rtc_rtp_sender_set_parameters(rtc_rtp_sender_t *sender, const rtc_rtp_send_params_t *params);
+
 /* ---- Sender feedback callbacks (fired on transport thread) ---- */
 
 /* NACK: reports lost sequence numbers that were retransmitted. */

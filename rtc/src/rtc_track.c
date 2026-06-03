@@ -20,6 +20,10 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
         return RTC_ERR_INVALID;
     if (!sender->srtp || !sender->transport)
         return RTC_ERR_INVALID;
+    /* setParameters({active:false}) suspends transmission. Return OK so
+     * callers can keep feeding frames without treating it as an error. */
+    if (!sender->send_active)
+        return RTC_OK;
 
     /* Build RTP packet */
     rtc_rtp_packet_t pkt;
@@ -94,9 +98,17 @@ rtc_kind_t rtc_rtp_sender_kind(const rtc_rtp_sender_t *sender) {
 int rtc_rtp_sender_get_target_bitrate(const rtc_rtp_sender_t *sender) {
 #ifdef MRTC_ENABLE_RATE_CONTROL
     if (!sender || !sender->rate_ctrl)
-        return 0;
-    return rtc_rate_control_get_bitrate(sender->rate_ctrl);
+        return sender && sender->max_bitrate_bps ? (int)(sender->max_bitrate_bps / 1000) : 0;
+    int kbps = rtc_rate_control_get_bitrate(sender->rate_ctrl);
+    if (sender->max_bitrate_bps) {
+        int cap_kbps = (int)(sender->max_bitrate_bps / 1000);
+        if (cap_kbps > 0 && kbps > cap_kbps)
+            kbps = cap_kbps;
+    }
+    return kbps;
 #else
+    if (sender && sender->max_bitrate_bps)
+        return (int)(sender->max_bitrate_bps / 1000);
     (void)sender;
     return 0;
 #endif
@@ -127,6 +139,24 @@ void rtc_rtp_sender_on_pli(rtc_rtp_sender_t *sender, rtc_on_pli_fn fn, void *use
         return;
     sender->on_pli = fn;
     sender->on_pli_user = user;
+}
+
+int rtc_rtp_sender_get_parameters(const rtc_rtp_sender_t *sender, rtc_rtp_send_params_t *params) {
+    if (!sender || !params)
+        return RTC_ERR_INVALID;
+    memset(params, 0, sizeof(*params));
+    params->encoding_count = 1;
+    params->encodings[0].active = sender->send_active;
+    params->encodings[0].max_bitrate_bps = sender->max_bitrate_bps;
+    return RTC_OK;
+}
+
+int rtc_rtp_sender_set_parameters(rtc_rtp_sender_t *sender, const rtc_rtp_send_params_t *params) {
+    if (!sender || !params || params->encoding_count != 1)
+        return RTC_ERR_INVALID;
+    sender->send_active = params->encodings[0].active;
+    sender->max_bitrate_bps = params->encodings[0].max_bitrate_bps;
+    return RTC_OK;
 }
 
 /* ---- Internal handlers (called by peer connection on RTCP feedback) ---- */
@@ -245,6 +275,8 @@ void rtc_rtp_transceiver_init_slot(struct rtc_rtp_transceiver *t, int mid_index,
     t->sender.codec = *codec;
     t->sender.kind = kind;
     t->sender.active = true;
+    t->sender.send_active = true;
+    t->sender.max_bitrate_bps = 0;
     rtc_rtp_session_init(&t->sender.rtp_session, codec->payload_type, codec->clock_rate);
     rtc_rtcp_stats_init(&t->sender.rtcp_stats, t->sender.rtp_session.ssrc);
 

@@ -367,6 +367,59 @@ TEST(peer_add_transceiver_remove_track) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: sender get/set parameters                                    */
+/* ------------------------------------------------------------------ */
+TEST(peer_sender_parameters) {
+    rtc_config_t config;
+    memset(&config, 0, sizeof(config));
+
+    rtc_peer_connection_t *pc = rtc_peer_connection_create(&config);
+    ASSERT(pc != NULL);
+
+    rtc_codec_t vp8;
+    memset(&vp8, 0, sizeof(vp8));
+    vp8.payload_type = 96;
+    strcpy(vp8.mime_type, "video/VP8");
+    vp8.clock_rate = 90000;
+    rtc_rtp_sender_t *sender = rtc_peer_connection_add_track(pc, RTC_KIND_VIDEO, &vp8);
+    ASSERT(sender != NULL);
+
+    /* Defaults: active=true, max_bitrate_bps=0 */
+    rtc_rtp_send_params_t params;
+    ASSERT_EQ(rtc_rtp_sender_get_parameters(sender, &params), RTC_OK);
+    ASSERT_EQ(params.encoding_count, 1);
+    ASSERT(params.encodings[0].active);
+    ASSERT_EQ((int)params.encodings[0].max_bitrate_bps, 0);
+
+    /* Cap at 800 kbps */
+    params.encodings[0].max_bitrate_bps = 800000;
+    ASSERT_EQ(rtc_rtp_sender_set_parameters(sender, &params), RTC_OK);
+    /* get_target_bitrate clamps; if rate ctrl says >800 we expect 800;
+     * if it returns 0 (no estimate yet) we expect the cap as a floor in
+     * the no-rate-ctrl branch. Either way it must be <= 800. */
+    int t = rtc_rtp_sender_get_target_bitrate(sender);
+    ASSERT(t == 0 || t <= 800);
+
+    /* Suspend: sender_send must accept but not crash; we can't easily
+     * observe the wire (no SRTP yet), so just check the API contract. */
+    params.encodings[0].active = false;
+    ASSERT_EQ(rtc_rtp_sender_set_parameters(sender, &params), RTC_OK);
+    ASSERT_EQ(rtc_rtp_sender_get_parameters(sender, &params), RTC_OK);
+    ASSERT(!params.encodings[0].active);
+
+    /* Validation: NULL / empty params rejected. */
+    ASSERT_EQ(rtc_rtp_sender_get_parameters(NULL, &params), RTC_ERR_INVALID);
+    ASSERT_EQ(rtc_rtp_sender_set_parameters(sender, NULL), RTC_ERR_INVALID);
+    rtc_rtp_send_params_t empty = {0};
+    ASSERT_EQ(rtc_rtp_sender_set_parameters(sender, &empty), RTC_ERR_INVALID);
+
+    printf("    send params: cap=%u target=%d\n", 800000, t);
+
+    rtc_peer_connection_close(pc);
+    rtc_peer_connection_destroy(pc);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Peer Connection Tests (New API)\n");
@@ -383,6 +436,7 @@ int main(void) {
     RUN_TEST(peer_two_connect);
     RUN_TEST(peer_get_stats);
     RUN_TEST(peer_add_transceiver_remove_track);
+    RUN_TEST(peer_sender_parameters);
 
     rtc_cleanup();
     TEST_SUMMARY();
