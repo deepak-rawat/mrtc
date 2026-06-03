@@ -878,3 +878,35 @@ rtc_ice_connection_state_t rtc_peer_connection_ice_connection_state(
 rtc_connection_state_t rtc_peer_connection_connection_state(const rtc_peer_connection_t *pc) {
     return pc ? pc->connection_state : RTC_CONNECTION_CLOSED;
 }
+
+/* ---- Stats (getStats) ---- */
+
+int rtc_peer_connection_get_stats(const rtc_peer_connection_t *pc, rtc_stats_report_t *report) {
+    if (!pc || !report)
+        return RTC_ERR_INVALID;
+    memset(report, 0, sizeof(*report));
+    report->transceiver_count = pc->transceiver_count;
+    for (int i = 0; i < pc->transceiver_count; i++) {
+        const struct rtc_rtp_transceiver *t = &pc->transceivers[i];
+        rtc_transceiver_stats_t *s = &report->transceivers[i];
+
+        size_t mlen = strnlen(t->mid, sizeof(s->mid) - 1);
+        memcpy(s->mid, t->mid, mlen);
+        s->mid[mlen] = '\0';
+        s->kind = t->sender.kind;
+        s->dir = t->direction;
+
+        if (t->sender.active) {
+            s->out_ssrc = t->sender.rtp_session.ssrc;
+            s->out_packets_sent = t->sender.rtcp_stats.packets_sent;
+            s->out_bytes_sent = t->sender.rtcp_stats.octets_sent;
+        }
+        if (t->receiver.active) {
+            s->in_ssrc = t->receiver.ssrc;
+            s->in_packets_received = t->receiver.rtcp_stats.packets_received;
+            s->in_packets_lost = t->receiver.rtcp_stats.packets_lost;
+            s->in_jitter_q16 = t->receiver.rtcp_stats.jitter;
+        }
+    }
+    return RTC_OK;
+}

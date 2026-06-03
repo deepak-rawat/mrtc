@@ -276,6 +276,46 @@ TEST(peer_two_connect) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: get_stats produces a valid snapshot                          */
+/* ------------------------------------------------------------------ */
+TEST(peer_get_stats) {
+    rtc_config_t config;
+    memset(&config, 0, sizeof(config));
+
+    rtc_peer_connection_t *pc = rtc_peer_connection_create(&config);
+    ASSERT(pc != NULL);
+
+    rtc_codec_t opus;
+    memset(&opus, 0, sizeof(opus));
+    opus.payload_type = 111;
+    strcpy(opus.mime_type, "audio/opus");
+    opus.clock_rate = 48000;
+    opus.channels = 2;
+    rtc_rtp_sender_t *sender = rtc_peer_connection_add_track(pc, RTC_KIND_AUDIO, &opus);
+    ASSERT(sender != NULL);
+
+    /* Snapshot before any traffic: counters all zero, ssrc populated. */
+    rtc_stats_report_t report;
+    int rc = rtc_peer_connection_get_stats(pc, &report);
+    ASSERT_EQ(rc, RTC_OK);
+    ASSERT_EQ(report.transceiver_count, 1);
+    ASSERT_EQ((int)report.transceivers[0].kind, (int)RTC_KIND_AUDIO);
+    ASSERT(report.transceivers[0].out_ssrc != 0);
+    ASSERT_EQ((int)report.transceivers[0].out_packets_sent, 0);
+    ASSERT_EQ((int)report.transceivers[0].in_packets_received, 0);
+
+    /* NULL args */
+    ASSERT_EQ(rtc_peer_connection_get_stats(NULL, &report), RTC_ERR_INVALID);
+    ASSERT_EQ(rtc_peer_connection_get_stats(pc, NULL), RTC_ERR_INVALID);
+
+    printf("    stats: txn=%d mid=%s out_ssrc=%u\n", report.transceiver_count,
+           report.transceivers[0].mid, report.transceivers[0].out_ssrc);
+
+    rtc_peer_connection_close(pc);
+    rtc_peer_connection_destroy(pc);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Peer Connection Tests (New API)\n");
@@ -290,6 +330,7 @@ int main(void) {
     RUN_TEST(peer_signaling_states);
     RUN_TEST(peer_ice_candidates);
     RUN_TEST(peer_two_connect);
+    RUN_TEST(peer_get_stats);
 
     rtc_cleanup();
     TEST_SUMMARY();

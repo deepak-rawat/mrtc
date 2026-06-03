@@ -13,6 +13,7 @@
 #include "rtc_track.h"
 #include "rtc_data_channel.h"
 #include "rtc_peer.h"
+#include "rtc_stats.h"
 
 /* Library init / cleanup (call once) */
 int rtc_init(void);

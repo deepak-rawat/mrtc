@@ -9,6 +9,7 @@
 #define RTC_PEER_INTERNAL_H
 
 #include "rtc/rtc_peer.h"
+#include "rtc/rtc_stats.h"
 #include "rtc/rtc_u32_map.h"
 #include "rtc_data_channel_internal.h"
 #include "rtc_rtp.h"

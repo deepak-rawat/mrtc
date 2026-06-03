@@ -86,6 +86,15 @@ rtc_cleanup();
 
 Public API lives in `include/rtc/`; internal/private helpers such as STUN/TURN live in `src/`.
 
+Public headers:
+
+- `rtc_common.h` — error codes, log macros, platform abstractions
+- `rtc_peer.h` — `RTCPeerConnection` (lifecycle, SDP, ICE callbacks)
+- `rtc_track.h` — `RTCRtpSender` / `Receiver` / `Transceiver`
+- `rtc_data_channel.h` — `RTCDataChannel`
+- `rtc_stats.h` — `getStats()` snapshot reporting (RFC 7867 / W3C webrtc-stats subset)
+- `rtc.h` — umbrella include
+
 ## Module Details
 
 ### Transport Layer (`rtc_transport.h/c`)
