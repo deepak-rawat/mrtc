@@ -28,6 +28,14 @@ struct rtc_data_channel {
     void *on_close_user;
     rtc_on_dc_message_fn on_message;
     void *on_message_user;
+    rtc_on_dc_buffered_amount_low_fn on_buffered_low;
+    void *on_buffered_low_user;
+
+    /* Flow-control + observability counters */
+    uint64_t buffered_amount;            /* bytes queued in user space; always 0 today */
+    uint64_t buffered_amount_low_thresh; /* 0 = disabled */
+    uint64_t bytes_sent;
+    uint64_t bytes_received;
 
     /* Back-pointer to manager for sending */
     rtc_dc_manager_t *manager;
@@ -83,7 +91,21 @@ int rtc_data_channel_send(rtc_data_channel_t *dc, const uint8_t *data, size_t le
         return RTC_ERR_INVALID;
     if (dc->state != RTC_DC_OPEN)
         return RTC_ERR_INVALID;
-    return dc_send_message(dc, RTC_DC_MSG_DATA, data, len);
+
+    /* Synchronous send: model the spec semantics by bumping buffered_amount
+     * for the duration of the transmit, then dropping it back to 0. Fires
+     * the low-water callback if the prior value was above the threshold. */
+    uint64_t prev = dc->buffered_amount;
+    dc->buffered_amount += len;
+    int rc = dc_send_message(dc, RTC_DC_MSG_DATA, data, len);
+    dc->buffered_amount = prev; /* always returns to 0 today */
+    if (rc == RTC_OK) {
+        dc->bytes_sent += len;
+        if (dc->on_buffered_low && dc->buffered_amount_low_thresh > 0 &&
+            dc->buffered_amount <= dc->buffered_amount_low_thresh)
+            dc->on_buffered_low(dc->on_buffered_low_user);
+    }
+    return rc;
 }
 
 int rtc_data_channel_send_text(rtc_data_channel_t *dc, const char *text) {
@@ -140,6 +162,37 @@ uint16_t rtc_data_channel_id(const rtc_data_channel_t *dc) {
 
 rtc_data_channel_state_t rtc_data_channel_state(const rtc_data_channel_t *dc) {
     return dc ? dc->state : RTC_DC_CLOSED;
+}
+
+uint64_t rtc_data_channel_buffered_amount(const rtc_data_channel_t *dc) {
+    return dc ? dc->buffered_amount : 0;
+}
+
+uint64_t rtc_data_channel_buffered_amount_low_threshold(const rtc_data_channel_t *dc) {
+    return dc ? dc->buffered_amount_low_thresh : 0;
+}
+
+void rtc_data_channel_set_buffered_amount_low_threshold(rtc_data_channel_t *dc,
+                                                        uint64_t threshold) {
+    if (!dc)
+        return;
+    dc->buffered_amount_low_thresh = threshold;
+}
+
+void rtc_data_channel_on_buffered_amount_low(rtc_data_channel_t *dc,
+                                             rtc_on_dc_buffered_amount_low_fn fn, void *user) {
+    if (!dc)
+        return;
+    dc->on_buffered_low = fn;
+    dc->on_buffered_low_user = user;
+}
+
+uint64_t rtc_data_channel_bytes_sent(const rtc_data_channel_t *dc) {
+    return dc ? dc->bytes_sent : 0;
+}
+
+uint64_t rtc_data_channel_bytes_received(const rtc_data_channel_t *dc) {
+    return dc ? dc->bytes_received : 0;
 }
 
 /* ---------- Data Channel Manager ---------- */
@@ -305,8 +358,10 @@ int rtc_dc_manager_recv(rtc_dc_manager_t *mgr, const uint8_t *data, size_t len) 
 
         case RTC_DC_MSG_DATA: {
             rtc_data_channel_t *dc = dc_find_by_id(mgr, channel_id);
-            if (dc && dc->state == RTC_DC_OPEN && dc->on_message) {
-                dc->on_message(payload, payload_len, dc->on_message_user);
+            if (dc && dc->state == RTC_DC_OPEN) {
+                dc->bytes_received += payload_len;
+                if (dc->on_message)
+                    dc->on_message(payload, payload_len, dc->on_message_user);
             }
             break;
         }

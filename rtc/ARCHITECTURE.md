@@ -231,6 +231,8 @@ Wire format: `[1B channel_id] [1B msg_type] [2B length BE] [payload]`
 
 Message types: OPEN, ACK, DATA, CLOSE. Up to 16 concurrent channels (`RTC_DC_MAX_CHANNELS`). Manager handles OPEN/ACK handshake and dispatches via callbacks (on_open, on_message, on_close). Channels can be created locally via `rtc_peer_connection_create_data_channel()` or received remotely via `on_data_channel` callback.
 
+Per-channel observability: `rtc_data_channel_bytes_sent` / `_bytes_received` expose cumulative byte counters. The W3C `bufferedAmount`, `bufferedAmountLowThreshold`, and `onbufferedamountlow` surface is implemented but `bufferedAmount` is always 0 today because sends are synchronous (no internal queue); the API exists for spec parity and future async backpressure.
+
 Key functions: `rtc_data_channel_send()`, `rtc_data_channel_send_text()`, `rtc_data_channel_close()`
 
 ### Rate Control (`rtc_rate_control.h/c`)

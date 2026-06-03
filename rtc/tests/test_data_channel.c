@@ -352,6 +352,62 @@ TEST(dc_large_channel_id) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: buffered_amount + byte counters + low-water callback         */
+/* ------------------------------------------------------------------ */
+static int g_buffered_low_count = 0;
+static void on_buffered_low(void *user) {
+    (void)user;
+    g_buffered_low_count++;
+}
+
+TEST(dc_buffered_amount) {
+    rtc_dc_manager_t mgr_a, mgr_b;
+    g_peer_a = &mgr_a;
+    g_peer_b = &mgr_b;
+    rtc_dc_manager_init(&mgr_a, loopback_send_a, NULL);
+    rtc_dc_manager_init(&mgr_b, loopback_send_b, NULL);
+    g_remote_channel = NULL;
+    rtc_dc_manager_on_channel(&mgr_b, on_remote_channel, NULL);
+
+    rtc_data_channel_t *dc_a = rtc_dc_manager_create_channel(&mgr_a, "buf", NULL);
+    ASSERT(dc_a != NULL);
+    rtc_dc_manager_on_dtls_connected(&mgr_a);
+    rtc_dc_manager_on_dtls_connected(&mgr_b);
+    ASSERT(g_remote_channel != NULL);
+
+    /* Initial state. */
+    ASSERT_EQ((int)rtc_data_channel_buffered_amount(dc_a), 0);
+    ASSERT_EQ((int)rtc_data_channel_bytes_sent(dc_a), 0);
+    ASSERT_EQ((int)rtc_data_channel_bytes_received(g_remote_channel), 0);
+    ASSERT_EQ((int)rtc_data_channel_buffered_amount_low_threshold(dc_a), 0);
+
+    /* Threshold + callback: any send completes with buffered<=threshold. */
+    g_buffered_low_count = 0;
+    rtc_data_channel_set_buffered_amount_low_threshold(dc_a, 1024);
+    ASSERT_EQ((int)rtc_data_channel_buffered_amount_low_threshold(dc_a), 1024);
+    rtc_data_channel_on_buffered_amount_low(dc_a, on_buffered_low, NULL);
+
+    rtc_data_channel_on_message(g_remote_channel, on_message, NULL);
+    const char *payload = "hello, world!";
+    size_t plen = strlen(payload);
+    ASSERT_EQ(rtc_data_channel_send(dc_a, (const uint8_t *)payload, plen), RTC_OK);
+
+    ASSERT_EQ((int)rtc_data_channel_buffered_amount(dc_a), 0);
+    ASSERT_EQ((int)rtc_data_channel_bytes_sent(dc_a), (int)plen);
+    ASSERT_EQ((int)rtc_data_channel_bytes_received(g_remote_channel), (int)plen);
+    ASSERT_EQ(g_buffered_low_count, 1);
+
+    /* NULL safety on all new getters. */
+    ASSERT_EQ((int)rtc_data_channel_buffered_amount(NULL), 0);
+    ASSERT_EQ((int)rtc_data_channel_bytes_sent(NULL), 0);
+    ASSERT_EQ((int)rtc_data_channel_bytes_received(NULL), 0);
+    ASSERT_EQ((int)rtc_data_channel_buffered_amount_low_threshold(NULL), 0);
+
+    rtc_dc_manager_close(&mgr_a);
+    rtc_dc_manager_close(&mgr_b);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Data Channel Tests\n");
@@ -368,6 +424,7 @@ int main(void) {
     RUN_TEST(dc_multiple_channels);
     RUN_TEST(dc_send_before_open);
     RUN_TEST(dc_large_channel_id);
+    RUN_TEST(dc_buffered_amount);
 
     rtc_cleanup();
     TEST_SUMMARY();
