@@ -458,6 +458,55 @@ rtc_rtp_sender_t *rtc_peer_connection_add_track(rtc_peer_connection_t *pc, rtc_k
     return &t->sender;
 }
 
+rtc_rtp_transceiver_t *rtc_peer_connection_add_transceiver(
+    rtc_peer_connection_t *pc, rtc_kind_t kind, const rtc_codec_t *codec,
+    const rtc_rtp_transceiver_init_t *init) {
+    if (!pc || !codec)
+        return NULL;
+    if (pc->transceiver_count >= RTC_MAX_TRANSCEIVERS)
+        return NULL;
+    if (pc->connect_started)
+        return NULL;
+
+    struct rtc_rtp_transceiver *t = &pc->transceivers[pc->transceiver_count];
+    rtc_rtp_transceiver_init_slot(t, pc->transceiver_count, kind, codec);
+    if (init)
+        t->direction = init->direction;
+    /* Sender active only for sendrecv/sendonly. */
+    if (t->direction == RTC_DIR_RECVONLY || t->direction == RTC_DIR_INACTIVE)
+        t->sender.active = false;
+    rtc_u32_map_set(&pc->send_map, t->sender.rtp_session.ssrc, &t->sender);
+
+    pc->transceiver_count++;
+    return (rtc_rtp_transceiver_t *)t;
+}
+
+int rtc_peer_connection_remove_track(rtc_peer_connection_t *pc, rtc_rtp_sender_t *sender) {
+    if (!pc || !sender)
+        return RTC_ERR_INVALID;
+    if (pc->connect_started)
+        return RTC_ERR_INVALID;
+
+    for (int i = 0; i < pc->transceiver_count; i++) {
+        struct rtc_rtp_transceiver *t = &pc->transceivers[i];
+        if (&t->sender != sender)
+            continue;
+        t->sender.active = false;
+        switch (t->direction) {
+            case RTC_DIR_SENDRECV:
+                t->direction = RTC_DIR_RECVONLY;
+                break;
+            case RTC_DIR_SENDONLY:
+                t->direction = RTC_DIR_INACTIVE;
+                break;
+            default:
+                break;
+        }
+        return RTC_OK;
+    }
+    return RTC_ERR_INVALID;
+}
+
 int rtc_peer_connection_get_transceivers(rtc_peer_connection_t *pc, rtc_rtp_transceiver_t **out,
                                          int *count) {
     if (!pc || !count)

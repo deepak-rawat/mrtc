@@ -128,6 +128,24 @@ void rtc_peer_connection_destroy(rtc_peer_connection_t *pc);
 rtc_rtp_sender_t *rtc_peer_connection_add_track(rtc_peer_connection_t *pc, rtc_kind_t kind,
                                                 const rtc_codec_t *codec);
 
+/* RTCRtpTransceiverInit (spec subset). Direction defaults to sendrecv. */
+typedef struct {
+    rtc_direction_t direction;
+} rtc_rtp_transceiver_init_t;
+
+/* Add a transceiver with explicit direction (mirrors addTransceiver()).
+ * Must be called before create_offer/create_answer.
+ * Returns the transceiver, or NULL on error. */
+rtc_rtp_transceiver_t *rtc_peer_connection_add_transceiver(
+    rtc_peer_connection_t *pc, rtc_kind_t kind, const rtc_codec_t *codec,
+    const rtc_rtp_transceiver_init_t *init);
+
+/* Remove a sender's track (mirrors removeTrack()).
+ * Marks the sender inactive and transitions the transceiver direction:
+ *   sendrecv -> recvonly, sendonly -> inactive (others unchanged).
+ * Returns RTC_OK on success, RTC_ERR_INVALID if sender is not part of pc. */
+int rtc_peer_connection_remove_track(rtc_peer_connection_t *pc, rtc_rtp_sender_t *sender);
+
 /* Get transceivers. Writes up to *count pointers; sets *count to actual count. */
 int rtc_peer_connection_get_transceivers(rtc_peer_connection_t *pc, rtc_rtp_transceiver_t **out,
                                          int *count);

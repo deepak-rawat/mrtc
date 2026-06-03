@@ -316,6 +316,57 @@ TEST(peer_get_stats) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: add_transceiver honors direction; remove_track flips it      */
+/* ------------------------------------------------------------------ */
+TEST(peer_add_transceiver_remove_track) {
+    rtc_config_t config;
+    memset(&config, 0, sizeof(config));
+
+    rtc_peer_connection_t *pc = rtc_peer_connection_create(&config);
+    ASSERT(pc != NULL);
+
+    rtc_codec_t opus;
+    memset(&opus, 0, sizeof(opus));
+    opus.payload_type = 111;
+    strcpy(opus.mime_type, "audio/opus");
+    opus.clock_rate = 48000;
+    opus.channels = 2;
+
+    /* addTransceiver with sendonly */
+    rtc_rtp_transceiver_init_t init = {.direction = RTC_DIR_SENDONLY};
+    rtc_rtp_transceiver_t *t1 =
+        rtc_peer_connection_add_transceiver(pc, RTC_KIND_AUDIO, &opus, &init);
+    ASSERT(t1 != NULL);
+    ASSERT_EQ((int)rtc_rtp_transceiver_direction(t1), (int)RTC_DIR_SENDONLY);
+
+    /* addTransceiver with default (NULL init -> sendrecv from init_slot) */
+    rtc_rtp_transceiver_t *t2 =
+        rtc_peer_connection_add_transceiver(pc, RTC_KIND_AUDIO, &opus, NULL);
+    ASSERT(t2 != NULL);
+    ASSERT_EQ((int)rtc_rtp_transceiver_direction(t2), (int)RTC_DIR_SENDRECV);
+
+    /* removeTrack: sendonly -> inactive */
+    rtc_rtp_sender_t *s1 = rtc_rtp_transceiver_sender(t1);
+    ASSERT_EQ(rtc_peer_connection_remove_track(pc, s1), RTC_OK);
+    ASSERT_EQ((int)rtc_rtp_transceiver_direction(t1), (int)RTC_DIR_INACTIVE);
+
+    /* removeTrack: sendrecv -> recvonly */
+    rtc_rtp_sender_t *s2 = rtc_rtp_transceiver_sender(t2);
+    ASSERT_EQ(rtc_peer_connection_remove_track(pc, s2), RTC_OK);
+    ASSERT_EQ((int)rtc_rtp_transceiver_direction(t2), (int)RTC_DIR_RECVONLY);
+
+    /* removeTrack of a foreign sender fails. rtc_rtp_sender_t is opaque
+     * to public users, so use any non-NULL address that is not a real
+     * sender; remove_track must reject without crashing. */
+    int sentinel = 0;
+    ASSERT_EQ(rtc_peer_connection_remove_track(pc, (rtc_rtp_sender_t *)&sentinel),
+              RTC_ERR_INVALID);
+
+    rtc_peer_connection_close(pc);
+    rtc_peer_connection_destroy(pc);
+}
+
+/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Peer Connection Tests (New API)\n");
@@ -331,6 +382,7 @@ int main(void) {
     RUN_TEST(peer_ice_candidates);
     RUN_TEST(peer_two_connect);
     RUN_TEST(peer_get_stats);
+    RUN_TEST(peer_add_transceiver_remove_track);
 
     rtc_cleanup();
     TEST_SUMMARY();
