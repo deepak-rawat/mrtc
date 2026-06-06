@@ -458,9 +458,10 @@ rtc_rtp_sender_t *rtc_peer_connection_add_track(rtc_peer_connection_t *pc, rtc_k
     return &t->sender;
 }
 
-rtc_rtp_transceiver_t *rtc_peer_connection_add_transceiver(
-    rtc_peer_connection_t *pc, rtc_kind_t kind, const rtc_codec_t *codec,
-    const rtc_rtp_transceiver_init_t *init) {
+rtc_rtp_transceiver_t *rtc_peer_connection_add_transceiver(rtc_peer_connection_t *pc,
+                                                           rtc_kind_t kind,
+                                                           const rtc_codec_t *codec,
+                                                           const rtc_rtp_transceiver_init_t *init) {
     if (!pc || !codec)
         return NULL;
     if (pc->transceiver_count >= RTC_MAX_TRANSCEIVERS)

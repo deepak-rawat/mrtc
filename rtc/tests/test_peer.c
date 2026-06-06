@@ -359,8 +359,7 @@ TEST(peer_add_transceiver_remove_track) {
      * to public users, so use any non-NULL address that is not a real
      * sender; remove_track must reject without crashing. */
     int sentinel = 0;
-    ASSERT_EQ(rtc_peer_connection_remove_track(pc, (rtc_rtp_sender_t *)&sentinel),
-              RTC_ERR_INVALID);
+    ASSERT_EQ(rtc_peer_connection_remove_track(pc, (rtc_rtp_sender_t *)&sentinel), RTC_ERR_INVALID);
 
     rtc_peer_connection_close(pc);
     rtc_peer_connection_destroy(pc);

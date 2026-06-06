@@ -66,7 +66,7 @@ bool rtc_rtp_sender_should_keyframe(rtc_rtp_sender_t *sender);
 
 /* One per simulcast layer in the spec; we model just the primary layer. */
 typedef struct {
-    bool active;             /* false suppresses transmission */
+    bool active;              /* false suppresses transmission */
     uint32_t max_bitrate_bps; /* 0 = unbounded */
 } rtc_rtp_send_encoding_t;
 

@@ -15,20 +15,20 @@
 
 /* Per-transceiver stats (one entry per active m-line). */
 typedef struct {
-    char mid[32];           /* transceiver mid, "" if unset */
-    rtc_kind_t kind;        /* RTC_KIND_AUDIO or RTC_KIND_VIDEO */
-    rtc_direction_t dir;    /* current negotiated direction */
+    char mid[32];        /* transceiver mid, "" if unset */
+    rtc_kind_t kind;     /* RTC_KIND_AUDIO or RTC_KIND_VIDEO */
+    rtc_direction_t dir; /* current negotiated direction */
 
     /* Outbound (RTCOutboundRtpStreamStats subset) */
-    uint32_t out_ssrc;          /* 0 if sender inactive */
+    uint32_t out_ssrc; /* 0 if sender inactive */
     uint32_t out_packets_sent;
-    uint32_t out_bytes_sent;    /* RTP payload octets (RFC 3550 sender octet count) */
+    uint32_t out_bytes_sent; /* RTP payload octets (RFC 3550 sender octet count) */
 
     /* Inbound (RTCInboundRtpStreamStats subset) */
-    uint32_t in_ssrc;              /* 0 if receiver hasn't seen any packet */
+    uint32_t in_ssrc; /* 0 if receiver hasn't seen any packet */
     uint32_t in_packets_received;
     uint32_t in_packets_lost;
-    uint32_t in_jitter_q16;        /* Q16.16 fixed-point (RFC 3550 interarrival jitter) */
+    uint32_t in_jitter_q16; /* Q16.16 fixed-point (RFC 3550 interarrival jitter) */
 } rtc_transceiver_stats_t;
 
 typedef struct {

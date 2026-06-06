@@ -136,9 +136,10 @@ typedef struct {
 /* Add a transceiver with explicit direction (mirrors addTransceiver()).
  * Must be called before create_offer/create_answer.
  * Returns the transceiver, or NULL on error. */
-rtc_rtp_transceiver_t *rtc_peer_connection_add_transceiver(
-    rtc_peer_connection_t *pc, rtc_kind_t kind, const rtc_codec_t *codec,
-    const rtc_rtp_transceiver_init_t *init);
+rtc_rtp_transceiver_t *rtc_peer_connection_add_transceiver(rtc_peer_connection_t *pc,
+                                                           rtc_kind_t kind,
+                                                           const rtc_codec_t *codec,
+                                                           const rtc_rtp_transceiver_init_t *init);
 
 /* Remove a sender's track (mirrors removeTrack()).
  * Marks the sender inactive and transitions the transceiver direction:
