@@ -83,8 +83,8 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
     }
 
     /* Send via transport (sendto is thread-safe on UDP sockets) */
-    rtc_transport_t *t = (rtc_transport_t *)sender->transport;
-    return rtc_transport_send_to_remote(t, pkt.buf, pkt_len);
+    rtc_packet_io_t *t = (rtc_packet_io_t *)sender->transport;
+    return rtc_packet_io_send_to_remote(t, pkt.buf, pkt_len);
 }
 
 const rtc_codec_t *rtc_rtp_sender_get_codec(const rtc_rtp_sender_t *sender) {
@@ -171,14 +171,14 @@ void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_s
     if (!sender->nack_buf || !sender->transport)
         goto notify;
 
-    rtc_transport_t *t = (rtc_transport_t *)sender->transport;
+    rtc_packet_io_t *t = (rtc_packet_io_t *)sender->transport;
     for (int i = 0; i < count; i++) {
         const uint8_t *pkt;
         size_t pkt_len;
         uint16_t twcc_seq = 0;
         if (!rtc_nack_buf_retransmit(sender->nack_buf, lost_seqs[i], &pkt, &pkt_len, &twcc_seq))
             continue; /* not in buffer or per-seq retransmit cap hit */
-        rtc_transport_send_to_remote(t, pkt, pkt_len);
+        rtc_packet_io_send_to_remote(t, pkt, pkt_len);
 #ifdef MRTC_ENABLE_TWCC
         /* The retransmit carries the original TWCC seq. Drop it from the
          * sender ring so handle_rtcp_twcc skips this seq when feedback
@@ -304,7 +304,7 @@ void rtc_rtp_transceiver_close_resources(struct rtc_rtp_transceiver *t) {
 }
 
 void rtc_rtp_sender_attach(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
-                           rtc_transport_t *transport) {
+                           rtc_packet_io_t *transport) {
     if (!s || !s->active)
         return;
     s->srtp = srtp_send;
@@ -347,7 +347,7 @@ void rtc_rtp_receiver_activate(struct rtc_rtp_receiver *r) {
  * the largest RTCP packet plus the 4-byte SRTCP index trailer plus the auth
  * tag (see rtc_srtp_protect_rtcp). */
 void rtc_rtp_sender_emit_sr(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
-                            rtc_transport_t *transport) {
+                            rtc_packet_io_t *transport) {
     if (!s || !s->active || s->rtcp_stats.packets_sent == 0)
         return;
     rtc_rtcp_packet_t pkt;
@@ -360,12 +360,12 @@ void rtc_rtp_sender_emit_sr(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
     size_t len = pkt.buf_len;
     if (rtc_srtp_protect_rtcp(srtp_send, buf, &len, sizeof(buf)) != RTC_OK)
         return;
-    rtc_transport_send_to_remote(transport, buf, len);
+    rtc_packet_io_send_to_remote(transport, buf, len);
     s->rtcp_stats.last_report_time = rtc_time_ms();
 }
 
 void rtc_rtp_receiver_emit_rr(struct rtc_rtp_receiver *r, rtc_srtp_ctx_t *srtp_send,
-                              rtc_transport_t *transport) {
+                              rtc_packet_io_t *transport) {
     if (!r || !r->active || r->rtcp_stats.packets_received == 0)
         return;
     rtc_rtcp_packet_t pkt;
@@ -378,7 +378,7 @@ void rtc_rtp_receiver_emit_rr(struct rtc_rtp_receiver *r, rtc_srtp_ctx_t *srtp_s
     size_t len = pkt.buf_len;
     if (rtc_srtp_protect_rtcp(srtp_send, buf, &len, sizeof(buf)) != RTC_OK)
         return;
-    rtc_transport_send_to_remote(transport, buf, len);
+    rtc_packet_io_send_to_remote(transport, buf, len);
     r->rtcp_stats.last_report_time = rtc_time_ms();
 }
 

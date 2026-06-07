@@ -8,27 +8,27 @@
  *  - Packet classification and callback dispatch
  *  - Timer management for protocol retransmissions
  */
-#ifndef RTC_TRANSPORT_H
-#define RTC_TRANSPORT_H
+#ifndef RTC_PACKET_IO_H
+#define RTC_PACKET_IO_H
 
 #include "rtc_common.h"
 #include "rtc_poller.h"
 
 #include <stdatomic.h>
 
-#define RTC_TRANSPORT_MAX_TIMERS 16
+#define RTC_PACKET_IO_MAX_TIMERS 16
 
 /* Recv buffer sized for jumbo frames so DTLS records / RTP packets near
  * the jumbo MTU are not silently truncated. */
-#define RTC_TRANSPORT_BUF_SIZE 9216
+#define RTC_PACKET_IO_BUF_SIZE 9216
 
 /* Max packets drained per poll wakeup before yielding to timers.
  * Bounds worst-case timer lateness under packet bursts. */
-#define RTC_TRANSPORT_RECV_BATCH 16
+#define RTC_PACKET_IO_RECV_BATCH 16
 
 /* Requested kernel socket buffer size (bytes). The kernel may clamp this
  * to a system maximum; the actual value is logged at init time. */
-#define RTC_TRANSPORT_SOCKBUF_BYTES (1 * 1024 * 1024)
+#define RTC_PACKET_IO_SOCKBUF_BYTES (1 * 1024 * 1024)
 
 /* Packet classification per RFC 7983 */
 typedef enum {
@@ -55,7 +55,7 @@ typedef enum {
  * `from`) after returning. Copy into the callee's own storage if the
  * payload needs to outlive the callback.
  */
-typedef void (*rtc_transport_recv_fn)(rtc_pkt_type_t type, const uint8_t *data, size_t len,
+typedef void (*rtc_packet_io_recv_fn)(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                                       const rtc_addr_t *from, void *user);
 
 /* Timer callback */
@@ -70,14 +70,14 @@ typedef struct {
 } rtc_timer_t;
 
 /* TODO: replace the fixed-size timer array with a min-heap if
- * RTC_TRANSPORT_MAX_TIMERS ever grows past ~32. Each poll-wakeup walks
+ * RTC_PACKET_IO_MAX_TIMERS ever grows past ~32. Each poll-wakeup walks
  * the array twice (next-deadline + fire-expired) so O(N) is fine at 16
  * slots but becomes the loop at hundreds. */
 
 /* Timer handle (index + generation for ABA safety) */
 typedef int rtc_timer_id_t;
 
-typedef struct rtc_transport {
+typedef struct rtc_packet_io {
     /* Socket. Atomic so concurrent senders that race with close see
      * RTC_INVALID_SOCKET and return an error instead of using a freed fd. */
     _Atomic rtc_socket_t sock;
@@ -90,17 +90,17 @@ typedef struct rtc_transport {
     rtc_thread_t thread;
     _Atomic bool running; /* set false from any thread to stop poller loop */
 
-    /* Packet callback. Installed by rtc_transport_init() before the
+    /* Packet callback. Installed by rtc_packet_io_init() before the
      * background thread starts; never changed. Read unlocked on the hot
      * path. */
-    rtc_transport_recv_fn on_recv;
+    rtc_packet_io_recv_fn on_recv;
     void *recv_user;
 
     /* Timer slots, their mutex, and the high-water mark of how many were
      * ever in use simultaneously. HWM is logged on close to surface
      * near-exhaustion before it bites (add_timer returning -1 silently
      * breaks features). */
-    rtc_timer_t timers[RTC_TRANSPORT_MAX_TIMERS];
+    rtc_timer_t timers[RTC_PACKET_IO_MAX_TIMERS];
     rtc_mutex_t timer_mutex;
     int timer_slot_hwm;
 
@@ -124,7 +124,7 @@ typedef struct rtc_transport {
      * Backpressure: a non-zero / growing recv_drain_full or
      * recv_kernel_drops indicates the network is delivering faster than
      * we can process. Higher layers (BWE, pacer) should monitor these
-     * via rtc_transport_get_stats() and reduce send rate when they
+     * via rtc_packet_io_get_stats() and reduce send rate when they
      * grow. No callback hook yet — polling is sufficient at the cadence
      * BWE already runs (sub-second). */
     _Atomic uint64_t pkts_recv;
@@ -146,10 +146,10 @@ typedef struct rtc_transport {
     _Atomic bool last_local_valid;
 
     /* Linux recvmmsg batch arena. Allocated in init, freed in close.
-     * Sized for RTC_TRANSPORT_RECV_BATCH packets at full BUF_SIZE so a
+     * Sized for RTC_PACKET_IO_RECV_BATCH packets at full BUF_SIZE so a
      * single syscall can pull a whole burst. NULL on non-Linux. */
     void *recv_batch_arena;
-} rtc_transport_t;
+} rtc_packet_io_t;
 
 /* Snapshot of transport counters. */
 typedef struct {
@@ -162,44 +162,44 @@ typedef struct {
     uint64_t recv_drain_full;
     uint64_t recv_kernel_drops; /* SO_RXQ_OVFL counter (Linux only; else 0) */
     int timer_slot_hwm;
-} rtc_transport_stats_t;
+} rtc_packet_io_stats_t;
 
 /*
  * Create UDP socket, install the recv callback, and start the poller
  * thread. on_recv (may be NULL) fires on the transport thread.
  */
-int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *user);
+int rtc_packet_io_init(rtc_packet_io_t *t, rtc_packet_io_recv_fn on_recv, void *user);
 
 /* Thread-safe: send data to a specific destination address */
-int rtc_transport_send(rtc_transport_t *t, const uint8_t *data, size_t len, const rtc_addr_t *dest);
+int rtc_packet_io_send(rtc_packet_io_t *t, const uint8_t *data, size_t len, const rtc_addr_t *dest);
 
 /* Thread-safe: send data to the selected remote (set by ICE) */
-int rtc_transport_send_to_remote(rtc_transport_t *t, const uint8_t *data, size_t len);
+int rtc_packet_io_send_to_remote(rtc_packet_io_t *t, const uint8_t *data, size_t len);
 
 /* Set the selected remote address (called by ICE after connect) */
-void rtc_transport_set_remote(rtc_transport_t *t, const rtc_addr_t *addr);
+void rtc_packet_io_set_remote(rtc_packet_io_t *t, const rtc_addr_t *addr);
 
 /*
  * Schedule a timer callback at absolute deadline (rtc_time_ms).
  * Returns timer ID >= 0, or < 0 on error.
  * Thread-safe.
  */
-rtc_timer_id_t rtc_transport_add_timer(rtc_transport_t *t, uint64_t deadline_ms, rtc_timer_fn fn,
+rtc_timer_id_t rtc_packet_io_add_timer(rtc_packet_io_t *t, uint64_t deadline_ms, rtc_timer_fn fn,
                                        void *user);
 
 /* Cancel a pending timer. Thread-safe. */
-void rtc_transport_cancel_timer(rtc_transport_t *t, rtc_timer_id_t id);
+void rtc_packet_io_cancel_timer(rtc_packet_io_t *t, rtc_timer_id_t id);
 
 /* Get the underlying socket (for getsockname during ICE gathering) */
-rtc_socket_t rtc_transport_get_socket(const rtc_transport_t *t);
+rtc_socket_t rtc_packet_io_get_socket(const rtc_packet_io_t *t);
 
 /* Get the local bound address */
-int rtc_transport_get_local_addr(rtc_transport_t *t, rtc_addr_t *out);
+int rtc_packet_io_get_local_addr(rtc_packet_io_t *t, rtc_addr_t *out);
 
 /* Read a snapshot of internal counters. Lock-free. */
-void rtc_transport_get_stats(const rtc_transport_t *t, rtc_transport_stats_t *out);
+void rtc_packet_io_get_stats(const rtc_packet_io_t *t, rtc_packet_io_stats_t *out);
 
 /* Stop thread, close socket, free resources */
-void rtc_transport_close(rtc_transport_t *t);
+void rtc_packet_io_close(rtc_packet_io_t *t);
 
-#endif /* RTC_TRANSPORT_H */
+#endif /* RTC_PACKET_IO_H */

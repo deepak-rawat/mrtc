@@ -25,7 +25,7 @@ static int peer_dc_send(const uint8_t *data, size_t len, void *user);
 
 static int peer_dtls_send(const uint8_t *data, size_t len, void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
-    return rtc_transport_send_to_remote(&pc->transport, data, len);
+    return rtc_packet_io_send_to_remote(&pc->transport, data, len);
 }
 
 /* ---- Complete connection (called on transport thread after DTLS connects) ---- */
@@ -97,7 +97,7 @@ void peer_complete_connection(rtc_peer_connection_t *pc) {
     RTC_LOG_INFO("Peer: connected! Ready to send/receive media.");
 
     /* Start periodic RTCP send timer */
-    pc->rtcp_timer_id = rtc_transport_add_timer(&pc->transport, rtc_time_ms() + RTCP_INTERVAL_MS,
+    pc->rtcp_timer_id = rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + RTCP_INTERVAL_MS,
                                                 peer_rtcp_timer, pc);
 
     /* Start TWCC feedback timer if negotiated for inbound. */
@@ -105,7 +105,7 @@ void peer_complete_connection(rtc_peer_connection_t *pc) {
     if (pc->twcc_ext_id_recv != 0) {
         rtc_twcc_receiver_init(&pc->twcc_receiver);
         pc->twcc_fb_timer_id =
-            rtc_transport_add_timer(&pc->transport, rtc_time_ms() + 100, peer_twcc_fb_timer, pc);
+            rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + 100, peer_twcc_fb_timer, pc);
     }
 
     /* Bind the BWE bitrate callback through a per-peer trampoline. */
@@ -124,7 +124,7 @@ static void peer_dtls_retransmit_timer(void *user) {
     rtc_dtls_retransmit(&pc->dtls);
 
     /* Re-schedule until handshake completes */
-    rtc_transport_add_timer(&pc->transport, rtc_time_ms() + 1000, peer_dtls_retransmit_timer, pc);
+    rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + 1000, peer_dtls_retransmit_timer, pc);
 }
 
 /* ---- Connect timer (fires on transport thread) ---- */
@@ -152,7 +152,7 @@ static void peer_start_dtls(rtc_peer_connection_t *pc) {
     }
 
     /* Schedule DTLS retransmission timer (fires every 1s until handshake completes) */
-    rtc_transport_add_timer(&pc->transport, rtc_time_ms() + 1000, peer_dtls_retransmit_timer, pc);
+    rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + 1000, peer_dtls_retransmit_timer, pc);
 }
 
 static void peer_ice_check_timer(void *user) {
@@ -181,7 +181,7 @@ static void peer_ice_check_timer(void *user) {
 
     /* Still checking — send another binding request and re-arm. */
     rtc_ice_send_check(&pc->ice);
-    rtc_transport_add_timer(&pc->transport, rtc_time_ms() + PEER_ICE_CHECK_INTERVAL_MS,
+    rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + PEER_ICE_CHECK_INTERVAL_MS,
                             peer_ice_check_timer, pc);
 }
 
@@ -205,7 +205,7 @@ static void peer_connect_timer(void *user) {
     }
 
     /* Poll ICE state every PEER_ICE_CHECK_INTERVAL_MS until CONNECTED or timeout. */
-    rtc_transport_add_timer(&pc->transport, rtc_time_ms() + PEER_ICE_CHECK_INTERVAL_MS,
+    rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + PEER_ICE_CHECK_INTERVAL_MS,
                             peer_ice_check_timer, pc);
 }
 
@@ -302,7 +302,7 @@ static void peer_try_connect(rtc_peer_connection_t *pc) {
     pc->connect_started = true;
 
     /* Schedule connection on transport thread (0-delay timer) */
-    rtc_transport_add_timer(&pc->transport, rtc_time_ms(), peer_connect_timer, pc);
+    rtc_packet_io_add_timer(&pc->transport, rtc_time_ms(), peer_connect_timer, pc);
 }
 
 /* ---- Public API ---- */
@@ -333,7 +333,7 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
     }
 
     /* Initialize transport (socket + thread). */
-    int rc = rtc_transport_init(&pc->transport, peer_transport_recv, pc);
+    int rc = rtc_packet_io_init(&pc->transport, peer_transport_recv, pc);
     if (rc != RTC_OK) {
         free(pc->app_buf);
         free(pc);
@@ -342,7 +342,7 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
 
     /* Initialize SSRC → receiver lookup map */
     if (rtc_u32_map_init(&pc->recv_map) != RTC_OK) {
-        rtc_transport_close(&pc->transport);
+        rtc_packet_io_close(&pc->transport);
         free(pc->app_buf);
         free(pc);
         return NULL;
@@ -351,7 +351,7 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
     /* Initialize SSRC → sender lookup map */
     if (rtc_u32_map_init(&pc->send_map) != RTC_OK) {
         rtc_u32_map_free(&pc->recv_map);
-        rtc_transport_close(&pc->transport);
+        rtc_packet_io_close(&pc->transport);
         free(pc->app_buf);
         free(pc);
         return NULL;
@@ -361,7 +361,7 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
     rc = rtc_ice_init(&pc->ice, &pc->transport, pc->stun_server[0] ? pc->stun_server : NULL,
                       pc->stun_port);
     if (rc != RTC_OK) {
-        rtc_transport_close(&pc->transport);
+        rtc_packet_io_close(&pc->transport);
         free(pc->app_buf);
         free(pc);
         return NULL;
@@ -370,7 +370,7 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
     /* Generate DTLS certificate (needed for fingerprint in SDP) */
     rc = rtc_dtls_init(&pc->dtls, RTC_DTLS_ROLE_CLIENT, peer_dtls_send, pc);
     if (rc != RTC_OK) {
-        rtc_transport_close(&pc->transport);
+        rtc_packet_io_close(&pc->transport);
         free(pc->app_buf);
         free(pc);
         return NULL;
@@ -389,7 +389,7 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc) {
     /* Close the transport FIRST. This joins the I/O thread, after which no
      * recv callback or timer can fire. Everything below this point is
      * therefore safe to tear down without racing the transport thread. */
-    rtc_transport_close(&pc->transport);
+    rtc_packet_io_close(&pc->transport);
 
     rtc_dc_manager_close(&pc->dc_manager);
     rtc_srtp_close(&pc->srtp_send);
@@ -828,7 +828,7 @@ static int peer_dc_send(const uint8_t *data, size_t len, void *user) {
     uint8_t buf[2048];
     int pending;
     while ((pending = BIO_read(pc->dtls.wbio, buf, sizeof(buf))) > 0) {
-        rtc_transport_send_to_remote(&pc->transport, buf, (size_t)pending);
+        rtc_packet_io_send_to_remote(&pc->transport, buf, (size_t)pending);
     }
 
     return RTC_OK;

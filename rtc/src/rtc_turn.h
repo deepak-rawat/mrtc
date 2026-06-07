@@ -11,7 +11,7 @@
 #include "rtc_stun.h"
 
 /* Forward declarations */
-typedef struct rtc_transport rtc_transport_t;
+typedef struct rtc_packet_io rtc_packet_io_t;
 
 #define TURN_MAX_CHANNELS    8
 #define TURN_MAX_PERMISSIONS 16
@@ -36,7 +36,7 @@ typedef struct {
 
 typedef struct rtc_turn_client {
     rtc_turn_config_t cfg;
-    rtc_transport_t *transport;
+    rtc_packet_io_t *transport;
     rtc_addr_t server_addr;
 
     /* Allocation state */
@@ -58,7 +58,7 @@ typedef struct rtc_turn_client {
 } rtc_turn_client_t;
 
 /* Initialize TURN client (does not allocate yet) */
-rtc_err_t rtc_turn_init(rtc_turn_client_t *tc, rtc_transport_t *transport,
+rtc_err_t rtc_turn_init(rtc_turn_client_t *tc, rtc_packet_io_t *transport,
                         const rtc_turn_config_t *cfg);
 
 /* Send Allocate request to server. Returns relay address in tc->relay_addr. */

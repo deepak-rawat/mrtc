@@ -2,7 +2,7 @@
  * ICE (RFC 8445) - Minimal ICE-lite / ICE-controlling implementation.
  *
  * Gathers host and server-reflexive candidates, performs connectivity checks.
- * Uses an rtc_transport_t for all socket I/O (transport is not owned by ICE).
+ * Uses an rtc_packet_io_t for all socket I/O (transport is not owned by ICE).
  */
 #ifndef RTC_ICE_H
 #define RTC_ICE_H
@@ -11,8 +11,8 @@
 #include "rtc_stun.h"
 #include "rtc_sdp.h" /* for rtc_ice_candidate_t, ICE_MAX_CANDIDATES, etc. */
 
-/* Forward declaration - avoid including rtc_transport.h to prevent circular deps */
-typedef struct rtc_transport rtc_transport_t;
+/* Forward declaration - avoid including rtc_packet_io.h to prevent circular deps */
+typedef struct rtc_packet_io rtc_packet_io_t;
 
 typedef enum {
     ICE_STATE_NEW,
@@ -46,7 +46,7 @@ typedef struct {
     rtc_ice_state_t state;
 
     /* Transport (borrowed pointer, not owned) */
-    rtc_transport_t *transport;
+    rtc_packet_io_t *transport;
 
     /* STUN server for srflx gathering */
     char stun_server[64];
@@ -64,7 +64,7 @@ typedef struct {
 } rtc_ice_agent_t;
 
 /* Initialize an ICE agent with a borrowed transport, generate ufrag/pwd */
-int rtc_ice_init(rtc_ice_agent_t *agent, rtc_transport_t *transport, const char *stun_server,
+int rtc_ice_init(rtc_ice_agent_t *agent, rtc_packet_io_t *transport, const char *stun_server,
                  uint16_t stun_port);
 
 /* Regenerate ufrag/pwd. Used by peer connection restart_ice() before
@@ -85,7 +85,7 @@ int rtc_ice_add_remote_candidate(rtc_ice_agent_t *agent, const rtc_ice_candidate
  * Kick off connectivity checks (non-blocking).
  * Sends the first STUN binding request and sets state to CHECKING. The caller
  * is responsible for scheduling periodic rtc_ice_send_check() retries (e.g.
- * via rtc_transport_add_timer) until state transitions to CONNECTED or
+ * via rtc_packet_io_add_timer) until state transitions to CONNECTED or
  * rtc_ice_check_deadline_passed() returns true.
  *
  * STUN binding responses are processed asynchronously through the transport's

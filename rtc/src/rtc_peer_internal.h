@@ -15,7 +15,7 @@
 #include "rtc_rtp.h"
 #include "rtc_rtp_ext.h"
 #include "rtc_rtcp.h"
-#include "rtc_transport.h"
+#include "rtc_packet_io.h"
 #include "rtc_ice.h"
 #include "rtc_dtls.h"
 #include "rtc_srtp.h"
@@ -94,7 +94,7 @@ struct rtc_rtp_transceiver {
 
 struct rtc_peer_connection {
     /* Transport (owns socket and I/O thread) */
-    rtc_transport_t transport;
+    rtc_packet_io_t transport;
 
     /* Protocol components (touched only on transport thread after connect) */
     rtc_ice_agent_t ice;
@@ -231,7 +231,7 @@ void rtc_rtp_transceiver_close_resources(struct rtc_rtp_transceiver *t);
 
 /* Wire a sender to its SRTP send context + transport so it can send. */
 void rtc_rtp_sender_attach(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
-                           rtc_transport_t *transport);
+                           rtc_packet_io_t *transport);
 
 /* Bind transport-cc tagging on a sender (no-op when MRTC_ENABLE_TWCC is off). */
 void rtc_rtp_sender_attach_twcc(struct rtc_rtp_sender *s, void *twcc_sender, uint8_t ext_id);
@@ -244,9 +244,9 @@ void rtc_rtp_receiver_activate(struct rtc_rtp_receiver *r);
 
 /* Build SR / RR for a single sender or receiver, SRTCP-protect, send. */
 void rtc_rtp_sender_emit_sr(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
-                            rtc_transport_t *transport);
+                            rtc_packet_io_t *transport);
 void rtc_rtp_receiver_emit_rr(struct rtc_rtp_receiver *r, rtc_srtp_ctx_t *srtp_send,
-                              rtc_transport_t *transport);
+                              rtc_packet_io_t *transport);
 
 /* Serialize a single transceiver into an SDP m= section. */
 void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc_sdp_media_t *m);
@@ -257,7 +257,7 @@ void peer_complete_connection(rtc_peer_connection_t *pc);
 
 /* ---- Entry points defined in rtc_peer_packets.c ---- */
 
-/* Transport recv callback (registered with rtc_transport_init). */
+/* Transport recv callback (registered with rtc_packet_io_init). */
 void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                          const rtc_addr_t *from, void *user);
 

@@ -6,7 +6,7 @@
  * on the transport socket for simplicity during gathering.
  */
 #include "rtc_turn.h"
-#include "rtc_transport.h"
+#include "rtc_packet_io.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -70,7 +70,7 @@ static int finalize_with_key(rtc_turn_client_t *tc, rtc_stun_msg_t *msg) {
     return rtc_stun_finalize(msg, NULL);
 }
 
-rtc_err_t rtc_turn_init(rtc_turn_client_t *tc, rtc_transport_t *transport,
+rtc_err_t rtc_turn_init(rtc_turn_client_t *tc, rtc_packet_io_t *transport,
                         const rtc_turn_config_t *cfg) {
     memset(tc, 0, sizeof(*tc));
     tc->cfg = *cfg;

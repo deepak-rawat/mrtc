@@ -3,10 +3,10 @@
  *
  * Gathers host candidates from local interfaces and server-reflexive
  * candidates via STUN. Performs simplified connectivity checks.
- * Uses an rtc_transport_t for all socket I/O.
+ * Uses an rtc_packet_io_t for all socket I/O.
  */
 #include "rtc_ice.h"
-#include "rtc_transport.h"
+#include "rtc_packet_io.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,7 +49,7 @@ static uint32_t ice_candidate_priority(rtc_ice_candidate_type_t type, int local_
     return (type_pref << 24) | ((uint32_t)local_pref << 8) | (256 - (uint32_t)component);
 }
 
-int rtc_ice_init(rtc_ice_agent_t *agent, rtc_transport_t *transport, const char *stun_server,
+int rtc_ice_init(rtc_ice_agent_t *agent, rtc_packet_io_t *transport, const char *stun_server,
                  uint16_t stun_port) {
     memset(agent, 0, sizeof(*agent));
     agent->state = ICE_STATE_NEW;
@@ -93,7 +93,7 @@ static int ice_gather_host(rtc_ice_agent_t *agent) {
      * (dual-stack) and a sockaddr_in is too small. sin_port / sin6_port
      * happen to live at the same byte offset, so we can read the port
      * via a sockaddr_in cast on the properly-sized buffer. */
-    rtc_socket_t sock = rtc_transport_get_socket(agent->transport);
+    rtc_socket_t sock = rtc_packet_io_get_socket(agent->transport);
     struct sockaddr_storage local_ss;
     socklen_t local_len = sizeof(local_ss);
     if (getsockname(sock, (struct sockaddr *)&local_ss, &local_len) != 0)
@@ -201,7 +201,7 @@ static int ice_gather_srflx(rtc_ice_agent_t *agent) {
         return RTC_OK; /* no STUN server configured */
 
     rtc_addr_t mapped;
-    rtc_socket_t sock = rtc_transport_get_socket(agent->transport);
+    rtc_socket_t sock = rtc_packet_io_get_socket(agent->transport);
     int rc = rtc_stun_binding(agent->stun_server, agent->stun_port, sock, &mapped);
     if (rc != RTC_OK) {
         RTC_LOG_WARN("ICE: STUN binding failed (rc=%d), continuing without srflx", rc);
@@ -268,7 +268,7 @@ int rtc_ice_add_remote_candidate(rtc_ice_agent_t *agent, const rtc_ice_candidate
 }
 
 /* Send a STUN Binding Success Response to a remote peer */
-static void ice_send_binding_response(rtc_transport_t *transport, const uint8_t *req_buf,
+static void ice_send_binding_response(rtc_packet_io_t *transport, const uint8_t *req_buf,
                                       const rtc_addr_t *from) {
     uint8_t resp[128];
     size_t pos = STUN_HEADER_SIZE;
@@ -297,7 +297,7 @@ static void ice_send_binding_response(rtc_transport_t *transport, const uint8_t 
     write_u32_be(resp + 4, STUN_MAGIC_COOKIE);
     memcpy(resp + 8, req_buf + 8, STUN_TXN_ID_SIZE); /* copy transaction ID */
 
-    rtc_transport_send(transport, resp, pos, from);
+    rtc_packet_io_send(transport, resp, pos, from);
 }
 
 int rtc_ice_send_check(rtc_ice_agent_t *agent) {
@@ -334,7 +334,7 @@ int rtc_ice_send_check(rtc_ice_agent_t *agent) {
     /* Remember the txn id so rtc_ice_handle_stun can match the response */
     memcpy(agent->last_txn_id, req.txn_id, STUN_TXN_ID_SIZE);
 
-    rc = rtc_transport_send(agent->transport, req.buf, req.buf_len, &remote->addr);
+    rc = rtc_packet_io_send(agent->transport, req.buf, req.buf_len, &remote->addr);
     agent->check_round++;
     return rc;
 }
@@ -357,7 +357,7 @@ int rtc_ice_connect(rtc_ice_agent_t *agent) {
                  agent->remote_candidate_count);
 
     /* Fire the first check synchronously; subsequent retries are scheduled by
-     * the caller via rtc_transport_add_timer + rtc_ice_send_check. The
+     * the caller via rtc_packet_io_add_timer + rtc_ice_send_check. The
      * transport's recv callback dispatches BINDING_RESPONSE to
      * rtc_ice_handle_stun, which transitions state to CONNECTED. */
     return rtc_ice_send_check(agent);
@@ -407,7 +407,7 @@ void rtc_ice_handle_stun(rtc_ice_agent_t *agent, const uint8_t *data, size_t len
         rtc_addr_to_string(from, ip, sizeof(ip), &port);
         RTC_LOG_INFO("ICE: connected to %s:%u", ip, port);
 
-        rtc_transport_set_remote(agent->transport, &agent->selected_remote);
+        rtc_packet_io_set_remote(agent->transport, &agent->selected_remote);
     }
 }
 

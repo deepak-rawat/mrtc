@@ -78,7 +78,7 @@ rtc_cleanup();
 ├────────────────────────────────────┤
 │  STUN Client / TURN Client         │  rtc_stun.h/c, rtc_turn.h/c
 ├────────────────────────────────────┤
-│  Transport Layer (UDP + Threading) │  rtc_transport.h/c
+│  Transport Layer (UDP + Threading) │  rtc_packet_io.h/c
 ├────────────────────────────────────┤
 │  Platform Poller (epoll/kqueue)    │  rtc_poller.h/c
 └────────────────────────────────────┘
@@ -97,7 +97,7 @@ Public headers:
 
 ## Module Details
 
-### Transport Layer (`rtc_transport.h/c`)
+### Transport Layer (`rtc_packet_io.h/c`)
 
 Owns the UDP socket and runs a background thread with a platform I/O poller.
 
@@ -110,10 +110,10 @@ Owns the UDP socket and runs a background thread with a platform I/O poller.
 Packet flow:
 ```
 Recv:  UDP socket → demux (RFC 7983) → callback(type, data, from_addr)
-Send:  rtc_transport_send(data, dest) → UDP sendto (thread-safe)
+Send:  rtc_packet_io_send(data, dest) → UDP sendto (thread-safe)
 ```
 
-Key functions: `rtc_transport_init()`, `rtc_transport_send()`, `rtc_transport_set_remote()`
+Key functions: `rtc_packet_io_init()`, `rtc_packet_io_send()`, `rtc_packet_io_set_remote()`
 
 ### ICE Agent (`rtc_ice.h/c`)
 
@@ -249,7 +249,7 @@ Key functions: `rtc_rate_control_create()`, `rtc_rate_control_on_rtcp_rr()`, `rt
 
 ### NACK retransmit buffer (`rtc_nack_buf.h/c`)
 
-512-packet ring buffer per video sender, indexed by RTP sequence number. Stores post-SRTP packets so an incoming Generic NACK (RFC 4585 §6.2.1) can be served by re-sending the original wire packet via `rtc_transport_send_to_remote()` without re-encrypting. Created on connect for `RTC_KIND_VIDEO` senders.
+512-packet ring buffer per video sender, indexed by RTP sequence number. Stores post-SRTP packets so an incoming Generic NACK (RFC 4585 §6.2.1) can be served by re-sending the original wire packet via `rtc_packet_io_send_to_remote()` without re-encrypting. Created on connect for `RTC_KIND_VIDEO` senders.
 
 ### Transport-Wide CC (`rtc_twcc_sender.h/c`, `rtc_twcc_receiver.h/c`)
 
@@ -280,7 +280,7 @@ High-level WebRTC-style API (mirrors RTCPeerConnection). Owns all other componen
 
 ```c
 struct rtc_peer_connection {
-    rtc_transport_t transport;            // Socket + I/O thread
+    rtc_packet_io_t transport;            // Socket + I/O thread
     rtc_ice_agent_t ice;                  // Candidate management
     rtc_dtls_transport_t dtls;            // Handshake + key export
     rtc_srtp_ctx_t srtp_send, srtp_recv;  // Encryption contexts
@@ -320,7 +320,7 @@ struct rtc_peer_connection {
 | `test_ice` | Candidate gathering, connectivity checks, loopback e2e |
 | `test_sdp` | SDP generation/parsing round-trip, extmap |
 | `test_sdp_video` | Multi-media SDP (audio + video), codec params |
-| `test_transport` | Socket init, packet demux, timer management |
+| `test_packet_io` | Socket init, packet demux, timer management |
 | `test_peer` | Full peer connection lifecycle, offer/answer |
 | `test_rtcp` | SR/RR build/parse, jitter statistics |
 | `test_rtcp_feedback` | NACK / PLI / FIR build + parse |

@@ -311,7 +311,7 @@ void peer_rtcp_timer(void *user) {
     }
 
     /* Re-arm timer */
-    pc->rtcp_timer_id = rtc_transport_add_timer(&pc->transport, rtc_time_ms() + RTCP_INTERVAL_MS,
+    pc->rtcp_timer_id = rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + RTCP_INTERVAL_MS,
                                                 peer_rtcp_timer, pc);
 }
 
@@ -322,7 +322,7 @@ void peer_rtcp_timer(void *user) {
 void peer_twcc_fb_timer(void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
     if (pc->connection_state != RTC_CONNECTION_CONNECTED) {
-        pc->twcc_fb_timer_id = rtc_transport_add_timer(
+        pc->twcc_fb_timer_id = rtc_packet_io_add_timer(
             &pc->transport, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
         return;
     }
@@ -338,13 +338,13 @@ void peer_twcc_fb_timer(void *user) {
                 memcpy(buf, fb, fb_len);
                 size_t out_len = fb_len;
                 if (rtc_srtp_protect_rtcp(&pc->srtp_send, buf, &out_len, sizeof(buf)) == RTC_OK)
-                    rtc_transport_send_to_remote(&pc->transport, buf, out_len);
+                    rtc_packet_io_send_to_remote(&pc->transport, buf, out_len);
             }
         }
         pc->twcc_have_packets = false;
     }
 
-    pc->twcc_fb_timer_id = rtc_transport_add_timer(
+    pc->twcc_fb_timer_id = rtc_packet_io_add_timer(
         &pc->transport, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
 }
 

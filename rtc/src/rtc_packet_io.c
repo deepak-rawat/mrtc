@@ -1,5 +1,5 @@
 /*
- * rtc_transport.c - Transport layer with threaded event loop.
+ * rtc_packet_io.c - Transport layer with threaded event loop.
  *
  * Owns the UDP socket, runs a background poller thread,
  * classifies incoming packets per RFC 7983, and dispatches
@@ -20,7 +20,7 @@
  *     dual-stack v6 socket still works there; only PKTINFO is gated.
  *     TODO-test: Windows PKTINFO.
  */
-#include "rtc_transport.h"
+#include "rtc_packet_io.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -141,8 +141,8 @@ static int timer_next_timeout_ms(const rtc_timer_t *timers, int max) {
 static void timer_fire_expired(rtc_timer_t *timers, int max, rtc_mutex_t *mutex) {
     uint64_t now = rtc_time_ms();
 
-    rtc_timer_fn fns[RTC_TRANSPORT_MAX_TIMERS];
-    void *users[RTC_TRANSPORT_MAX_TIMERS];
+    rtc_timer_fn fns[RTC_PACKET_IO_MAX_TIMERS];
+    void *users[RTC_PACKET_IO_MAX_TIMERS];
     int count = 0;
 
     rtc_mutex_lock(mutex);
@@ -206,9 +206,9 @@ static void timer_cancel(rtc_timer_t *timers, int max, rtc_mutex_t *mutex, rtc_t
  * — left as a TODO. On Windows we fall back to recvfrom and skip the
  * source-pinning step (last_local_valid stays false). */
 #ifndef _WIN32
-#  define RTC_TRANSPORT_HAS_PKTINFO 1
+#  define RTC_PACKET_IO_HAS_PKTINFO 1
 #else
-#  define RTC_TRANSPORT_HAS_PKTINFO 0
+#  define RTC_PACKET_IO_HAS_PKTINFO 0
 #endif
 
 /* Linux-only: recvmmsg drains up to RECV_BATCH packets in a single
@@ -224,16 +224,16 @@ static void timer_cancel(rtc_timer_t *timers, int max, rtc_mutex_t *mutex, rtc_t
  * TURN workloads. Compile behind MRTC_ENABLE_UDP_GSO when we add an SFU
  * build target. */
 #ifdef __linux__
-#  define RTC_TRANSPORT_HAS_RECVMMSG 1
+#  define RTC_PACKET_IO_HAS_RECVMMSG 1
 #else
-#  define RTC_TRANSPORT_HAS_RECVMMSG 0
+#  define RTC_PACKET_IO_HAS_RECVMMSG 0
 #endif
 
-#if RTC_TRANSPORT_HAS_RECVMMSG
+#if RTC_PACKET_IO_HAS_RECVMMSG
 /* Per-slot scratch for recvmmsg: data, source, cmsg buffer all live
  * contiguously per slot for cache friendliness. */
 typedef struct {
-    uint8_t data[RTC_TRANSPORT_BUF_SIZE];
+    uint8_t data[RTC_PACKET_IO_BUF_SIZE];
     struct sockaddr_storage from;
     uint8_t cbuf[CMSG_SPACE(sizeof(struct in6_pktinfo)) + CMSG_SPACE(sizeof(uint32_t))];
     struct iovec iov;
@@ -241,7 +241,7 @@ typedef struct {
 } mmsg_slot_t;
 #endif
 
-#if RTC_TRANSPORT_HAS_PKTINFO
+#if RTC_PACKET_IO_HAS_PKTINFO
 /* Drain one packet via recvmsg; on success, write the local-iface address
  * into *local_out (true means cmsg present, IPv4-mapped form for v4).
  * Also surfaces SO_RXQ_OVFL on Linux as *kdrops_out (kernel drop count
@@ -321,16 +321,16 @@ static void drain_err_queue(rtc_socket_t s) {
     (void)s;
 }
 #  endif
-#endif /* RTC_TRANSPORT_HAS_PKTINFO */
+#endif /* RTC_PACKET_IO_HAS_PKTINFO */
 
 static void *transport_thread_fn(void *arg) {
-    rtc_transport_t *t = (rtc_transport_t *)arg;
-    uint8_t buf[RTC_TRANSPORT_BUF_SIZE];
+    rtc_packet_io_t *t = (rtc_packet_io_t *)arg;
+    uint8_t buf[RTC_PACKET_IO_BUF_SIZE];
     rtc_poller_event_t evs[RTC_POLLER_MAX_EVENTS];
 
     while (t->running) {
         rtc_mutex_lock(&t->timer_mutex);
-        int timeout = timer_next_timeout_ms(t->timers, RTC_TRANSPORT_MAX_TIMERS);
+        int timeout = timer_next_timeout_ms(t->timers, RTC_PACKET_IO_MAX_TIMERS);
         rtc_mutex_unlock(&t->timer_mutex);
 
         int n = rtc_poller_wait(&t->poller, evs, RTC_POLLER_MAX_EVENTS, timeout);
@@ -339,15 +339,15 @@ static void *transport_thread_fn(void *arg) {
         for (int e = 0; e < n; e++) {
             if (evs[e].fd != s || !(evs[e].events & RTC_POLLER_EV_READ))
                 continue;
-#if RTC_TRANSPORT_HAS_RECVMMSG
+#if RTC_PACKET_IO_HAS_RECVMMSG
             /* Linux fast path: drain a burst in one syscall. The slot
              * arena is heap-allocated (16 * 9216 byte data buffers).
              * Falls through to per-packet recvmsg below only if this
              * branch is compiled out (non-Linux). */
             {
                 mmsg_slot_t *slots = (mmsg_slot_t *)t->recv_batch_arena;
-                struct mmsghdr hdrs[RTC_TRANSPORT_RECV_BATCH];
-                for (int i = 0; i < RTC_TRANSPORT_RECV_BATCH; i++) {
+                struct mmsghdr hdrs[RTC_PACKET_IO_RECV_BATCH];
+                for (int i = 0; i < RTC_PACKET_IO_RECV_BATCH; i++) {
                     slots[i].iov.iov_base = slots[i].data;
                     slots[i].iov.iov_len = sizeof(slots[i].data);
                     memset(&hdrs[i], 0, sizeof(hdrs[i]));
@@ -358,7 +358,7 @@ static void *transport_thread_fn(void *arg) {
                     hdrs[i].msg_hdr.msg_control = slots[i].cbuf;
                     hdrs[i].msg_hdr.msg_controllen = sizeof(slots[i].cbuf);
                 }
-                int nrecv = recvmmsg(s, hdrs, RTC_TRANSPORT_RECV_BATCH, MSG_DONTWAIT, NULL);
+                int nrecv = recvmmsg(s, hdrs, RTC_PACKET_IO_RECV_BATCH, MSG_DONTWAIT, NULL);
                 if (nrecv > 0) {
                     for (int i = 0; i < nrecv; i++) {
                         size_t plen = hdrs[i].msg_len;
@@ -398,19 +398,19 @@ static void *transport_thread_fn(void *arg) {
                         if (t->on_recv)
                             t->on_recv(type, slots[i].data, plen, &from, t->recv_user);
                     }
-                    if (nrecv == RTC_TRANSPORT_RECV_BATCH)
+                    if (nrecv == RTC_PACKET_IO_RECV_BATCH)
                         atomic_fetch_add_explicit(&t->recv_drain_full, 1, memory_order_relaxed);
                 }
                 continue; /* burst processed; skip per-packet path below */
             }
 #endif
             int drained = 0;
-            for (int i = 0; i < RTC_TRANSPORT_RECV_BATCH; i++) {
+            for (int i = 0; i < RTC_PACKET_IO_RECV_BATCH; i++) {
                 struct sockaddr_storage from_store;
                 socklen_t fromlen = sizeof(from_store);
                 ssize_t len;
 
-#if RTC_TRANSPORT_HAS_PKTINFO
+#if RTC_PACKET_IO_HAS_PKTINFO
                 struct in6_addr local6;
                 bool local_valid = false;
                 uint32_t kdrops = 0;
@@ -443,7 +443,7 @@ static void *transport_thread_fn(void *arg) {
                 atomic_fetch_add_explicit(&t->bytes_recv, (uint64_t)len, memory_order_relaxed);
 
                 /* Truncation heuristic: a perfectly-full buffer is
-                 * suspicious since RTC_TRANSPORT_BUF_SIZE is sized for
+                 * suspicious since RTC_PACKET_IO_BUF_SIZE is sized for
                  * jumbo frames. Real WebRTC traffic never reaches this. */
                 if ((size_t)len == sizeof(buf))
                     RTC_LOG_WARN("Transport: recvfrom filled buffer (%zd bytes) — "
@@ -464,11 +464,11 @@ static void *transport_thread_fn(void *arg) {
                     t->on_recv(type, buf, (size_t)len, &from, t->recv_user);
                 }
             }
-            if (drained == RTC_TRANSPORT_RECV_BATCH)
+            if (drained == RTC_PACKET_IO_RECV_BATCH)
                 atomic_fetch_add_explicit(&t->recv_drain_full, 1, memory_order_relaxed);
         }
 
-        timer_fire_expired(t->timers, RTC_TRANSPORT_MAX_TIMERS, &t->timer_mutex);
+        timer_fire_expired(t->timers, RTC_PACKET_IO_MAX_TIMERS, &t->timer_mutex);
     }
 
     return NULL;
@@ -478,7 +478,7 @@ static void *transport_thread_fn(void *arg) {
 /*  Public API                                                         */
 /* ------------------------------------------------------------------ */
 
-int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *user) {
+int rtc_packet_io_init(rtc_packet_io_t *t, rtc_packet_io_recv_fn on_recv, void *user) {
     memset(t, 0, sizeof(*t));
     atomic_store_explicit(&t->sock, RTC_INVALID_SOCKET, memory_order_relaxed);
 
@@ -522,7 +522,7 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
         return rc;
     }
 
-#if RTC_TRANSPORT_HAS_PKTINFO
+#if RTC_PACKET_IO_HAS_PKTINFO
     /* Receive IPV6_PKTINFO cmsg so we know which local interface each
      * packet arrived on. Required for correct multi-homed reply behavior. */
     int on = 1;
@@ -534,7 +534,7 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
     /* Request larger kernel socket buffers to absorb video bursts and
      * avoid drops between drain iterations. The kernel may clamp; we log
      * the actual value so misconfiguration is visible. */
-    int wanted = RTC_TRANSPORT_SOCKBUF_BYTES;
+    int wanted = RTC_PACKET_IO_SOCKBUF_BYTES;
     (void)setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char *)&wanted, sizeof(wanted));
     (void)setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char *)&wanted, sizeof(wanted));
 
@@ -627,10 +627,10 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
     /* Init synchronization */
     rtc_mutex_init(&t->timer_mutex);
 
-#if RTC_TRANSPORT_HAS_RECVMMSG
+#if RTC_PACKET_IO_HAS_RECVMMSG
     /* Heap arena for the recvmmsg batch: too big for the thread stack
      * (16 * 9216 ≈ 144KB). One allocation for the transport's lifetime. */
-    t->recv_batch_arena = calloc(RTC_TRANSPORT_RECV_BATCH, sizeof(mmsg_slot_t));
+    t->recv_batch_arena = calloc(RTC_PACKET_IO_RECV_BATCH, sizeof(mmsg_slot_t));
     if (!t->recv_batch_arena) {
         rtc_mutex_destroy(&t->timer_mutex);
         rtc_poller_close(&t->poller);
@@ -654,7 +654,7 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
         rtc_poller_close(&t->poller);
         rtc_close_socket(s);
         rtc_mutex_destroy(&t->timer_mutex);
-#if RTC_TRANSPORT_HAS_RECVMMSG
+#if RTC_PACKET_IO_HAS_RECVMMSG
         free(t->recv_batch_arena);
         t->recv_batch_arena = NULL;
 #endif
@@ -670,7 +670,7 @@ int rtc_transport_init(rtc_transport_t *t, rtc_transport_recv_fn on_recv, void *
     return RTC_OK;
 }
 
-int rtc_transport_send(rtc_transport_t *t, const uint8_t *data, size_t len,
+int rtc_packet_io_send(rtc_packet_io_t *t, const uint8_t *data, size_t len,
                        const rtc_addr_t *dest) {
     /* Snapshot fd: lets a send racing with close return an error instead
      * of using a freed/reused descriptor. Caller is still expected to
@@ -710,7 +710,7 @@ int rtc_transport_send(rtc_transport_t *t, const uint8_t *data, size_t len,
     } else {
         atomic_fetch_add_explicit(&t->send_errors, 1, memory_order_relaxed);
     }
-#if RTC_TRANSPORT_HAS_PKTINFO
+#if RTC_PACKET_IO_HAS_PKTINFO
     /* A real error often correlates with a queued ICMP unreachable that
      * would otherwise wedge subsequent sends. Drain to unblock. */
     if (!would_block)
@@ -719,13 +719,13 @@ int rtc_transport_send(rtc_transport_t *t, const uint8_t *data, size_t len,
     return RTC_ERR_SOCKET;
 }
 
-int rtc_transport_send_to_remote(rtc_transport_t *t, const uint8_t *data, size_t len) {
-    /* Acquire-load pairs with the release-store in rtc_transport_set_remote;
+int rtc_packet_io_send_to_remote(rtc_packet_io_t *t, const uint8_t *data, size_t len) {
+    /* Acquire-load pairs with the release-store in rtc_packet_io_set_remote;
      * seeing true guarantees a fully-written remote_addr. */
     if (!atomic_load_explicit(&t->remote_addr_set, memory_order_acquire))
         return RTC_ERR_INVALID;
 
-#if RTC_TRANSPORT_HAS_PKTINFO
+#if RTC_PACKET_IO_HAS_PKTINFO
     /* Source-pin to the local IP we last received traffic on (set by the
      * recv loop from IPV6_PKTINFO cmsg). Falls back to the unpinned path
      * if no recv has happened yet, in which case the kernel chooses the
@@ -780,24 +780,24 @@ int rtc_transport_send_to_remote(rtc_transport_t *t, const uint8_t *data, size_t
         return RTC_ERR_SOCKET;
     }
 #endif
-    return rtc_transport_send(t, data, len, &t->remote_addr);
+    return rtc_packet_io_send(t, data, len, &t->remote_addr);
 }
 
-void rtc_transport_set_remote(rtc_transport_t *t, const rtc_addr_t *addr) {
+void rtc_packet_io_set_remote(rtc_packet_io_t *t, const rtc_addr_t *addr) {
     /* One-shot publication. Write address first, then release-store the
      * flag so any sender observing true also sees the address. */
     t->remote_addr = *addr;
     atomic_store_explicit(&t->remote_addr_set, true, memory_order_release);
 }
 
-rtc_timer_id_t rtc_transport_add_timer(rtc_transport_t *t, uint64_t deadline_ms, rtc_timer_fn fn,
+rtc_timer_id_t rtc_packet_io_add_timer(rtc_packet_io_t *t, uint64_t deadline_ms, rtc_timer_fn fn,
                                        void *user) {
-    rtc_timer_id_t id = timer_add(t->timers, RTC_TRANSPORT_MAX_TIMERS, &t->timer_mutex,
+    rtc_timer_id_t id = timer_add(t->timers, RTC_PACKET_IO_MAX_TIMERS, &t->timer_mutex,
                                   &t->timer_slot_hwm, deadline_ms, fn, user);
     if (id < 0) {
         RTC_LOG_WARN("Transport: no free timer slots (max=%d) — caller will"
-                     " silently lose this scheduling; raise RTC_TRANSPORT_MAX_TIMERS",
-                     RTC_TRANSPORT_MAX_TIMERS);
+                     " silently lose this scheduling; raise RTC_PACKET_IO_MAX_TIMERS",
+                     RTC_PACKET_IO_MAX_TIMERS);
         return id;
     }
     /* Break the poll loop so the new (possibly sooner) deadline is
@@ -807,20 +807,20 @@ rtc_timer_id_t rtc_transport_add_timer(rtc_transport_t *t, uint64_t deadline_ms,
     return id;
 }
 
-void rtc_transport_cancel_timer(rtc_transport_t *t, rtc_timer_id_t id) {
-    timer_cancel(t->timers, RTC_TRANSPORT_MAX_TIMERS, &t->timer_mutex, id);
+void rtc_packet_io_cancel_timer(rtc_packet_io_t *t, rtc_timer_id_t id) {
+    timer_cancel(t->timers, RTC_PACKET_IO_MAX_TIMERS, &t->timer_mutex, id);
 }
 
-rtc_socket_t rtc_transport_get_socket(const rtc_transport_t *t) {
+rtc_socket_t rtc_packet_io_get_socket(const rtc_packet_io_t *t) {
     return atomic_load_explicit(&t->sock, memory_order_acquire);
 }
 
-int rtc_transport_get_local_addr(rtc_transport_t *t, rtc_addr_t *out) {
+int rtc_packet_io_get_local_addr(rtc_packet_io_t *t, rtc_addr_t *out) {
     *out = t->local_addr;
     return RTC_OK;
 }
 
-void rtc_transport_get_stats(const rtc_transport_t *t, rtc_transport_stats_t *out) {
+void rtc_packet_io_get_stats(const rtc_packet_io_t *t, rtc_packet_io_stats_t *out) {
     out->pkts_recv = atomic_load_explicit(&t->pkts_recv, memory_order_relaxed);
     out->bytes_recv = atomic_load_explicit(&t->bytes_recv, memory_order_relaxed);
     out->pkts_sent = atomic_load_explicit(&t->pkts_sent, memory_order_relaxed);
@@ -832,7 +832,7 @@ void rtc_transport_get_stats(const rtc_transport_t *t, rtc_transport_stats_t *ou
     out->timer_slot_hwm = t->timer_slot_hwm;
 }
 
-void rtc_transport_close(rtc_transport_t *t) {
+void rtc_packet_io_close(rtc_packet_io_t *t) {
     /* Idempotent: only the thread that flips running true -> false runs
      * the shutdown sequence. Concurrent / repeated close calls no-op. */
     bool was_running = atomic_exchange_explicit(&t->running, false, memory_order_acq_rel);
@@ -855,11 +855,11 @@ void rtc_transport_close(rtc_transport_t *t) {
 
     rtc_mutex_destroy(&t->timer_mutex);
 
-#if RTC_TRANSPORT_HAS_RECVMMSG
+#if RTC_PACKET_IO_HAS_RECVMMSG
     free(t->recv_batch_arena);
     t->recv_batch_arena = NULL;
 #endif
 
     RTC_LOG_INFO("Transport: closed (timer slot hwm=%d/%d)", t->timer_slot_hwm,
-                 RTC_TRANSPORT_MAX_TIMERS);
+                 RTC_PACKET_IO_MAX_TIMERS);
 }

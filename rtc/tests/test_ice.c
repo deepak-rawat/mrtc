@@ -10,7 +10,7 @@
  */
 #include <rtc/rtc.h>
 #include "rtc_ice.h"
-#include "rtc_transport.h"
+#include "rtc_packet_io.h"
 #include "test_harness.h"
 #include <stdatomic.h>
 
@@ -26,8 +26,8 @@
 /*  Test: init creates credentials                                     */
 /* ------------------------------------------------------------------ */
 TEST(ice_init) {
-    rtc_transport_t transport;
-    int rc = rtc_transport_init(&transport, NULL, NULL);
+    rtc_packet_io_t transport;
+    int rc = rtc_packet_io_init(&transport, NULL, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     rtc_ice_agent_t agent;
@@ -43,15 +43,15 @@ TEST(ice_init) {
 
     rtc_ice_close(&agent);
     ASSERT_EQ(agent.state, ICE_STATE_CLOSED);
-    rtc_transport_close(&transport);
+    rtc_packet_io_close(&transport);
 }
 
 /* ------------------------------------------------------------------ */
 /*  Test: gather finds at least one host candidate                     */
 /* ------------------------------------------------------------------ */
 TEST(ice_gather_host) {
-    rtc_transport_t transport;
-    rtc_transport_init(&transport, NULL, NULL);
+    rtc_packet_io_t transport;
+    rtc_packet_io_init(&transport, NULL, NULL);
 
     rtc_ice_agent_t agent;
     rtc_ice_init(&agent, &transport, NULL, 0);
@@ -71,15 +71,15 @@ TEST(ice_gather_host) {
     }
 
     rtc_ice_close(&agent);
-    rtc_transport_close(&transport);
+    rtc_packet_io_close(&transport);
 }
 
 /* ------------------------------------------------------------------ */
 /*  Test: set remote credentials                                       */
 /* ------------------------------------------------------------------ */
 TEST(ice_remote_credentials) {
-    rtc_transport_t transport;
-    rtc_transport_init(&transport, NULL, NULL);
+    rtc_packet_io_t transport;
+    rtc_packet_io_init(&transport, NULL, NULL);
 
     rtc_ice_agent_t agent;
     rtc_ice_init(&agent, &transport, NULL, 0);
@@ -104,7 +104,7 @@ TEST(ice_remote_credentials) {
     printf("    remote credentials set, 1 candidate added\n");
 
     rtc_ice_close(&agent);
-    rtc_transport_close(&transport);
+    rtc_packet_io_close(&transport);
 }
 
 /* ------------------------------------------------------------------ */
@@ -210,7 +210,7 @@ static bool wait_for_data(int target, int timeout_ms) {
 /*  Test: two agents connect to each other on localhost                */
 /* ------------------------------------------------------------------ */
 TEST(ice_two_agents_connect) {
-    rtc_transport_t transport_a, transport_b;
+    rtc_packet_io_t transport_a, transport_b;
     rtc_ice_agent_t alice, bob;
 
     /*
@@ -220,9 +220,9 @@ TEST(ice_two_agents_connect) {
      * g_stun_agent is NULL initially; no packets arrive until we send.
      */
     g_stun_recv_count = 0;
-    int rc = rtc_transport_init(&transport_a, ice_test_stun_capture_cb, NULL);
+    int rc = rtc_packet_io_init(&transport_a, ice_test_stun_capture_cb, NULL);
     ASSERT_EQ(rc, RTC_OK);
-    rc = rtc_transport_init(&transport_b, ice_test_recv_cb, NULL);
+    rc = rtc_packet_io_init(&transport_b, ice_test_recv_cb, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     rc = rtc_ice_init(&alice, &transport_a, NULL, 0);
@@ -275,7 +275,7 @@ TEST(ice_two_agents_connect) {
     ASSERT_EQ(rc, RTC_OK);
 
     rtc_addr_t bob_addr = bob.local_candidates[0].addr;
-    rc = rtc_transport_send(&transport_a, req.buf, req.buf_len, &bob_addr);
+    rc = rtc_packet_io_send(&transport_a, req.buf, req.buf_len, &bob_addr);
     ASSERT_EQ(rc, RTC_OK);
 
     /* Wait for Alice to receive the binding response via her transport callback */
@@ -291,8 +291,8 @@ TEST(ice_two_agents_connect) {
 
     printf("    Alice -> Bob STUN check: request sent, response received\n");
 
-    rtc_transport_close(&transport_a);
-    rtc_transport_close(&transport_b);
+    rtc_packet_io_close(&transport_a);
+    rtc_packet_io_close(&transport_b);
     rtc_mutex_lock(&g_ice_mutex);
     g_stun_agent = NULL;
     rtc_mutex_unlock(&g_ice_mutex);
@@ -304,29 +304,29 @@ TEST(ice_two_agents_connect) {
 /*  Test: data transfer via transport after manual connection setup    */
 /* ------------------------------------------------------------------ */
 TEST(ice_data_transfer) {
-    rtc_transport_t transport_a, transport_b;
+    rtc_packet_io_t transport_a, transport_b;
     rtc_ice_agent_t alice, bob;
 
     g_data_recv_count = 0;
-    rtc_transport_init(&transport_a, ice_test_data_capture_cb, NULL);
-    rtc_transport_init(&transport_b, ice_test_data_capture_cb, NULL);
+    rtc_packet_io_init(&transport_a, ice_test_data_capture_cb, NULL);
+    rtc_packet_io_init(&transport_b, ice_test_data_capture_cb, NULL);
     rtc_ice_init(&alice, &transport_a, NULL, 0);
     rtc_ice_init(&bob, &transport_b, NULL, 0);
     rtc_ice_gather(&alice);
     rtc_ice_gather(&bob);
 
     /* Manually set up "connected" state */
-    rtc_transport_set_remote(&transport_a, &bob.local_candidates[0].addr);
+    rtc_packet_io_set_remote(&transport_a, &bob.local_candidates[0].addr);
     alice.selected_remote = bob.local_candidates[0].addr;
     alice.state = ICE_STATE_CONNECTED;
 
-    rtc_transport_set_remote(&transport_b, &alice.local_candidates[0].addr);
+    rtc_packet_io_set_remote(&transport_b, &alice.local_candidates[0].addr);
     bob.selected_remote = alice.local_candidates[0].addr;
     bob.state = ICE_STATE_CONNECTED;
 
     /* Alice sends data to Bob via transport */
     const char *msg = "Hello over ICE!";
-    int rc = rtc_transport_send_to_remote(&transport_a, (const uint8_t *)msg, strlen(msg));
+    int rc = rtc_packet_io_send_to_remote(&transport_a, (const uint8_t *)msg, strlen(msg));
     ASSERT_EQ(rc, RTC_OK);
 
     /* Wait for Bob to receive via transport callback */
@@ -341,7 +341,7 @@ TEST(ice_data_transfer) {
     g_data_recv_count = 0;
 
     const char *reply = "Reply from Bob!";
-    rc = rtc_transport_send_to_remote(&transport_b, (const uint8_t *)reply, strlen(reply));
+    rc = rtc_packet_io_send_to_remote(&transport_b, (const uint8_t *)reply, strlen(reply));
     ASSERT_EQ(rc, RTC_OK);
 
     got = wait_for_data(1, 2000);
@@ -351,8 +351,8 @@ TEST(ice_data_transfer) {
 
     printf("    Bob -> Alice: \"%s\" (%zu bytes)\n", reply, g_data_recv_len);
 
-    rtc_transport_close(&transport_a);
-    rtc_transport_close(&transport_b);
+    rtc_packet_io_close(&transport_a);
+    rtc_packet_io_close(&transport_b);
     rtc_ice_close(&alice);
     rtc_ice_close(&bob);
 }

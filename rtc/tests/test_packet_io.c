@@ -1,5 +1,5 @@
 /*
- * test_transport.c - Transport layer tests.
+ * test_packet_io.c - Transport layer tests.
  *
  * Tests:
  *   1. Init/close lifecycle: socket created, thread runs, close joins
@@ -10,7 +10,7 @@
  *   6. Send to remote: set remote address, send via transport
  */
 #include <rtc/rtc.h>
-#include "rtc_transport.h"
+#include "rtc_packet_io.h"
 #include "test_harness.h"
 #include <stdatomic.h>
 
@@ -93,10 +93,10 @@ static bool wait_for_timer(int target, int timeout_ms) {
  * extract the port via a sockaddr_in cast after reading. We build a
  * plain AF_INET 127.0.0.1 dest — the transport's send path v4-maps it
  * for the v6 socket, and the recv path unmaps before delivery. */
-static void get_loopback_addr(rtc_transport_t *t, rtc_addr_t *out) {
+static void get_loopback_addr(rtc_packet_io_t *t, rtc_addr_t *out) {
     struct sockaddr_storage local_ss;
     socklen_t len = sizeof(local_ss);
-    getsockname(rtc_transport_get_socket(t), (struct sockaddr *)&local_ss, &len);
+    getsockname(rtc_packet_io_get_socket(t), (struct sockaddr *)&local_ss, &len);
     uint16_t port = ((struct sockaddr_in *)&local_ss)->sin_port;
 
     memset(out, 0, sizeof(*out));
@@ -111,17 +111,17 @@ static void get_loopback_addr(rtc_transport_t *t, rtc_addr_t *out) {
 /*  Test: init and close lifecycle                                     */
 /* ------------------------------------------------------------------ */
 TEST(transport_init_close) {
-    rtc_transport_t t;
-    int rc = rtc_transport_init(&t, NULL, NULL);
+    rtc_packet_io_t t;
+    int rc = rtc_packet_io_init(&t, NULL, NULL);
     ASSERT_EQ(rc, RTC_OK);
-    ASSERT(rtc_transport_get_socket(&t) != RTC_INVALID_SOCKET);
+    ASSERT(rtc_packet_io_get_socket(&t) != RTC_INVALID_SOCKET);
     ASSERT(t.running);
 
     /* Verify socket is bound (has a port). transport is AF_INET6
      * dual-stack; sin_port and sin6_port share an offset so reading via
      * sin_port on the sockaddr_storage works for both. */
     rtc_addr_t addr;
-    rc = rtc_transport_get_local_addr(&t, &addr);
+    rc = rtc_packet_io_get_local_addr(&t, &addr);
     ASSERT_EQ(rc, RTC_OK);
 
     uint16_t port = ntohs(((struct sockaddr_in *)&addr.addr)->sin_port);
@@ -129,7 +129,7 @@ TEST(transport_init_close) {
 
     printf("    transport bound to port %u\n", port);
 
-    rtc_transport_close(&t);
+    rtc_packet_io_close(&t);
     ASSERT(!t.running);
 
     printf("    init -> close lifecycle OK\n");
@@ -139,9 +139,9 @@ TEST(transport_init_close) {
 /*  Test: send packet to transport, verify callback fires              */
 /* ------------------------------------------------------------------ */
 TEST(transport_recv_packet) {
-    rtc_transport_t t;
+    rtc_packet_io_t t;
     g_recv_count = 0;
-    int rc = rtc_transport_init(&t, test_recv_callback, NULL);
+    int rc = rtc_packet_io_init(&t, test_recv_callback, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     /* Send a STUN-like packet (first byte 0x00) to transport's own port */
@@ -155,7 +155,7 @@ TEST(transport_recv_packet) {
     stun_pkt[6] = 0xA4;
     stun_pkt[7] = 0x42;
 
-    rc = rtc_transport_send(&t, stun_pkt, sizeof(stun_pkt), &self);
+    rc = rtc_packet_io_send(&t, stun_pkt, sizeof(stun_pkt), &self);
     ASSERT_EQ(rc, RTC_OK);
 
     /* Wait for callback */
@@ -165,15 +165,15 @@ TEST(transport_recv_packet) {
     ASSERT_EQ((int)g_recv_len, 20);
 
     printf("    STUN packet received and classified correctly\n");
-    rtc_transport_close(&t);
+    rtc_packet_io_close(&t);
 }
 
 /* ------------------------------------------------------------------ */
 /*  Test: packet classification for different types                    */
 /* ------------------------------------------------------------------ */
 TEST(transport_classify_types) {
-    rtc_transport_t t;
-    int rc = rtc_transport_init(&t, test_recv_callback, NULL);
+    rtc_packet_io_t t;
+    int rc = rtc_packet_io_init(&t, test_recv_callback, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     rtc_addr_t self;
@@ -184,7 +184,7 @@ TEST(transport_classify_types) {
     uint8_t dtls_pkt[13];
     memset(dtls_pkt, 0, sizeof(dtls_pkt));
     dtls_pkt[0] = 22; /* DTLS content type: Handshake */
-    rc = rtc_transport_send(&t, dtls_pkt, sizeof(dtls_pkt), &self);
+    rc = rtc_packet_io_send(&t, dtls_pkt, sizeof(dtls_pkt), &self);
     ASSERT_EQ(rc, RTC_OK);
 
     bool got = wait_for_recv(1, 2000);
@@ -197,7 +197,7 @@ TEST(transport_classify_types) {
     uint8_t rtp_pkt[12];
     memset(rtp_pkt, 0, sizeof(rtp_pkt));
     rtp_pkt[0] = 0x80; /* RTP version 2 */
-    rc = rtc_transport_send(&t, rtp_pkt, sizeof(rtp_pkt), &self);
+    rc = rtc_packet_io_send(&t, rtp_pkt, sizeof(rtp_pkt), &self);
     ASSERT_EQ(rc, RTC_OK);
 
     got = wait_for_recv(1, 2000);
@@ -205,20 +205,20 @@ TEST(transport_classify_types) {
     ASSERT_EQ((int)g_recv_type, (int)RTC_PKT_RTP);
     printf("    RTP packet classified correctly\n");
 
-    rtc_transport_close(&t);
+    rtc_packet_io_close(&t);
 }
 
 /* ------------------------------------------------------------------ */
 /*  Test: timer fires after deadline                                   */
 /* ------------------------------------------------------------------ */
 TEST(transport_timer_fires) {
-    rtc_transport_t t;
-    int rc = rtc_transport_init(&t, NULL, NULL);
+    rtc_packet_io_t t;
+    int rc = rtc_packet_io_init(&t, NULL, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     g_timer_count = 0;
     uint64_t now = rtc_time_ms();
-    rtc_timer_id_t id = rtc_transport_add_timer(&t, now + 100, test_timer_callback, NULL);
+    rtc_timer_id_t id = rtc_packet_io_add_timer(&t, now + 100, test_timer_callback, NULL);
     ASSERT(id >= 0);
 
     /* Wait for timer (should fire within ~200ms) */
@@ -227,42 +227,42 @@ TEST(transport_timer_fires) {
     ASSERT_EQ(g_timer_count, 1);
 
     printf("    timer fired after ~100ms\n");
-    rtc_transport_close(&t);
+    rtc_packet_io_close(&t);
 }
 
 /* ------------------------------------------------------------------ */
 /*  Test: cancelled timer doesn't fire                                 */
 /* ------------------------------------------------------------------ */
 TEST(transport_timer_cancel) {
-    rtc_transport_t t;
-    int rc = rtc_transport_init(&t, NULL, NULL);
+    rtc_packet_io_t t;
+    int rc = rtc_packet_io_init(&t, NULL, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     g_timer_count = 0;
     uint64_t now = rtc_time_ms();
-    rtc_timer_id_t id = rtc_transport_add_timer(&t, now + 100, test_timer_callback, NULL);
+    rtc_timer_id_t id = rtc_packet_io_add_timer(&t, now + 100, test_timer_callback, NULL);
     ASSERT(id >= 0);
 
     /* Cancel immediately */
-    rtc_transport_cancel_timer(&t, id);
+    rtc_packet_io_cancel_timer(&t, id);
 
     /* Wait longer than the timer would have fired */
     SLEEP_MS(300);
     ASSERT_EQ(g_timer_count, 0);
 
     printf("    cancelled timer did not fire\n");
-    rtc_transport_close(&t);
+    rtc_packet_io_close(&t);
 }
 
 /* ------------------------------------------------------------------ */
 /*  Test: send to remote via transport_send_to_remote                  */
 /* ------------------------------------------------------------------ */
 TEST(transport_send_to_remote) {
-    rtc_transport_t sender, receiver;
+    rtc_packet_io_t sender, receiver;
     g_recv_count = 0;
-    int rc = rtc_transport_init(&sender, NULL, NULL);
+    int rc = rtc_packet_io_init(&sender, NULL, NULL);
     ASSERT_EQ(rc, RTC_OK);
-    rc = rtc_transport_init(&receiver, test_recv_callback, NULL);
+    rc = rtc_packet_io_init(&receiver, test_recv_callback, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     /* Get receiver's loopback address */
@@ -270,13 +270,13 @@ TEST(transport_send_to_remote) {
     get_loopback_addr(&receiver, &recv_addr);
 
     /* Set as sender's remote */
-    rtc_transport_set_remote(&sender, &recv_addr);
+    rtc_packet_io_set_remote(&sender, &recv_addr);
 
     /* Send RTP-like packet */
     uint8_t rtp_pkt[20];
     memset(rtp_pkt, 0, sizeof(rtp_pkt));
     rtp_pkt[0] = 0x80; /* RTP version 2 */
-    rc = rtc_transport_send_to_remote(&sender, rtp_pkt, sizeof(rtp_pkt));
+    rc = rtc_packet_io_send_to_remote(&sender, rtp_pkt, sizeof(rtp_pkt));
     ASSERT_EQ(rc, RTC_OK);
 
     bool got = wait_for_recv(1, 2000);
@@ -286,16 +286,16 @@ TEST(transport_send_to_remote) {
 
     printf("    sender -> receiver via send_to_remote OK\n");
 
-    rtc_transport_close(&sender);
-    rtc_transport_close(&receiver);
+    rtc_packet_io_close(&sender);
+    rtc_packet_io_close(&receiver);
 }
 
 /* ------------------------------------------------------------------ */
 /*  Test: RTCP classified separately from RTP                          */
 /* ------------------------------------------------------------------ */
 TEST(transport_classify_rtcp) {
-    rtc_transport_t t;
-    int rc = rtc_transport_init(&t, test_recv_callback, NULL);
+    rtc_packet_io_t t;
+    int rc = rtc_packet_io_init(&t, test_recv_callback, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     rtc_addr_t self;
@@ -309,7 +309,7 @@ TEST(transport_classify_rtcp) {
     sr_pkt[1] = 200;  /* PT = SR */
     sr_pkt[2] = 0x00;
     sr_pkt[3] = 0x06; /* length = 6 words */
-    rc = rtc_transport_send(&t, sr_pkt, sizeof(sr_pkt), &self);
+    rc = rtc_packet_io_send(&t, sr_pkt, sizeof(sr_pkt), &self);
     ASSERT_EQ(rc, RTC_OK);
 
     bool got = wait_for_recv(1, 2000);
@@ -325,7 +325,7 @@ TEST(transport_classify_rtcp) {
     rr_pkt[1] = 201; /* PT = RR */
     rr_pkt[2] = 0x00;
     rr_pkt[3] = 0x01;
-    rc = rtc_transport_send(&t, rr_pkt, sizeof(rr_pkt), &self);
+    rc = rtc_packet_io_send(&t, rr_pkt, sizeof(rr_pkt), &self);
     ASSERT_EQ(rc, RTC_OK);
 
     got = wait_for_recv(1, 2000);
@@ -339,7 +339,7 @@ TEST(transport_classify_rtcp) {
     memset(rtp_pkt, 0, sizeof(rtp_pkt));
     rtp_pkt[0] = 0x80; /* version=2 */
     rtp_pkt[1] = 96;   /* PT = 96 (dynamic) */
-    rc = rtc_transport_send(&t, rtp_pkt, sizeof(rtp_pkt), &self);
+    rc = rtc_packet_io_send(&t, rtp_pkt, sizeof(rtp_pkt), &self);
     ASSERT_EQ(rc, RTC_OK);
 
     got = wait_for_recv(1, 2000);
@@ -347,7 +347,7 @@ TEST(transport_classify_rtcp) {
     ASSERT_EQ((int)g_recv_type, (int)RTC_PKT_RTP);
     printf("    RTP with PT=96 still classified as RTP\n");
 
-    rtc_transport_close(&t);
+    rtc_packet_io_close(&t);
 }
 
 /* ------------------------------------------------------------------ */
@@ -373,32 +373,32 @@ static void family_capturing_recv(rtc_pkt_type_t type, const uint8_t *data, size
 }
 
 TEST(transport_v6_dualstack_socket) {
-    rtc_transport_t t;
-    int rc = rtc_transport_init(&t, NULL, NULL);
+    rtc_packet_io_t t;
+    int rc = rtc_packet_io_init(&t, NULL, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     /* The socket family must be AF_INET6 (dual-stack). */
     rtc_addr_t addr;
-    rc = rtc_transport_get_local_addr(&t, &addr);
+    rc = rtc_packet_io_get_local_addr(&t, &addr);
     ASSERT_EQ(rc, RTC_OK);
     int family = ((struct sockaddr *)&addr.addr)->sa_family;
     ASSERT_EQ(family, AF_INET6);
     printf("    transport bound as AF_INET6 (dual-stack)\n");
 
-    rtc_transport_close(&t);
+    rtc_packet_io_close(&t);
 }
 
 TEST(transport_v4_sender_seen_as_v4) {
-    rtc_transport_t t;
+    rtc_packet_io_t t;
     g_recv_count = 0;
     g_recv_from_family = -1;
-    int rc = rtc_transport_init(&t, family_capturing_recv, NULL);
+    int rc = rtc_packet_io_init(&t, family_capturing_recv, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     /* Read bound port via sockaddr_storage. */
     struct sockaddr_storage local_ss;
     socklen_t llen = sizeof(local_ss);
-    getsockname(rtc_transport_get_socket(&t), (struct sockaddr *)&local_ss, &llen);
+    getsockname(rtc_packet_io_get_socket(&t), (struct sockaddr *)&local_ss, &llen);
     uint16_t port = ((struct sockaddr_in *)&local_ss)->sin_port;
 
     /* Independent AF_INET sender on loopback → transport's v6 socket. */
@@ -428,26 +428,26 @@ TEST(transport_v4_sender_seen_as_v4) {
     printf("    v4 sender on dual-stack: from unmapped to AF_INET\n");
 
     rtc_close_socket(sender);
-    rtc_transport_close(&t);
+    rtc_packet_io_close(&t);
 }
 
 TEST(transport_v6_sender_seen_as_v6) {
-    rtc_transport_t t;
+    rtc_packet_io_t t;
     g_recv_count = 0;
     g_recv_from_family = -1;
-    int rc = rtc_transport_init(&t, family_capturing_recv, NULL);
+    int rc = rtc_packet_io_init(&t, family_capturing_recv, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     struct sockaddr_storage local_ss;
     socklen_t llen = sizeof(local_ss);
-    getsockname(rtc_transport_get_socket(&t), (struct sockaddr *)&local_ss, &llen);
+    getsockname(rtc_packet_io_get_socket(&t), (struct sockaddr *)&local_ss, &llen);
     uint16_t port = ((struct sockaddr_in6 *)&local_ss)->sin6_port;
 
     rtc_socket_t sender = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
     if (sender == RTC_INVALID_SOCKET) {
         /* Host has no IPv6 stack — skip this test rather than fail. */
         printf("    skipped (no IPv6 stack)\n");
-        rtc_transport_close(&t);
+        rtc_packet_io_close(&t);
         return;
     }
 
@@ -469,7 +469,7 @@ TEST(transport_v6_sender_seen_as_v6) {
         /* IPv6 loopback may not be available (rare). Skip. */
         printf("    skipped (v6 loopback unreachable)\n");
         rtc_close_socket(sender);
-        rtc_transport_close(&t);
+        rtc_packet_io_close(&t);
         return;
     }
     ASSERT_EQ(sent, (int)sizeof(pkt));
@@ -481,12 +481,12 @@ TEST(transport_v6_sender_seen_as_v6) {
     printf("    v6 sender stays AF_INET6\n");
 
     rtc_close_socket(sender);
-    rtc_transport_close(&t);
+    rtc_packet_io_close(&t);
 }
 
 /* TODO-test (POSIX/Linux only): IP_PKTINFO source-pinning. Requires a
  * multi-homed host where two interfaces have distinct local addresses,
- * and verifies that a reply sent via rtc_transport_send_to_remote goes
+ * and verifies that a reply sent via rtc_packet_io_send_to_remote goes
  * back out the same interface the request arrived on. Cannot be
  * exercised on a single-interface CI runner. */
 
@@ -502,21 +502,21 @@ TEST(transport_socket_leak_regression) {
      * default — any cycle failing means a leak. */
     const int N = 200;
     for (int i = 0; i < N; i++) {
-        rtc_transport_t t;
-        int rc = rtc_transport_init(&t, NULL, NULL);
+        rtc_packet_io_t t;
+        int rc = rtc_packet_io_init(&t, NULL, NULL);
         if (rc != RTC_OK) {
             printf("    leak detected: init failed at iter %d (rc=%d)\n", i, rc);
             ASSERT_EQ(rc, RTC_OK);
         }
-        rtc_transport_close(&t);
+        rtc_packet_io_close(&t);
     }
     printf("    %d open/close cycles OK (no fd leak)\n", N);
 }
 
 TEST(transport_stats_counters) {
-    rtc_transport_t t;
+    rtc_packet_io_t t;
     g_recv_count = 0;
-    int rc = rtc_transport_init(&t, test_recv_callback, NULL);
+    int rc = rtc_packet_io_init(&t, test_recv_callback, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     /* Send a packet to ourselves. */
@@ -528,14 +528,14 @@ TEST(transport_stats_counters) {
     pkt[5] = 0x12;
     pkt[6] = 0xA4;
     pkt[7] = 0x42;
-    rc = rtc_transport_send(&t, pkt, sizeof(pkt), &self);
+    rc = rtc_packet_io_send(&t, pkt, sizeof(pkt), &self);
     ASSERT_EQ(rc, RTC_OK);
 
     bool got = wait_for_recv(1, 2000);
     ASSERT(got);
 
-    rtc_transport_stats_t st;
-    rtc_transport_get_stats(&t, &st);
+    rtc_packet_io_stats_t st;
+    rtc_packet_io_get_stats(&t, &st);
     ASSERT(st.pkts_sent >= 1);
     ASSERT(st.bytes_sent >= sizeof(pkt));
     ASSERT(st.pkts_recv >= 1);
@@ -548,31 +548,31 @@ TEST(transport_stats_counters) {
            (unsigned long long)st.send_errors, (unsigned long long)st.send_would_block,
            (unsigned long long)st.recv_kernel_drops);
 
-    rtc_transport_close(&t);
+    rtc_packet_io_close(&t);
 }
 
 TEST(transport_send_after_close_returns_error) {
     /* The C2 fd-atomic guard should turn a send-after-close into a
      * clean RTC_ERR_SOCKET, not UB / crash. */
-    rtc_transport_t t;
-    int rc = rtc_transport_init(&t, NULL, NULL);
+    rtc_packet_io_t t;
+    int rc = rtc_packet_io_init(&t, NULL, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     rtc_addr_t self;
     get_loopback_addr(&t, &self);
 
-    rtc_transport_close(&t);
+    rtc_packet_io_close(&t);
 
     uint8_t pkt[16] = {0};
     pkt[4] = 0x21;
     pkt[5] = 0x12;
     pkt[6] = 0xA4;
     pkt[7] = 0x42;
-    rc = rtc_transport_send(&t, pkt, sizeof(pkt), &self);
+    rc = rtc_packet_io_send(&t, pkt, sizeof(pkt), &self);
     ASSERT_EQ(rc, RTC_ERR_SOCKET);
 
-    rtc_transport_stats_t st;
-    rtc_transport_get_stats(&t, &st);
+    rtc_packet_io_stats_t st;
+    rtc_packet_io_get_stats(&t, &st);
     ASSERT_EQ((int)st.send_errors, 1);
     printf("    send-after-close cleanly returned RTC_ERR_SOCKET\n");
 }
@@ -588,9 +588,9 @@ TEST(transport_recv_burst) {
      * loop's batching behavior on Linux (recvmmsg) and the per-packet
      * recvmsg / recvfrom path elsewhere. A few may be dropped under
      * extreme bursts on slow hosts (kernel buffer); we accept >= 90%. */
-    rtc_transport_t t;
+    rtc_packet_io_t t;
     g_recv_count = 0;
-    int rc = rtc_transport_init(&t, test_recv_callback, NULL);
+    int rc = rtc_packet_io_init(&t, test_recv_callback, NULL);
     ASSERT_EQ(rc, RTC_OK);
 
     rtc_addr_t self;
@@ -615,14 +615,14 @@ TEST(transport_recv_burst) {
     bool got = wait_for_recv(target, 2000);
     ASSERT(got);
 
-    rtc_transport_stats_t st;
-    rtc_transport_get_stats(&t, &st);
+    rtc_packet_io_stats_t st;
+    rtc_packet_io_get_stats(&t, &st);
     printf("    burst N=%d: pkts_recv=%llu drain_full=%llu kdrops=%llu\n", N,
            (unsigned long long)st.pkts_recv, (unsigned long long)st.recv_drain_full,
            (unsigned long long)st.recv_kernel_drops);
 
     rtc_close_socket(sender);
-    rtc_transport_close(&t);
+    rtc_packet_io_close(&t);
 }
 
 /* TODO-test (Linux only): assert recv_drain_full ticks up specifically

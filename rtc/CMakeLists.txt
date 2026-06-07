@@ -2,7 +2,7 @@
 set(RTC_CORE_SOURCES
     src/rtc_utils.c
     src/rtc_poller.c
-    src/rtc_transport.c
+    src/rtc_packet_io.c
 )
 
 set(RTC_PROTOCOL_SOURCES
@@ -67,7 +67,7 @@ endif()
 
 # Tests (need access to internal headers for component-level testing)
 if(MRTC_BUILD_TESTS)
-    set(TEST_NAMES test_stun test_rtp test_srtp test_dtls test_ice test_sdp test_transport
+    set(TEST_NAMES test_stun test_rtp test_srtp test_dtls test_ice test_sdp test_packet_io
                    test_sdp_video test_rtcp test_turn test_rate_control test_rtcp_feedback
                    test_nack_buf test_rtp_ext test_poller)
     if(MRTC_ENABLE_CLIENT_API)
