@@ -367,11 +367,31 @@ rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
     return transport;
 }
 
+
+static rtc_dtls_role_t transport_internal_dtls_role(rtc_transport_dtls_role_t role) {
+    return role == RTC_TRANSPORT_DTLS_ROLE_CLIENT ? RTC_DTLS_ROLE_CLIENT : RTC_DTLS_ROLE_SERVER;
+}
+
 int rtc_transport_get_ice_parameters(rtc_transport_t *transport, rtc_ice_parameters_t *out) {
     if (!transport || !out)
         return RTC_ERR_INVALID;
     transport_copy_ice_parameters(transport, out);
     return RTC_OK;
+}
+
+int rtc_transport_restart_ice(rtc_transport_t *transport) {
+    if (!transport)
+        return RTC_ERR_INVALID;
+    if (transport->selected_remote_valid)
+        return RTC_ERR_INVALID;
+
+    rtc_listener_unregister_ufrag(transport->listener, transport->ice_ufrag);
+    if (rtc_random_string(transport->ice_ufrag, sizeof(transport->ice_ufrag)) != RTC_OK ||
+        rtc_random_string(transport->ice_pwd, sizeof(transport->ice_pwd)) != RTC_OK) {
+        return RTC_ERR_GENERIC;
+    }
+    return rtc_listener_register_ufrag(transport->listener, transport->ice_ufrag,
+                                       transport_on_packet, transport);
 }
 
 int rtc_transport_set_remote_ice_parameters(rtc_transport_t *transport,
@@ -488,6 +508,21 @@ void rtc_transport_destroy(rtc_transport_t *transport) {
     }
     rtc_u32_map_free(&transport->producers_by_ssrc);
     free(transport);
+}
+
+int rtc_transport_set_dtls_role_internal(rtc_transport_t *transport,
+                                         rtc_transport_dtls_role_t role) {
+    if (!transport)
+        return RTC_ERR_INVALID;
+    if (transport->dtls.state != RTC_DTLS_STATE_NEW)
+        return RTC_ERR_INVALID;
+
+    rtc_dtls_role_t internal_role = transport_internal_dtls_role(role);
+    if (transport->dtls.role == internal_role)
+        return RTC_OK;
+
+    rtc_dtls_close(&transport->dtls);
+    return rtc_dtls_init(&transport->dtls, internal_role, transport_dtls_send, transport);
 }
 
 int rtc_transport_register_producer(rtc_transport_t *transport, rtc_producer_t *producer,

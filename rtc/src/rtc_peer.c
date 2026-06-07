@@ -5,6 +5,9 @@
  * Packet handling (RTP/RTCP dispatch) lives in rtc_peer_packets.c.
  */
 #include "rtc_peer_internal.h"
+#ifdef MRTC_ENABLE_SFU_API
+#  include "rtc_transport_internal.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,6 +71,59 @@ static void peer_runtime_close(rtc_peer_connection_t *pc) {
     if (pc->runtime_worker) {
         rtc_worker_destroy(pc->runtime_worker);
         pc->runtime_worker = NULL;
+    }
+}
+
+static void peer_runtime_add_remote_candidate(rtc_peer_connection_t *pc,
+                                              const rtc_ice_candidate_t *candidate) {
+    if (!pc->runtime_transport || !candidate)
+        return;
+
+    char ip[64];
+    uint16_t port = 0;
+    if (rtc_addr_to_string(&candidate->addr, ip, sizeof(ip), &port) != RTC_OK)
+        return;
+
+    rtc_transport_candidate_t tc;
+    memset(&tc, 0, sizeof(tc));
+    size_t flen = strlen(candidate->foundation);
+    if (flen >= sizeof(tc.foundation))
+        flen = sizeof(tc.foundation) - 1;
+    memcpy(tc.foundation, candidate->foundation, flen);
+    tc.foundation[flen] = '\0';
+    size_t ilen = strlen(ip);
+    if (ilen >= sizeof(tc.address))
+        ilen = sizeof(tc.address) - 1;
+    memcpy(tc.address, ip, ilen);
+    tc.address[ilen] = '\0';
+    memcpy(tc.protocol, "udp", sizeof("udp"));
+    tc.port = port;
+    tc.type = RTC_TRANSPORT_CANDIDATE_HOST;
+    (void)rtc_transport_add_remote_candidate(pc->runtime_transport, &tc);
+}
+
+static void peer_runtime_set_remote_desc(rtc_peer_connection_t *pc, const rtc_sdp_t *sdp) {
+    if (!pc->runtime_transport || !sdp)
+        return;
+
+    rtc_ice_parameters_t ice;
+    memset(&ice, 0, sizeof(ice));
+    memcpy(ice.username_fragment, sdp->ice_ufrag, sizeof(ice.username_fragment));
+    memcpy(ice.password, sdp->ice_pwd, sizeof(ice.password));
+    ice.mode = RTC_ICE_MODE_FULL;
+    (void)rtc_transport_set_remote_ice_parameters(pc->runtime_transport, &ice);
+
+    size_t ncand = rtc_sdp_candidate_count(sdp);
+    for (size_t i = 0; i < ncand; i++) {
+        peer_runtime_add_remote_candidate(pc, rtc_sdp_get_candidate(sdp, i));
+    }
+
+    if (pc->local_sdp.type == RTC_SDP_OFFER && sdp->setup == RTC_SETUP_ACTIVE) {
+        (void)rtc_transport_set_dtls_role_internal(pc->runtime_transport,
+                                                  RTC_TRANSPORT_DTLS_ROLE_SERVER);
+    } else if (pc->local_sdp.type == RTC_SDP_ANSWER || sdp->setup == RTC_SETUP_ACTPASS) {
+        (void)rtc_transport_set_dtls_role_internal(pc->runtime_transport,
+                                                  RTC_TRANSPORT_DTLS_ROLE_CLIENT);
     }
 }
 #endif
@@ -768,22 +824,26 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
     rtc_sdp_close(&pc->remote_sdp);
     pc->remote_sdp = sdp;
 
+#ifdef MRTC_ENABLE_SFU_API
+    peer_runtime_set_remote_desc(pc, &pc->remote_sdp);
+#endif
+
     /* Set remote ICE credentials */
-    rc = rtc_ice_set_remote_credentials(&pc->ice, sdp.ice_ufrag, sdp.ice_pwd);
+    rc = rtc_ice_set_remote_credentials(&pc->ice, pc->remote_sdp.ice_ufrag, pc->remote_sdp.ice_pwd);
     if (rc != RTC_OK)
         return rc;
 
     /* Add remote candidates */
-    size_t ncand = rtc_sdp_candidate_count(&sdp);
+    size_t ncand = rtc_sdp_candidate_count(&pc->remote_sdp);
     for (size_t i = 0; i < ncand; i++) {
-        const rtc_ice_candidate_t *c = rtc_sdp_get_candidate(&sdp, i);
+        const rtc_ice_candidate_t *c = rtc_sdp_get_candidate(&pc->remote_sdp, i);
         rc = rtc_ice_add_remote_candidate(&pc->ice, c);
         if (rc != RTC_OK)
             return rc;
     }
 
     /* DTLS role negotiation */
-    if (pc->local_sdp.type == RTC_SDP_OFFER && sdp.setup == RTC_SETUP_ACTIVE) {
+    if (pc->local_sdp.type == RTC_SDP_OFFER && pc->remote_sdp.setup == RTC_SETUP_ACTIVE) {
         rtc_dtls_close(&pc->dtls);
         rc = rtc_dtls_init(&pc->dtls, RTC_DTLS_ROLE_SERVER, peer_dtls_send, pc);
         if (rc != RTC_OK)
@@ -814,8 +874,8 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
      * transceiver by mid_index and register its receiver under that SSRC.
      * Lazy first-packet population in peer_transport_recv remains as a
      * defensive fallback for peers that omit a=ssrc lines. */
-    for (int i = 0; i < sdp.media_count; i++) {
-        const rtc_sdp_media_t *m = &sdp.media[i];
+    for (int i = 0; i < pc->remote_sdp.media_count; i++) {
+        const rtc_sdp_media_t *m = &pc->remote_sdp.media[i];
         if (m->ssrc == 0)
             continue;
         for (int j = 0; j < pc->transceiver_count; j++) {
@@ -830,8 +890,8 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
 
     /* Transport-CC extmap negotiation */
 #ifdef MRTC_ENABLE_TWCC
-    for (int i = 0; i < sdp.media_count; i++) {
-        const rtc_sdp_media_t *m = &sdp.media[i];
+    for (int i = 0; i < pc->remote_sdp.media_count; i++) {
+        const rtc_sdp_media_t *m = &pc->remote_sdp.media[i];
         if (m->media_type != RTC_MEDIA_AUDIO && m->media_type != RTC_MEDIA_VIDEO)
             continue;
         uint8_t id = rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC);
@@ -859,7 +919,7 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
     /* Try to start connection if both descriptions set */
     peer_try_connect(pc);
 
-    RTC_LOG_INFO("Remote description set (%zu candidates)", rtc_sdp_candidate_count(&sdp));
+    RTC_LOG_INFO("Remote description set (%zu candidates)", rtc_sdp_candidate_count(&pc->remote_sdp));
     return RTC_OK;
 }
 
@@ -886,7 +946,12 @@ int rtc_peer_connection_restart_ice(rtc_peer_connection_t *pc) {
         return RTC_ERR_INVALID;
     if (pc->connect_started)
         return RTC_ERR_INVALID;
-    return rtc_ice_restart_credentials(&pc->ice);
+    int rc = rtc_ice_restart_credentials(&pc->ice);
+#ifdef MRTC_ENABLE_SFU_API
+    if (rc == RTC_OK && pc->runtime_transport)
+        (void)rtc_transport_restart_ice(pc->runtime_transport);
+#endif
+    return rc;
 }
 
 /* ---- Data channels ---- */
