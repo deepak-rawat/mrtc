@@ -19,6 +19,59 @@
 /* ---- Forward declarations ---- */
 static int peer_dc_send(const uint8_t *data, size_t len, void *user);
 
+#ifdef MRTC_ENABLE_SFU_API
+static void peer_runtime_close(rtc_peer_connection_t *pc);
+
+static int peer_runtime_init(rtc_peer_connection_t *pc) {
+    pc->runtime_worker = rtc_worker_create(NULL);
+    if (!pc->runtime_worker)
+        return RTC_ERR_NOMEM;
+
+    pc->runtime_listener = rtc_listener_create(pc->runtime_worker, NULL);
+    if (!pc->runtime_listener) {
+        peer_runtime_close(pc);
+        return RTC_ERR_SOCKET;
+    }
+
+    pc->runtime_router = rtc_router_create(pc->runtime_worker, NULL);
+    if (!pc->runtime_router) {
+        peer_runtime_close(pc);
+        return RTC_ERR_NOMEM;
+    }
+
+    pc->runtime_transport =
+        rtc_router_create_transport(pc->runtime_router, &(rtc_transport_config_t){
+                                                         .listener = pc->runtime_listener,
+                                                         .ice_mode = RTC_ICE_MODE_FULL,
+                                                     });
+    if (!pc->runtime_transport) {
+        peer_runtime_close(pc);
+        return RTC_ERR_GENERIC;
+    }
+
+    return RTC_OK;
+}
+
+static void peer_runtime_close(rtc_peer_connection_t *pc) {
+    if (pc->runtime_transport) {
+        rtc_transport_destroy(pc->runtime_transport);
+        pc->runtime_transport = NULL;
+    }
+    if (pc->runtime_router) {
+        rtc_router_destroy(pc->runtime_router);
+        pc->runtime_router = NULL;
+    }
+    if (pc->runtime_listener) {
+        rtc_listener_destroy(pc->runtime_listener);
+        pc->runtime_listener = NULL;
+    }
+    if (pc->runtime_worker) {
+        rtc_worker_destroy(pc->runtime_worker);
+        pc->runtime_worker = NULL;
+    }
+}
+#endif
+
 /* ---- BWE bitrate callback ---- */
 
 /* ---- DTLS send callback ---- */
@@ -340,8 +393,21 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
         return NULL;
     }
 
+#ifdef MRTC_ENABLE_SFU_API
+    rc = peer_runtime_init(pc);
+    if (rc != RTC_OK) {
+        rtc_packet_io_close(&pc->transport);
+        free(pc->app_buf);
+        free(pc);
+        return NULL;
+    }
+#endif
+
     /* Initialize SSRC → receiver lookup map */
     if (rtc_u32_map_init(&pc->recv_map) != RTC_OK) {
+#ifdef MRTC_ENABLE_SFU_API
+        peer_runtime_close(pc);
+#endif
         rtc_packet_io_close(&pc->transport);
         free(pc->app_buf);
         free(pc);
@@ -351,6 +417,9 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
     /* Initialize SSRC → sender lookup map */
     if (rtc_u32_map_init(&pc->send_map) != RTC_OK) {
         rtc_u32_map_free(&pc->recv_map);
+#ifdef MRTC_ENABLE_SFU_API
+        peer_runtime_close(pc);
+#endif
         rtc_packet_io_close(&pc->transport);
         free(pc->app_buf);
         free(pc);
@@ -361,6 +430,9 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
     rc = rtc_ice_init(&pc->ice, &pc->transport, pc->stun_server[0] ? pc->stun_server : NULL,
                       pc->stun_port);
     if (rc != RTC_OK) {
+#ifdef MRTC_ENABLE_SFU_API
+        peer_runtime_close(pc);
+#endif
         rtc_packet_io_close(&pc->transport);
         free(pc->app_buf);
         free(pc);
@@ -370,6 +442,9 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
     /* Generate DTLS certificate (needed for fingerprint in SDP) */
     rc = rtc_dtls_init(&pc->dtls, RTC_DTLS_ROLE_CLIENT, peer_dtls_send, pc);
     if (rc != RTC_OK) {
+#ifdef MRTC_ENABLE_SFU_API
+        peer_runtime_close(pc);
+#endif
         rtc_packet_io_close(&pc->transport);
         free(pc->app_buf);
         free(pc);
@@ -396,6 +471,9 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc) {
     rtc_srtp_close(&pc->srtp_recv);
     rtc_dtls_close(&pc->dtls);
     rtc_ice_close(&pc->ice);
+#ifdef MRTC_ENABLE_SFU_API
+    peer_runtime_close(pc);
+#endif
     rtc_u32_map_free(&pc->recv_map);
     rtc_u32_map_free(&pc->send_map);
     rtc_sdp_close(&pc->local_sdp);

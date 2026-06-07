@@ -22,6 +22,13 @@
 #include "rtc_sdp.h"
 #include "rtc_nack_buf.h"
 
+#ifdef MRTC_ENABLE_SFU_API
+#  include "rtc/rtc_listener.h"
+#  include "rtc/rtc_router.h"
+#  include "rtc/rtc_transport.h"
+#  include "rtc/rtc_worker.h"
+#endif
+
 #ifdef MRTC_ENABLE_RATE_CONTROL
 #  include "rtc_rate_control.h"
 #endif
@@ -95,6 +102,16 @@ struct rtc_rtp_transceiver {
 struct rtc_peer_connection {
     /* Transport (owns socket and I/O thread) */
     rtc_packet_io_t transport;
+
+#ifdef MRTC_ENABLE_SFU_API
+    /* Private runtime scaffold for the future peer facade migration. The
+     * legacy packet I/O transport remains the active path until peer media and
+     * data-channel handling are moved onto logical transports. */
+    rtc_worker_t *runtime_worker;
+    rtc_listener_t *runtime_listener;
+    rtc_router_t *runtime_router;
+    rtc_transport_t *runtime_transport;
+#endif
 
     /* Protocol components (touched only on transport thread after connect) */
     rtc_ice_agent_t ice;
