@@ -240,7 +240,8 @@ void peer_rtcp_timer(void *user) {
     /* Re-arm timer */
     if (pc->runtime_connected) {
         pc->runtime_rtcp_timer = rtc_worker_add_timer(
-            pc->runtime_worker, rtc_time_ms() + RTCP_INTERVAL_MS, peer_rtcp_timer, pc);
+            rtc_client_runtime_worker(pc->runtime), rtc_time_ms() + RTCP_INTERVAL_MS,
+            peer_rtcp_timer, pc);
     }
 }
 
@@ -254,7 +255,8 @@ void peer_twcc_fb_timer(void *user) {
     if (pc->connection_state != RTC_CONNECTION_CONNECTED) {
         if (pc->runtime_transport && pc->runtime_connected) {
             pc->runtime_twcc_fb_timer = rtc_worker_add_timer(
-                pc->runtime_worker, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
+                rtc_client_runtime_worker(pc->runtime), rtc_time_ms() + TWCC_FB_INTERVAL_MS,
+                peer_twcc_fb_timer, pc);
         }
         return;
     }
@@ -280,7 +282,8 @@ void peer_twcc_fb_timer(void *user) {
 
     if (pc->runtime_transport && pc->runtime_connected) {
         pc->runtime_twcc_fb_timer = rtc_worker_add_timer(
-            pc->runtime_worker, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
+            rtc_client_runtime_worker(pc->runtime), rtc_time_ms() + TWCC_FB_INTERVAL_MS,
+            peer_twcc_fb_timer, pc);
     }
 }
 

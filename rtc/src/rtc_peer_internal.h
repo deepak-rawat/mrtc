@@ -17,6 +17,7 @@
 #include "rtc_rtcp.h"
 #include "rtc_sdp.h"
 #include "rtc_nack_buf.h"
+#include "rtc_client_runtime.h"
 #include "rtc/rtc_listener.h"
 #include "rtc/rtc_router.h"
 #include "rtc/rtc_transport.h"
@@ -94,9 +95,7 @@ struct rtc_rtp_transceiver {
 
 struct rtc_peer_connection {
     /* Private logical runtime used by the peer facade. */
-    rtc_worker_t *runtime_worker;
-    rtc_listener_t *runtime_listener;
-    rtc_router_t *runtime_router;
+    rtc_client_runtime_t *runtime;
     rtc_transport_t *runtime_transport;
     rtc_worker_timer_t runtime_connect_timer;
     rtc_worker_timer_t runtime_rtcp_timer;

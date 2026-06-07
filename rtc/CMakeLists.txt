@@ -21,6 +21,7 @@ set(RTC_PROTOCOL_SOURCES
 )
 
 set(RTC_CLIENT_SOURCES
+    src/rtc_client_runtime.c
     src/rtc_track.c
     src/rtc_data_channel.c
     src/rtc_peer.c

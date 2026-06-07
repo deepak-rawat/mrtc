@@ -20,28 +20,35 @@ static void peer_runtime_on_rtp(const rtc_rtp_packet_t *pkt, void *user);
 static void peer_runtime_on_rtcp(const uint8_t *data, size_t len, void *user);
 static void peer_runtime_on_data(const uint8_t *data, size_t len, void *user);
 
+static rtc_worker_t *peer_runtime_worker(rtc_peer_connection_t *pc) {
+    return rtc_client_runtime_worker(pc->runtime);
+}
+
+static rtc_listener_t *peer_runtime_listener(rtc_peer_connection_t *pc) {
+    return rtc_client_runtime_listener(pc->runtime);
+}
+
+static rtc_router_t *peer_runtime_router(rtc_peer_connection_t *pc) {
+    return rtc_client_runtime_router(pc->runtime);
+}
+
 static int peer_runtime_init(rtc_peer_connection_t *pc) {
-    pc->runtime_worker = rtc_worker_create(NULL);
-    if (!pc->runtime_worker)
+    pc->runtime = rtc_client_runtime_acquire();
+    if (!pc->runtime)
         return RTC_ERR_NOMEM;
 
-    pc->runtime_listener = rtc_listener_create(pc->runtime_worker, NULL);
-    if (!pc->runtime_listener) {
+    rtc_listener_t *listener = peer_runtime_listener(pc);
+    rtc_router_t *router = peer_runtime_router(pc);
+    if (!listener || !router) {
         peer_runtime_close(pc);
-        return RTC_ERR_SOCKET;
-    }
-
-    pc->runtime_router = rtc_router_create(pc->runtime_worker, NULL);
-    if (!pc->runtime_router) {
-        peer_runtime_close(pc);
-        return RTC_ERR_NOMEM;
+        return RTC_ERR_GENERIC;
     }
 
     pc->runtime_transport =
-        rtc_router_create_transport(pc->runtime_router, &(rtc_transport_config_t){
-                                                            .listener = pc->runtime_listener,
-                                                            .ice_mode = RTC_ICE_MODE_FULL,
-                                                        });
+        rtc_router_create_transport(router, &(rtc_transport_config_t){
+                                         .listener = listener,
+                                         .ice_mode = RTC_ICE_MODE_FULL,
+                                     });
     if (!pc->runtime_transport) {
         peer_runtime_close(pc);
         return RTC_ERR_GENERIC;
@@ -63,17 +70,18 @@ static int peer_runtime_init(rtc_peer_connection_t *pc) {
 }
 
 static void peer_runtime_close(rtc_peer_connection_t *pc) {
-    if (pc->runtime_worker && pc->runtime_connect_timer != RTC_WORKER_TIMER_INVALID) {
-        rtc_worker_cancel_timer(pc->runtime_worker, pc->runtime_connect_timer);
+    rtc_worker_t *worker = peer_runtime_worker(pc);
+    if (worker && pc->runtime_connect_timer != RTC_WORKER_TIMER_INVALID) {
+        rtc_worker_cancel_timer(worker, pc->runtime_connect_timer);
         pc->runtime_connect_timer = RTC_WORKER_TIMER_INVALID;
     }
-    if (pc->runtime_worker && pc->runtime_rtcp_timer != RTC_WORKER_TIMER_INVALID) {
-        rtc_worker_cancel_timer(pc->runtime_worker, pc->runtime_rtcp_timer);
+    if (worker && pc->runtime_rtcp_timer != RTC_WORKER_TIMER_INVALID) {
+        rtc_worker_cancel_timer(worker, pc->runtime_rtcp_timer);
         pc->runtime_rtcp_timer = RTC_WORKER_TIMER_INVALID;
     }
 #  ifdef MRTC_ENABLE_TWCC
-    if (pc->runtime_worker && pc->runtime_twcc_fb_timer != RTC_WORKER_TIMER_INVALID) {
-        rtc_worker_cancel_timer(pc->runtime_worker, pc->runtime_twcc_fb_timer);
+    if (worker && pc->runtime_twcc_fb_timer != RTC_WORKER_TIMER_INVALID) {
+        rtc_worker_cancel_timer(worker, pc->runtime_twcc_fb_timer);
         pc->runtime_twcc_fb_timer = RTC_WORKER_TIMER_INVALID;
     }
 #  endif
@@ -81,22 +89,15 @@ static void peer_runtime_close(rtc_peer_connection_t *pc) {
         rtc_transport_destroy(pc->runtime_transport);
         pc->runtime_transport = NULL;
     }
-    if (pc->runtime_router) {
-        rtc_router_destroy(pc->runtime_router);
-        pc->runtime_router = NULL;
-    }
-    if (pc->runtime_listener) {
-        rtc_listener_destroy(pc->runtime_listener);
-        pc->runtime_listener = NULL;
-    }
-    if (pc->runtime_worker) {
-        rtc_worker_destroy(pc->runtime_worker);
-        pc->runtime_worker = NULL;
+    if (pc->runtime) {
+        rtc_client_runtime_release(pc->runtime);
+        pc->runtime = NULL;
     }
 }
 
 static int peer_runtime_fill_sdp_transport(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
-    if (!pc->runtime_transport || !pc->runtime_listener)
+    rtc_listener_t *listener = peer_runtime_listener(pc);
+    if (!pc->runtime_transport || !listener)
         return RTC_ERR_INVALID;
 
     rtc_ice_parameters_t ice;
@@ -114,7 +115,7 @@ static int peer_runtime_fill_sdp_transport(rtc_peer_connection_t *pc, rtc_sdp_t 
 
     rtc_transport_candidate_t candidates[ICE_MAX_CANDIDATES];
     int count = ICE_MAX_CANDIDATES;
-    rc = rtc_listener_get_candidates(pc->runtime_listener, candidates, &count);
+    rc = rtc_listener_get_candidates(listener, candidates, &count);
     if (rc != RTC_OK)
         return rc;
 
@@ -226,12 +227,14 @@ static void peer_runtime_complete_connection(rtc_peer_connection_t *pc) {
     if (pc->on_data_channel)
         rtc_dc_manager_on_channel(&pc->dc_manager, pc->on_data_channel, pc->on_data_channel_user);
 
-    pc->runtime_rtcp_timer = rtc_worker_add_timer(
-        pc->runtime_worker, rtc_time_ms() + RTCP_INTERVAL_MS, peer_rtcp_timer, pc);
+    pc->runtime_rtcp_timer = rtc_worker_add_timer(peer_runtime_worker(pc),
+                                                  rtc_time_ms() + RTCP_INTERVAL_MS,
+                                                  peer_rtcp_timer, pc);
 #  ifdef MRTC_ENABLE_TWCC
     if (pc->twcc_ext_id_recv != 0) {
-        pc->runtime_twcc_fb_timer = rtc_worker_add_timer(
-            pc->runtime_worker, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
+        pc->runtime_twcc_fb_timer = rtc_worker_add_timer(peer_runtime_worker(pc),
+                                                        rtc_time_ms() + TWCC_FB_INTERVAL_MS,
+                                                        peer_twcc_fb_timer, pc);
     }
 #  endif
 
@@ -253,7 +256,7 @@ static void peer_runtime_connect_timer(void *user) {
     }
 
     if (!stats.selected_tuple_valid) {
-        pc->runtime_connect_timer = rtc_worker_add_timer(pc->runtime_worker, rtc_time_ms() + 50,
+        pc->runtime_connect_timer = rtc_worker_add_timer(peer_runtime_worker(pc), rtc_time_ms() + 50,
                                                          peer_runtime_connect_timer, pc);
         return;
     }
@@ -269,7 +272,7 @@ static void peer_runtime_connect_timer(void *user) {
         return;
     }
 
-    pc->runtime_connect_timer = rtc_worker_add_timer(pc->runtime_worker, rtc_time_ms() + 50,
+    pc->runtime_connect_timer = rtc_worker_add_timer(peer_runtime_worker(pc), rtc_time_ms() + 50,
                                                      peer_runtime_connect_timer, pc);
 }
 
@@ -356,7 +359,7 @@ static void peer_try_connect(rtc_peer_connection_t *pc) {
         return;
     }
     pc->runtime_connect_timer =
-        rtc_worker_add_timer(pc->runtime_worker, rtc_time_ms(), peer_runtime_connect_timer, pc);
+        rtc_worker_add_timer(peer_runtime_worker(pc), rtc_time_ms(), peer_runtime_connect_timer, pc);
 }
 
 /* ---- Public API ---- */
