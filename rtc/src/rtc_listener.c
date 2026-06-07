@@ -273,8 +273,7 @@ static int listener_fill_candidate(rtc_listener_t *listener, const rtc_listener_
                     cfg->listen_ip);
     } else {
         char host_ip[64];
-        if (is_wildcard_ip(ip) &&
-            listener_find_host_ip(host_ip, sizeof(host_ip)) == RTC_OK) {
+        if (is_wildcard_ip(ip) && listener_find_host_ip(host_ip, sizeof(host_ip)) == RTC_OK) {
             copy_string(listener->candidate.address, sizeof(listener->candidate.address), host_ip);
         } else {
             copy_string(listener->candidate.address, sizeof(listener->candidate.address), ip);
@@ -454,8 +453,7 @@ void rtc_listener_unregister_ufrag(rtc_listener_t *listener, const char *ufrag) 
     listener_unregister_route(listener, &listener->ufrag_routes, ufrag);
 }
 
-int rtc_listener_register_stun_txn(rtc_listener_t *listener,
-                                   const uint8_t txn_id[STUN_TXN_ID_SIZE],
+int rtc_listener_register_stun_txn(rtc_listener_t *listener, const uint8_t txn_id[STUN_TXN_ID_SIZE],
                                    rtc_listener_packet_fn fn, void *user) {
     if (!txn_id)
         return RTC_ERR_INVALID;

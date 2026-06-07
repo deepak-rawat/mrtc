@@ -118,8 +118,8 @@ static int transport_send_ice_check(rtc_transport_t *transport) {
     snprintf(username, sizeof(username), "%s:%s", transport->remote_ufrag, transport->ice_ufrag);
 
     rtc_stun_msg_t req;
-    int rc = rtc_stun_build_binding_request(&req, username, transport->remote_pwd, 0x7E0000FF,
-                                            true, 0x123456789ABCDEF0ULL, true);
+    int rc = rtc_stun_build_binding_request(&req, username, transport->remote_pwd, 0x7E0000FF, true,
+                                            0x123456789ABCDEF0ULL, true);
     if (rc != RTC_OK)
         return rc;
 
@@ -131,7 +131,8 @@ static int transport_send_ice_check(rtc_transport_t *transport) {
         return rc;
     transport->ice_txn_registered = true;
 
-    rc = rtc_listener_send_to(transport->listener, req.buf, req.buf_len, &transport->remote_candidate);
+    rc = rtc_listener_send_to(transport->listener, req.buf, req.buf_len,
+                              &transport->remote_candidate);
     if (rc == RTC_OK)
         transport->ice_check_count++;
     return rc;
@@ -145,7 +146,7 @@ static void transport_arm_ice_timer(rtc_transport_t *transport) {
     if (transport->ice_timer != RTC_WORKER_TIMER_INVALID)
         return;
     transport->ice_timer = rtc_worker_add_timer(transport->worker, rtc_time_ms() + 250,
-                                               transport_ice_timer, transport);
+                                                transport_ice_timer, transport);
 }
 
 static void transport_ice_timer(void *user) {
@@ -178,7 +179,7 @@ static void transport_arm_dtls_timer(rtc_transport_t *transport, uint64_t delay_
     if (transport->dtls_timer != RTC_WORKER_TIMER_INVALID)
         return;
     transport->dtls_timer = rtc_worker_add_timer(transport->worker, rtc_time_ms() + delay_ms,
-                                                transport_dtls_timer, transport);
+                                                 transport_dtls_timer, transport);
 }
 
 static void transport_dtls_timer(void *user) {
@@ -412,7 +413,6 @@ rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
     return transport;
 }
 
-
 static rtc_dtls_role_t transport_internal_dtls_role(rtc_transport_dtls_role_t role) {
     return role == RTC_TRANSPORT_DTLS_ROLE_CLIENT ? RTC_DTLS_ROLE_CLIENT : RTC_DTLS_ROLE_SERVER;
 }
@@ -441,7 +441,8 @@ int rtc_transport_restart_ice(rtc_transport_t *transport) {
 
 int rtc_transport_set_remote_ice_parameters(rtc_transport_t *transport,
                                             const rtc_ice_parameters_t *remote) {
-    if (!transport || !remote || remote->username_fragment[0] == '\0' || remote->password[0] == '\0')
+    if (!transport || !remote || remote->username_fragment[0] == '\0' ||
+        remote->password[0] == '\0')
         return RTC_ERR_INVALID;
     memcpy(transport->remote_ufrag, remote->username_fragment, sizeof(transport->remote_ufrag));
     memcpy(transport->remote_pwd, remote->password, sizeof(transport->remote_pwd));
@@ -455,7 +456,8 @@ int rtc_transport_add_remote_candidate(rtc_transport_t *transport,
         return RTC_ERR_INVALID;
     if (strcmp(candidate->protocol, "udp") != 0)
         return RTC_ERR_INVALID;
-    int rc = rtc_addr_from_string(&transport->remote_candidate, candidate->address, candidate->port);
+    int rc =
+        rtc_addr_from_string(&transport->remote_candidate, candidate->address, candidate->port);
     if (rc != RTC_OK)
         return rc;
     transport->remote_candidate_valid = true;
@@ -639,8 +641,7 @@ int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len
     return rtc_listener_send_to(transport->listener, buf, *len, &transport->selected_remote);
 }
 
-int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *len,
-                            size_t buf_cap) {
+int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap) {
     if (!transport || !buf || !len)
         return RTC_ERR_INVALID;
     if (!transport->srtp_ready || !transport->selected_remote_valid)

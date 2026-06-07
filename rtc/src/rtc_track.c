@@ -70,12 +70,12 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
     } else
 #endif
     {
-    /* SRTP protect. The sender's SRTP context is also touched by the
-     * transport thread (RTCP SR/RR + TWCC feedback timers), so this call
-     * relies on the per-context mutex inside rtc_srtp_protect. */
-    rc = rtc_srtp_protect(sender->srtp, pkt.buf, &pkt_len, sizeof(pkt.buf));
-    if (rc != RTC_OK)
-        return rc;
+        /* SRTP protect. The sender's SRTP context is also touched by the
+         * transport thread (RTCP SR/RR + TWCC feedback timers), so this call
+         * relies on the per-context mutex inside rtc_srtp_protect. */
+        rc = rtc_srtp_protect(sender->srtp, pkt.buf, &pkt_len, sizeof(pkt.buf));
+        if (rc != RTC_OK)
+            return rc;
     }
 
     /* Record send-time + wire size in TWCC sender ring */

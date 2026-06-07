@@ -119,6 +119,7 @@ struct rtc_peer_connection {
 #  ifdef MRTC_ENABLE_TWCC
     rtc_worker_timer_t runtime_twcc_fb_timer;
 #  endif
+    char runtime_fingerprint[RTC_DTLS_FINGERPRINT_MAX];
     bool runtime_connected;
 #endif
 
