@@ -3,6 +3,7 @@
  */
 #include "rtc/rtc_router.h"
 
+#include "rtc_router_internal.h"
 #include "rtc_transport_internal.h"
 
 #include <stdatomic.h>
@@ -43,4 +44,8 @@ rtc_transport_t *rtc_router_create_transport(rtc_router_t *router,
     if (!router || atomic_load_explicit(&router->closed, memory_order_acquire))
         return NULL;
     return rtc_transport_create_internal(router, cfg);
+}
+
+rtc_worker_t *rtc_router_worker(rtc_router_t *router) {
+    return router ? router->worker : NULL;
 }

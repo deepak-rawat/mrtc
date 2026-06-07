@@ -7,10 +7,12 @@
 #include "rtc/rtc_u32_map.h"
 #include "rtc_dtls.h"
 #include "rtc_producer_internal.h"
+#include "rtc_router_internal.h"
 #include "rtc_rtp.h"
 #include "rtc_sdp.h"
 #include "rtc_srtp.h"
 #include "rtc_stun.h"
+#include "rtc_worker_internal.h"
 
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -18,6 +20,7 @@
 
 struct rtc_transport {
     rtc_router_t *router;
+    rtc_worker_t *worker;
     rtc_listener_t *listener;
     char ice_ufrag[ICE_UFRAG_LEN];
     char ice_pwd[ICE_PWD_LEN];
@@ -34,6 +37,7 @@ struct rtc_transport {
     rtc_addr_t selected_remote;
     bool selected_remote_valid;
     bool srtp_ready;
+    rtc_worker_timer_t dtls_timer;
     _Atomic bool closed;
     _Atomic uint64_t packets_received;
     _Atomic uint64_t bytes_received;
@@ -64,9 +68,41 @@ static int transport_dtls_send(const uint8_t *data, size_t len, void *user) {
     return rtc_listener_send_to(transport->listener, data, len, &transport->selected_remote);
 }
 
+static void transport_dtls_timer(void *user);
+
+static void transport_cancel_dtls_timer(rtc_transport_t *transport) {
+    if (transport->worker && transport->dtls_timer != RTC_WORKER_TIMER_INVALID) {
+        rtc_worker_cancel_timer(transport->worker, transport->dtls_timer);
+        transport->dtls_timer = RTC_WORKER_TIMER_INVALID;
+    }
+}
+
+static void transport_arm_dtls_timer(rtc_transport_t *transport, uint64_t delay_ms) {
+    if (!transport->worker || transport->dtls.state != RTC_DTLS_STATE_CONNECTING ||
+        atomic_load_explicit(&transport->closed, memory_order_acquire)) {
+        return;
+    }
+    if (transport->dtls_timer != RTC_WORKER_TIMER_INVALID)
+        return;
+    transport->dtls_timer = rtc_worker_add_timer(transport->worker, rtc_time_ms() + delay_ms,
+                                                transport_dtls_timer, transport);
+}
+
+static void transport_dtls_timer(void *user) {
+    rtc_transport_t *transport = (rtc_transport_t *)user;
+    transport->dtls_timer = RTC_WORKER_TIMER_INVALID;
+    if (atomic_load_explicit(&transport->closed, memory_order_acquire))
+        return;
+    if (transport->dtls.state != RTC_DTLS_STATE_CONNECTING)
+        return;
+    (void)rtc_dtls_retransmit(&transport->dtls);
+    transport_arm_dtls_timer(transport, 1000);
+}
+
 static void transport_try_export_srtp(rtc_transport_t *transport) {
     if (transport->srtp_ready || transport->dtls.state != RTC_DTLS_STATE_CONNECTED)
         return;
+    transport_cancel_dtls_timer(transport);
     if (rtc_dtls_export_srtp_keys(&transport->dtls) != RTC_OK) {
         transport->dtls.state = RTC_DTLS_STATE_FAILED;
         return;
@@ -144,15 +180,16 @@ static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t
 maybe_dtls:
     if (type == RTC_PKT_DTLS) {
         atomic_fetch_add_explicit(&transport->dtls_packets_received, 1, memory_order_relaxed);
-        if (rtc_dtls_recv(&transport->dtls, data, len) == RTC_OK)
+        if (rtc_dtls_recv(&transport->dtls, data, len) == RTC_OK) {
+            transport_arm_dtls_timer(transport, 1000);
             transport_try_export_srtp(transport);
+        }
     } else if (type == RTC_PKT_RTP) {
         transport_handle_rtp(transport, data, len);
     }
 }
 
-static void transport_copy_ice_parameters(rtc_transport_t *transport,
-                                          rtc_ice_parameters_t *out) {
+static void transport_copy_ice_parameters(rtc_transport_t *transport, rtc_ice_parameters_t *out) {
     memset(out, 0, sizeof(*out));
     memcpy(out->username_fragment, transport->ice_ufrag, sizeof(out->username_fragment));
     memcpy(out->password, transport->ice_pwd, sizeof(out->password));
@@ -169,7 +206,9 @@ rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
         return NULL;
 
     transport->router = router;
+    transport->worker = rtc_router_worker(router);
     transport->listener = cfg->listener;
+    transport->dtls_timer = RTC_WORKER_TIMER_INVALID;
     transport->ice_mode = cfg->ice_mode;
     transport->enable_sctp = cfg->enable_sctp;
     transport->enable_twcc = cfg->enable_twcc;
@@ -257,6 +296,7 @@ void rtc_transport_close(rtc_transport_t *transport) {
         if (transport->selected_remote_valid)
             rtc_listener_unregister_tuple(transport->listener, &transport->selected_remote);
     }
+    transport_cancel_dtls_timer(transport);
     if (transport->srtp_ready) {
         rtc_srtp_close(&transport->srtp_send);
         rtc_srtp_close(&transport->srtp_recv);
