@@ -3,6 +3,9 @@
  */
 #include "rtc/rtc_producer.h"
 
+#include "rtc_producer_internal.h"
+#include "rtc_transport_internal.h"
+
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,7 +37,7 @@ static void copy_label(char *dst, size_t dst_len, const char *src) {
 
 rtc_producer_t *rtc_transport_produce(rtc_transport_t *transport,
                                       const rtc_producer_options_t *opts) {
-    if (!transport || !opts)
+    if (!transport || !opts || opts->rtp.ssrc == 0)
         return NULL;
 
     rtc_transport_stats_t transport_stats;
@@ -52,6 +55,10 @@ rtc_producer_t *rtc_transport_produce(rtc_transport_t *transport,
     producer->rtp = opts->rtp;
     copy_label(producer->label, sizeof(producer->label), opts->label);
     producer->app_data = opts->app_data;
+    if (rtc_transport_register_producer(transport, producer, producer->rtp.ssrc) != RTC_OK) {
+        free(producer);
+        return NULL;
+    }
     return producer;
 }
 
@@ -62,7 +69,11 @@ const char *rtc_producer_id(const rtc_producer_t *producer) {
 void rtc_producer_close(rtc_producer_t *producer) {
     if (!producer)
         return;
-    atomic_store_explicit(&producer->closed, true, memory_order_release);
+    bool was_closed = atomic_exchange_explicit(&producer->closed, true, memory_order_acq_rel);
+    if (was_closed)
+        return;
+    if (producer->transport && producer->rtp.ssrc != 0)
+        rtc_transport_unregister_producer(producer->transport, producer->rtp.ssrc);
 }
 
 void rtc_producer_destroy(rtc_producer_t *producer) {
@@ -78,8 +89,19 @@ int rtc_producer_get_stats(rtc_producer_t *producer, rtc_producer_stats_t *out) 
     memset(out, 0, sizeof(*out));
     out->closed = atomic_load_explicit(&producer->closed, memory_order_acquire);
     out->kind = producer->kind;
-    out->packets_received =
-        atomic_load_explicit(&producer->packets_received, memory_order_relaxed);
+    out->packets_received = atomic_load_explicit(&producer->packets_received, memory_order_relaxed);
     out->bytes_received = atomic_load_explicit(&producer->bytes_received, memory_order_relaxed);
     return RTC_OK;
+}
+
+uint32_t rtc_producer_ssrc(const rtc_producer_t *producer) {
+    return producer ? producer->rtp.ssrc : 0;
+}
+
+void rtc_producer_on_rtp(rtc_producer_t *producer, const rtc_rtp_packet_t *pkt) {
+    if (!producer || !pkt || atomic_load_explicit(&producer->closed, memory_order_acquire))
+        return;
+    atomic_fetch_add_explicit(&producer->packets_received, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&producer->bytes_received, (uint64_t)pkt->payload_len,
+                              memory_order_relaxed);
 }

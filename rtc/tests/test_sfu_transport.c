@@ -4,6 +4,8 @@
 #include <rtc/rtc.h>
 
 #include "rtc_dtls.h"
+#include "rtc_rtp.h"
+#include "rtc_srtp.h"
 #include "rtc_stun.h"
 #include "test_harness.h"
 
@@ -119,6 +121,40 @@ static bool wait_for_dtls_connected(rtc_transport_t *transport, int timeout_ms) 
         rtc_transport_stats_t stats;
         if (rtc_transport_get_stats(transport, &stats) == RTC_OK &&
             stats.dtls_state == RTC_TRANSPORT_DTLS_CONNECTED && stats.srtp_ready) {
+            return true;
+        }
+        SLEEP_MS(10);
+    }
+    return false;
+}
+
+static bool drive_dtls_handshake(rtc_listener_t *listener, rtc_transport_t *transport,
+                                 rtc_socket_t sender, rtc_dtls_transport_t *client) {
+    dtls_client_send_ctx_t send_ctx = {.listener = listener, .sender = sender};
+    if (rtc_dtls_init(client, RTC_DTLS_ROLE_CLIENT, dtls_client_send, &send_ctx) != RTC_OK)
+        return false;
+    if (rtc_dtls_handshake(client) != RTC_OK)
+        return false;
+
+    uint8_t buf[4096];
+    uint64_t deadline = rtc_time_ms() + 3000;
+    while (rtc_time_ms() < deadline && client->state != RTC_DTLS_STATE_CONNECTED) {
+        int n = recv(sender, (char *)buf, sizeof(buf), 0);
+        if (n > 0 && rtc_dtls_recv(client, buf, (size_t)n) != RTC_OK)
+            return false;
+        if (wait_for_dtls_connected(transport, 1) && client->state == RTC_DTLS_STATE_CONNECTED)
+            break;
+        SLEEP_MS(10);
+    }
+    return client->state == RTC_DTLS_STATE_CONNECTED && wait_for_dtls_connected(transport, 1000);
+}
+
+static bool wait_for_producer_packets(rtc_producer_t *producer, uint64_t target, int timeout_ms) {
+    uint64_t deadline = rtc_time_ms() + (uint64_t)timeout_ms;
+    while (rtc_time_ms() < deadline) {
+        rtc_producer_stats_t stats;
+        if (rtc_producer_get_stats(producer, &stats) == RTC_OK &&
+            stats.packets_received >= target) {
             return true;
         }
         SLEEP_MS(10);
@@ -247,30 +283,84 @@ TEST(transport_dtls_handshake_exports_srtp) {
     ASSERT(sender != RTC_INVALID_SOCKET);
     ASSERT(select_transport_tuple(listener, transport, sender, ice.username_fragment));
 
-    dtls_client_send_ctx_t send_ctx = {.listener = listener, .sender = sender};
     rtc_dtls_transport_t client;
-    ASSERT_EQ(rtc_dtls_init(&client, RTC_DTLS_ROLE_CLIENT, dtls_client_send, &send_ctx), RTC_OK);
-    ASSERT_EQ(rtc_dtls_handshake(&client), RTC_OK);
-
-    uint8_t buf[4096];
-    uint64_t deadline = rtc_time_ms() + 3000;
-    while (rtc_time_ms() < deadline && client.state != RTC_DTLS_STATE_CONNECTED) {
-        int n = recv(sender, (char *)buf, sizeof(buf), 0);
-        if (n > 0)
-            ASSERT_EQ(rtc_dtls_recv(&client, buf, (size_t)n), RTC_OK);
-        if (wait_for_dtls_connected(transport, 1) && client.state == RTC_DTLS_STATE_CONNECTED)
-            break;
-        SLEEP_MS(10);
-    }
-
-    ASSERT_EQ(client.state, RTC_DTLS_STATE_CONNECTED);
-    ASSERT(wait_for_dtls_connected(transport, 1000));
+    ASSERT(drive_dtls_handshake(listener, transport, sender, &client));
 
     rtc_transport_stats_t stats;
     ASSERT_EQ(rtc_transport_get_stats(transport, &stats), RTC_OK);
     ASSERT(stats.dtls_packets_received > 0);
     ASSERT(stats.srtp_ready);
 
+    rtc_dtls_close(&client);
+    rtc_close_socket(sender);
+    rtc_transport_destroy(transport);
+    rtc_router_destroy(router);
+    rtc_listener_destroy(listener);
+    rtc_worker_destroy(worker);
+}
+
+TEST(transport_routes_srtp_to_producer) {
+    rtc_worker_t *worker = rtc_worker_create(NULL);
+    ASSERT(worker != NULL);
+    rtc_listener_t *listener = rtc_listener_create(worker, NULL);
+    ASSERT(listener != NULL);
+    rtc_router_t *router = rtc_router_create(worker, NULL);
+    ASSERT(router != NULL);
+    rtc_transport_t *transport = rtc_router_create_transport(router, &(rtc_transport_config_t){
+                                                                       .listener = listener,
+                                                                       .ice_mode = RTC_ICE_MODE_LITE,
+                                                                   });
+    ASSERT(transport != NULL);
+
+    rtc_ice_parameters_t ice;
+    ASSERT_EQ(rtc_transport_get_ice_parameters(transport, &ice), RTC_OK);
+    rtc_socket_t sender = make_bound_sender();
+    ASSERT(sender != RTC_INVALID_SOCKET);
+    ASSERT(select_transport_tuple(listener, transport, sender, ice.username_fragment));
+
+    rtc_dtls_transport_t client;
+    ASSERT(drive_dtls_handshake(listener, transport, sender, &client));
+    ASSERT_EQ(rtc_dtls_export_srtp_keys(&client), RTC_OK);
+
+    rtc_producer_t *producer = rtc_transport_produce(transport, &(rtc_producer_options_t){
+                                                                    .kind = RTC_MEDIA_KIND_VIDEO,
+                                                                    .rtp = {
+                                                                        .ssrc = 0x12345678,
+                                                                        .codec_count = 1,
+                                                                        .codecs = {{
+                                                                            .kind = RTC_MEDIA_KIND_VIDEO,
+                                                                            .payload_type = 96,
+                                                                            .clock_rate = 90000,
+                                                                            .mime_type = "video/VP8",
+                                                                        }},
+                                                                    },
+                                                                    .label = "camera",
+                                                                });
+    ASSERT(producer != NULL);
+
+    rtc_srtp_ctx_t client_srtp;
+    ASSERT_EQ(rtc_srtp_init(&client_srtp, client.srtp_client_key, RTC_SRTP_MASTER_KEY_LEN,
+                            client.srtp_client_salt, RTC_SRTP_MASTER_SALT_LEN), RTC_OK);
+
+    const uint8_t payload[] = {0x11, 0x22, 0x33, 0x44};
+    rtc_rtp_packet_t pkt;
+    ASSERT_EQ(rtc_rtp_build(&pkt, 96, 77, 9000, 0x12345678, true, payload, sizeof(payload)),
+              RTC_OK);
+    uint8_t wire[1500];
+    memcpy(wire, pkt.buf, pkt.buf_len);
+    size_t wire_len = pkt.buf_len;
+    ASSERT_EQ(rtc_srtp_protect(&client_srtp, wire, &wire_len, sizeof(wire)), RTC_OK);
+
+    ASSERT_EQ(send_udp_from(listener, wire, wire_len, sender), RTC_OK);
+    ASSERT(wait_for_producer_packets(producer, 1, 1000));
+
+    rtc_producer_stats_t stats;
+    ASSERT_EQ(rtc_producer_get_stats(producer, &stats), RTC_OK);
+    ASSERT_EQ(stats.packets_received, 1);
+    ASSERT_EQ(stats.bytes_received, sizeof(payload));
+
+    rtc_srtp_close(&client_srtp);
+    rtc_producer_destroy(producer);
     rtc_dtls_close(&client);
     rtc_close_socket(sender);
     rtc_transport_destroy(transport);
@@ -301,6 +391,7 @@ int main(void) {
     RUN_TEST(transport_create_ice_params);
     RUN_TEST(transport_receives_stun_by_ufrag);
     RUN_TEST(transport_dtls_handshake_exports_srtp);
+    RUN_TEST(transport_routes_srtp_to_producer);
     RUN_TEST(router_rejects_closed_create);
     rtc_cleanup();
     TEST_SUMMARY();

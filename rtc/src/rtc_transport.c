@@ -4,7 +4,10 @@
 #include "rtc_transport_internal.h"
 
 #include "rtc_listener_internal.h"
+#include "rtc/rtc_u32_map.h"
 #include "rtc_dtls.h"
+#include "rtc_producer_internal.h"
+#include "rtc_rtp.h"
 #include "rtc_sdp.h"
 #include "rtc_srtp.h"
 #include "rtc_stun.h"
@@ -25,6 +28,9 @@ struct rtc_transport {
     rtc_dtls_transport_t dtls;
     rtc_srtp_ctx_t srtp_send;
     rtc_srtp_ctx_t srtp_recv;
+    rtc_u32_map_t producers_by_ssrc;
+    rtc_mutex_t producer_mutex;
+    bool producer_mutex_ready;
     rtc_addr_t selected_remote;
     bool selected_remote_valid;
     bool srtp_ready;
@@ -84,6 +90,29 @@ static void transport_try_export_srtp(rtc_transport_t *transport) {
     transport->srtp_ready = true;
 }
 
+static void transport_handle_rtp(rtc_transport_t *transport, const uint8_t *data, size_t len) {
+    if (!transport->srtp_ready || len > SRTP_MAX_PACKET)
+        return;
+
+    uint8_t buf[SRTP_MAX_PACKET];
+    memcpy(buf, data, len);
+    size_t pkt_len = len;
+    if (rtc_srtp_unprotect(&transport->srtp_recv, buf, &pkt_len) != RTC_OK)
+        return;
+
+    rtc_rtp_packet_t pkt;
+    if (rtc_rtp_parse(&pkt, buf, pkt_len) != RTC_OK)
+        return;
+
+    rtc_mutex_lock(&transport->producer_mutex);
+    rtc_producer_t *producer =
+        (rtc_producer_t *)rtc_u32_map_get(&transport->producers_by_ssrc, pkt.header.ssrc);
+    rtc_mutex_unlock(&transport->producer_mutex);
+
+    if (producer)
+        rtc_producer_on_rtp(producer, &pkt);
+}
+
 static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                                 const rtc_addr_t *from, void *user) {
     rtc_transport_t *transport = (rtc_transport_t *)user;
@@ -117,6 +146,8 @@ maybe_dtls:
         atomic_fetch_add_explicit(&transport->dtls_packets_received, 1, memory_order_relaxed);
         if (rtc_dtls_recv(&transport->dtls, data, len) == RTC_OK)
             transport_try_export_srtp(transport);
+    } else if (type == RTC_PKT_RTP) {
+        transport_handle_rtp(transport, data, len);
     }
 }
 
@@ -152,8 +183,18 @@ rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
         return NULL;
     }
 
+    if (rtc_u32_map_init(&transport->producers_by_ssrc) != RTC_OK ||
+        rtc_mutex_init(&transport->producer_mutex) != RTC_OK) {
+        rtc_u32_map_free(&transport->producers_by_ssrc);
+        free(transport);
+        return NULL;
+    }
+    transport->producer_mutex_ready = true;
+
     if (rtc_dtls_init(&transport->dtls, RTC_DTLS_ROLE_SERVER, transport_dtls_send, transport) !=
         RTC_OK) {
+        rtc_mutex_destroy(&transport->producer_mutex);
+        rtc_u32_map_free(&transport->producers_by_ssrc);
         free(transport);
         return NULL;
     }
@@ -162,6 +203,8 @@ rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
                                          transport_on_packet, transport);
     if (rc != RTC_OK) {
         rtc_dtls_close(&transport->dtls);
+        rtc_mutex_destroy(&transport->producer_mutex);
+        rtc_u32_map_free(&transport->producers_by_ssrc);
         free(transport);
         return NULL;
     }
@@ -226,5 +269,28 @@ void rtc_transport_destroy(rtc_transport_t *transport) {
     if (!transport)
         return;
     rtc_transport_close(transport);
+    if (transport->producer_mutex_ready) {
+        rtc_mutex_destroy(&transport->producer_mutex);
+        transport->producer_mutex_ready = false;
+    }
+    rtc_u32_map_free(&transport->producers_by_ssrc);
     free(transport);
+}
+
+int rtc_transport_register_producer(rtc_transport_t *transport, rtc_producer_t *producer,
+                                    uint32_t ssrc) {
+    if (!transport || !producer || ssrc == 0)
+        return RTC_ERR_INVALID;
+    rtc_mutex_lock(&transport->producer_mutex);
+    int rc = rtc_u32_map_set(&transport->producers_by_ssrc, ssrc, producer);
+    rtc_mutex_unlock(&transport->producer_mutex);
+    return rc;
+}
+
+void rtc_transport_unregister_producer(rtc_transport_t *transport, uint32_t ssrc) {
+    if (!transport || ssrc == 0)
+        return;
+    rtc_mutex_lock(&transport->producer_mutex);
+    rtc_u32_map_remove(&transport->producers_by_ssrc, ssrc);
+    rtc_mutex_unlock(&transport->producer_mutex);
 }
