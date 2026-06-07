@@ -79,6 +79,11 @@ typedef struct {
 } rtc_transport_stats_t;
 
 int rtc_transport_get_ice_parameters(rtc_transport_t *transport, rtc_ice_parameters_t *out);
+int rtc_transport_set_remote_ice_parameters(rtc_transport_t *transport,
+                                            const rtc_ice_parameters_t *remote);
+int rtc_transport_add_remote_candidate(rtc_transport_t *transport,
+                                       const rtc_transport_candidate_t *candidate);
+int rtc_transport_start_ice(rtc_transport_t *transport);
 int rtc_transport_get_dtls_parameters(rtc_transport_t *transport, rtc_dtls_parameters_t *out);
 int rtc_transport_get_stats(rtc_transport_t *transport, rtc_transport_stats_t *out);
 void rtc_transport_close(rtc_transport_t *transport);

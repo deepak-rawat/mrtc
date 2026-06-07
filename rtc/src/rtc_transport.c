@@ -15,6 +15,7 @@
 #include "rtc_worker_internal.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,6 +25,8 @@ struct rtc_transport {
     rtc_listener_t *listener;
     char ice_ufrag[ICE_UFRAG_LEN];
     char ice_pwd[ICE_PWD_LEN];
+    char remote_ufrag[ICE_UFRAG_LEN];
+    char remote_pwd[ICE_PWD_LEN];
     rtc_ice_mode_t ice_mode;
     bool enable_sctp;
     bool enable_twcc;
@@ -36,6 +39,13 @@ struct rtc_transport {
     bool producer_mutex_ready;
     rtc_addr_t selected_remote;
     bool selected_remote_valid;
+    rtc_addr_t remote_candidate;
+    bool remote_ice_valid;
+    bool remote_candidate_valid;
+    uint8_t ice_txn_id[STUN_TXN_ID_SIZE];
+    bool ice_txn_registered;
+    rtc_worker_timer_t ice_timer;
+    int ice_check_count;
     bool srtp_ready;
     rtc_worker_timer_t dtls_timer;
     _Atomic bool closed;
@@ -43,6 +53,9 @@ struct rtc_transport {
     _Atomic uint64_t bytes_received;
     _Atomic uint64_t dtls_packets_received;
 };
+
+static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t len,
+                                const rtc_addr_t *from, void *user);
 
 static rtc_transport_dtls_state_t transport_dtls_state(rtc_dtls_state_t state) {
     switch (state) {
@@ -66,6 +79,73 @@ static int transport_dtls_send(const uint8_t *data, size_t len, void *user) {
     if (!transport->selected_remote_valid)
         return RTC_ERR_INVALID;
     return rtc_listener_send_to(transport->listener, data, len, &transport->selected_remote);
+}
+
+static void transport_ice_timer(void *user);
+
+static void transport_cancel_ice_timer(rtc_transport_t *transport) {
+    if (transport->worker && transport->ice_timer != RTC_WORKER_TIMER_INVALID) {
+        rtc_worker_cancel_timer(transport->worker, transport->ice_timer);
+        transport->ice_timer = RTC_WORKER_TIMER_INVALID;
+    }
+}
+
+static void transport_unregister_ice_txn(rtc_transport_t *transport) {
+    if (transport->ice_txn_registered) {
+        rtc_listener_unregister_stun_txn(transport->listener, transport->ice_txn_id);
+        transport->ice_txn_registered = false;
+    }
+}
+
+static int transport_send_ice_check(rtc_transport_t *transport) {
+    if (!transport->remote_ice_valid || !transport->remote_candidate_valid)
+        return RTC_ERR_INVALID;
+
+    char username[RTC_ICE_UFRAG_MAX * 2 + 2];
+    snprintf(username, sizeof(username), "%s:%s", transport->remote_ufrag, transport->ice_ufrag);
+
+    rtc_stun_msg_t req;
+    int rc = rtc_stun_build_binding_request(&req, username, transport->remote_pwd, 0x7E0000FF,
+                                            true, 0x123456789ABCDEF0ULL, true);
+    if (rc != RTC_OK)
+        return rc;
+
+    transport_unregister_ice_txn(transport);
+    memcpy(transport->ice_txn_id, req.txn_id, STUN_TXN_ID_SIZE);
+    rc = rtc_listener_register_stun_txn(transport->listener, transport->ice_txn_id,
+                                        transport_on_packet, transport);
+    if (rc != RTC_OK)
+        return rc;
+    transport->ice_txn_registered = true;
+
+    rc = rtc_listener_send_to(transport->listener, req.buf, req.buf_len, &transport->remote_candidate);
+    if (rc == RTC_OK)
+        transport->ice_check_count++;
+    return rc;
+}
+
+static void transport_arm_ice_timer(rtc_transport_t *transport) {
+    if (!transport->worker || transport->selected_remote_valid ||
+        atomic_load_explicit(&transport->closed, memory_order_acquire)) {
+        return;
+    }
+    if (transport->ice_timer != RTC_WORKER_TIMER_INVALID)
+        return;
+    transport->ice_timer = rtc_worker_add_timer(transport->worker, rtc_time_ms() + 250,
+                                               transport_ice_timer, transport);
+}
+
+static void transport_ice_timer(void *user) {
+    rtc_transport_t *transport = (rtc_transport_t *)user;
+    transport->ice_timer = RTC_WORKER_TIMER_INVALID;
+    if (atomic_load_explicit(&transport->closed, memory_order_acquire) ||
+        transport->selected_remote_valid) {
+        return;
+    }
+    if (transport->ice_check_count >= 120)
+        return;
+    if (transport_send_ice_check(transport) == RTC_OK)
+        transport_arm_ice_timer(transport);
 }
 
 static void transport_dtls_timer(void *user);
@@ -161,7 +241,26 @@ static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t
         goto maybe_dtls;
 
     rtc_stun_msg_t msg;
-    if (rtc_stun_parse(&msg, data, len) != RTC_OK || msg.type != STUN_BINDING_REQUEST)
+    if (rtc_stun_parse(&msg, data, len) != RTC_OK)
+        return;
+
+    if (msg.type == STUN_BINDING_RESPONSE) {
+        if (!transport->ice_txn_registered ||
+            memcmp(msg.txn_id, transport->ice_txn_id, STUN_TXN_ID_SIZE) != 0) {
+            return;
+        }
+        transport_unregister_ice_txn(transport);
+        transport_cancel_ice_timer(transport);
+        if (!transport->selected_remote_valid) {
+            transport->selected_remote = *from;
+            transport->selected_remote_valid = true;
+            (void)rtc_listener_register_tuple(transport->listener, &transport->selected_remote,
+                                              transport_on_packet, transport);
+        }
+        return;
+    }
+
+    if (msg.type != STUN_BINDING_REQUEST)
         return;
 
     if (!transport->selected_remote_valid) {
@@ -209,6 +308,7 @@ rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
     transport->worker = rtc_router_worker(router);
     transport->listener = cfg->listener;
     transport->dtls_timer = RTC_WORKER_TIMER_INVALID;
+    transport->ice_timer = RTC_WORKER_TIMER_INVALID;
     transport->ice_mode = cfg->ice_mode;
     transport->enable_sctp = cfg->enable_sctp;
     transport->enable_twcc = cfg->enable_twcc;
@@ -257,6 +357,44 @@ int rtc_transport_get_ice_parameters(rtc_transport_t *transport, rtc_ice_paramet
     return RTC_OK;
 }
 
+int rtc_transport_set_remote_ice_parameters(rtc_transport_t *transport,
+                                            const rtc_ice_parameters_t *remote) {
+    if (!transport || !remote || remote->username_fragment[0] == '\0' || remote->password[0] == '\0')
+        return RTC_ERR_INVALID;
+    memcpy(transport->remote_ufrag, remote->username_fragment, sizeof(transport->remote_ufrag));
+    memcpy(transport->remote_pwd, remote->password, sizeof(transport->remote_pwd));
+    transport->remote_ice_valid = true;
+    return RTC_OK;
+}
+
+int rtc_transport_add_remote_candidate(rtc_transport_t *transport,
+                                       const rtc_transport_candidate_t *candidate) {
+    if (!transport || !candidate || candidate->address[0] == '\0' || candidate->port == 0)
+        return RTC_ERR_INVALID;
+    if (strcmp(candidate->protocol, "udp") != 0)
+        return RTC_ERR_INVALID;
+    int rc = rtc_addr_from_string(&transport->remote_candidate, candidate->address, candidate->port);
+    if (rc != RTC_OK)
+        return rc;
+    transport->remote_candidate_valid = true;
+    return RTC_OK;
+}
+
+int rtc_transport_start_ice(rtc_transport_t *transport) {
+    if (!transport)
+        return RTC_ERR_INVALID;
+    if (transport->ice_mode != RTC_ICE_MODE_FULL)
+        return RTC_ERR_INVALID;
+    if (transport->selected_remote_valid)
+        return RTC_OK;
+
+    int rc = transport_send_ice_check(transport);
+    if (rc != RTC_OK)
+        return rc;
+    transport_arm_ice_timer(transport);
+    return RTC_OK;
+}
+
 int rtc_transport_get_dtls_parameters(rtc_transport_t *transport, rtc_dtls_parameters_t *out) {
     if (!transport || !out)
         return RTC_ERR_INVALID;
@@ -293,9 +431,11 @@ void rtc_transport_close(rtc_transport_t *transport) {
         return;
     if (transport->listener) {
         rtc_listener_unregister_ufrag(transport->listener, transport->ice_ufrag);
+        transport_unregister_ice_txn(transport);
         if (transport->selected_remote_valid)
             rtc_listener_unregister_tuple(transport->listener, &transport->selected_remote);
     }
+    transport_cancel_ice_timer(transport);
     transport_cancel_dtls_timer(transport);
     if (transport->srtp_ready) {
         rtc_srtp_close(&transport->srtp_send);
