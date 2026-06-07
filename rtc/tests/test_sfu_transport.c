@@ -7,6 +7,7 @@
 #include "rtc_rtp.h"
 #include "rtc_srtp.h"
 #include "rtc_stun.h"
+#include "rtc_transport_internal.h"
 #include "test_harness.h"
 
 #ifdef _WIN32
@@ -184,6 +185,45 @@ static bool wait_for_consumer_packets(rtc_consumer_t *consumer, uint64_t target,
         SLEEP_MS(10);
     }
     return false;
+}
+
+static rtc_mutex_t g_raw_rtp_mutex;
+static rtc_cond_t g_raw_rtp_cond;
+static int g_raw_rtp_count;
+static uint32_t g_raw_rtp_ssrc;
+static size_t g_raw_rtp_payload_len;
+
+static void raw_rtp_callback(const rtc_rtp_packet_t *pkt, void *user) {
+    (void)user;
+    rtc_mutex_lock(&g_raw_rtp_mutex);
+    g_raw_rtp_count++;
+    g_raw_rtp_ssrc = pkt->header.ssrc;
+    g_raw_rtp_payload_len = pkt->payload_len;
+    rtc_cond_signal(&g_raw_rtp_cond);
+    rtc_mutex_unlock(&g_raw_rtp_mutex);
+}
+
+static void reset_raw_rtp(void) {
+    rtc_mutex_lock(&g_raw_rtp_mutex);
+    g_raw_rtp_count = 0;
+    g_raw_rtp_ssrc = 0;
+    g_raw_rtp_payload_len = 0;
+    rtc_mutex_unlock(&g_raw_rtp_mutex);
+}
+
+static bool wait_for_raw_rtp(int target, int timeout_ms) {
+    rtc_mutex_lock(&g_raw_rtp_mutex);
+    uint64_t deadline = rtc_time_ms() + (uint64_t)timeout_ms;
+    while (g_raw_rtp_count < target) {
+        uint64_t now = rtc_time_ms();
+        if (now >= deadline) {
+            rtc_mutex_unlock(&g_raw_rtp_mutex);
+            return false;
+        }
+        rtc_cond_wait_timeout(&g_raw_rtp_cond, &g_raw_rtp_mutex, (uint32_t)(deadline - now));
+    }
+    rtc_mutex_unlock(&g_raw_rtp_mutex);
+    return true;
 }
 
 static bool wait_for_transport_packets(rtc_transport_t *transport, uint64_t target,
@@ -400,6 +440,60 @@ TEST(transport_routes_srtp_to_producer) {
     rtc_worker_destroy(worker);
 }
 
+TEST(transport_invokes_raw_rtp_handler) {
+    rtc_worker_t *worker = rtc_worker_create(NULL);
+    ASSERT(worker != NULL);
+    rtc_listener_t *listener = rtc_listener_create(worker, NULL);
+    ASSERT(listener != NULL);
+    rtc_router_t *router = rtc_router_create(worker, NULL);
+    ASSERT(router != NULL);
+    rtc_transport_t *transport =
+        rtc_router_create_transport(router, &(rtc_transport_config_t){
+                                                .listener = listener,
+                                                .ice_mode = RTC_ICE_MODE_LITE,
+                                            });
+    ASSERT(transport != NULL);
+
+    rtc_ice_parameters_t ice;
+    ASSERT_EQ(rtc_transport_get_ice_parameters(transport, &ice), RTC_OK);
+    rtc_socket_t sender = make_bound_sender();
+    ASSERT(sender != RTC_INVALID_SOCKET);
+    ASSERT(select_transport_tuple(listener, transport, sender, ice.username_fragment));
+
+    rtc_dtls_transport_t client;
+    ASSERT(drive_dtls_handshake(listener, transport, sender, &client));
+    ASSERT_EQ(rtc_dtls_export_srtp_keys(&client), RTC_OK);
+
+    reset_raw_rtp();
+    rtc_transport_on_rtp(transport, raw_rtp_callback, NULL);
+
+    rtc_srtp_ctx_t client_srtp;
+    ASSERT_EQ(rtc_srtp_init(&client_srtp, client.srtp_client_key, RTC_SRTP_MASTER_KEY_LEN,
+                            client.srtp_client_salt, RTC_SRTP_MASTER_SALT_LEN),
+              RTC_OK);
+
+    const uint8_t payload[] = {0x01, 0x02, 0x03};
+    rtc_rtp_packet_t pkt;
+    ASSERT_EQ(rtc_rtp_build(&pkt, 96, 1, 1234, 0xAABBCCDD, false, payload, sizeof(payload)),
+              RTC_OK);
+    uint8_t wire[1500];
+    memcpy(wire, pkt.buf, pkt.buf_len);
+    size_t wire_len = pkt.buf_len;
+    ASSERT_EQ(rtc_srtp_protect(&client_srtp, wire, &wire_len, sizeof(wire)), RTC_OK);
+    ASSERT_EQ(send_udp_from(listener, wire, wire_len, sender), RTC_OK);
+    ASSERT(wait_for_raw_rtp(1, 1000));
+    ASSERT_EQ(g_raw_rtp_ssrc, 0xAABBCCDD);
+    ASSERT_EQ(g_raw_rtp_payload_len, sizeof(payload));
+
+    rtc_srtp_close(&client_srtp);
+    rtc_dtls_close(&client);
+    rtc_close_socket(sender);
+    rtc_transport_destroy(transport);
+    rtc_router_destroy(router);
+    rtc_listener_destroy(listener);
+    rtc_worker_destroy(worker);
+}
+
 TEST(transport_forwards_producer_rtp_to_consumer) {
     rtc_worker_t *worker = rtc_worker_create(NULL);
     ASSERT(worker != NULL);
@@ -527,12 +621,19 @@ TEST(router_rejects_closed_create) {
 
 int main(void) {
     rtc_init();
+    rtc_mutex_init(&g_raw_rtp_mutex);
+    rtc_cond_init(&g_raw_rtp_cond);
+
     RUN_TEST(transport_create_ice_params);
     RUN_TEST(transport_receives_stun_by_ufrag);
     RUN_TEST(transport_dtls_handshake_exports_srtp);
     RUN_TEST(transport_routes_srtp_to_producer);
+    RUN_TEST(transport_invokes_raw_rtp_handler);
     RUN_TEST(transport_forwards_producer_rtp_to_consumer);
     RUN_TEST(router_rejects_closed_create);
+
+    rtc_cond_destroy(&g_raw_rtp_cond);
+    rtc_mutex_destroy(&g_raw_rtp_mutex);
     rtc_cleanup();
     TEST_SUMMARY();
 }

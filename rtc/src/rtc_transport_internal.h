@@ -6,12 +6,16 @@
 
 #include "rtc/rtc_router.h"
 
+#include "rtc_rtp.h"
+
 typedef struct rtc_producer rtc_producer_t;
+typedef void (*rtc_transport_rtp_fn)(const rtc_rtp_packet_t *pkt, void *user);
 
 rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
                                                const rtc_transport_config_t *cfg);
 int rtc_transport_set_dtls_role_internal(rtc_transport_t *transport,
                                          rtc_transport_dtls_role_t role);
+void rtc_transport_on_rtp(rtc_transport_t *transport, rtc_transport_rtp_fn fn, void *user);
 int rtc_transport_register_producer(rtc_transport_t *transport, rtc_producer_t *producer,
                                     uint32_t ssrc);
 void rtc_transport_unregister_producer(rtc_transport_t *transport, uint32_t ssrc);

@@ -37,6 +37,8 @@ struct rtc_transport {
     rtc_u32_map_t producers_by_ssrc;
     rtc_mutex_t producer_mutex;
     bool producer_mutex_ready;
+    rtc_transport_rtp_fn on_rtp;
+    void *on_rtp_user;
     rtc_addr_t selected_remote;
     bool selected_remote_valid;
     rtc_addr_t remote_candidate;
@@ -243,6 +245,8 @@ static void transport_handle_rtp(rtc_transport_t *transport, const uint8_t *data
 
     if (producer)
         rtc_producer_on_rtp(producer, &pkt);
+    if (transport->on_rtp)
+        transport->on_rtp(&pkt, transport->on_rtp_user);
 }
 
 static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t len,
@@ -523,6 +527,13 @@ int rtc_transport_set_dtls_role_internal(rtc_transport_t *transport,
 
     rtc_dtls_close(&transport->dtls);
     return rtc_dtls_init(&transport->dtls, internal_role, transport_dtls_send, transport);
+}
+
+void rtc_transport_on_rtp(rtc_transport_t *transport, rtc_transport_rtp_fn fn, void *user) {
+    if (!transport)
+        return;
+    transport->on_rtp = fn;
+    transport->on_rtp_user = user;
 }
 
 int rtc_transport_register_producer(rtc_transport_t *transport, rtc_producer_t *producer,
