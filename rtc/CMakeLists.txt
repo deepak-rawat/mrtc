@@ -83,7 +83,7 @@ if(MRTC_BUILD_TESTS)
     endif()
     if(MRTC_ENABLE_SFU_API)
         list(APPEND TEST_NAMES test_worker test_listener test_sfu_transport test_sfu_media
-             test_sfu_timers test_sfu_ice)
+             test_sfu_timers test_sfu_ice test_sfu_sender)
     endif()
     if(MRTC_ENABLE_TWCC)
         list(APPEND TEST_NAMES test_twcc test_bwe)

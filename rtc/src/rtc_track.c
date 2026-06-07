@@ -8,6 +8,9 @@
  */
 #include "rtc_peer_internal.h"
 #include "rtc_rtp_ext.h"
+#ifdef MRTC_ENABLE_SFU_API
+#  include "rtc_transport_internal.h"
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -18,8 +21,15 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
                         uint32_t samples, bool marker) {
     if (!sender || !sender->active)
         return RTC_ERR_INVALID;
-    if (!sender->srtp || !sender->transport)
+    if (!sender->transport)
         return RTC_ERR_INVALID;
+#ifndef MRTC_ENABLE_SFU_API
+    if (!sender->srtp)
+        return RTC_ERR_INVALID;
+#else
+    if (!sender->use_logical_transport && !sender->srtp)
+        return RTC_ERR_INVALID;
+#endif
     /* setParameters({active:false}) suspends transmission. Return OK so
      * callers can keep feeding frames without treating it as an error. */
     if (!sender->send_active)
@@ -50,13 +60,23 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
     /* Update RTCP sender stats */
     rtc_rtcp_stats_on_rtp_send(&sender->rtcp_stats, pkt.header.timestamp, len);
 
+    size_t pkt_len = pkt.buf_len;
+#ifdef MRTC_ENABLE_SFU_API
+    if (sender->use_logical_transport) {
+        rc = rtc_transport_send_rtp((rtc_transport_t *)sender->transport, pkt.buf, &pkt_len,
+                                    sizeof(pkt.buf));
+        if (rc != RTC_OK)
+            return rc;
+    } else
+#endif
+    {
     /* SRTP protect. The sender's SRTP context is also touched by the
      * transport thread (RTCP SR/RR + TWCC feedback timers), so this call
      * relies on the per-context mutex inside rtc_srtp_protect. */
-    size_t pkt_len = pkt.buf_len;
     rc = rtc_srtp_protect(sender->srtp, pkt.buf, &pkt_len, sizeof(pkt.buf));
     if (rc != RTC_OK)
         return rc;
+    }
 
     /* Record send-time + wire size in TWCC sender ring */
 #ifdef MRTC_ENABLE_TWCC
@@ -82,6 +102,10 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
 #endif
     }
 
+#ifdef MRTC_ENABLE_SFU_API
+    if (sender->use_logical_transport)
+        return RTC_OK;
+#endif
     /* Send via transport (sendto is thread-safe on UDP sockets) */
     rtc_packet_io_t *t = (rtc_packet_io_t *)sender->transport;
     return rtc_packet_io_send_to_remote(t, pkt.buf, pkt_len);
@@ -309,7 +333,20 @@ void rtc_rtp_sender_attach(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
         return;
     s->srtp = srtp_send;
     s->transport = transport;
+#ifdef MRTC_ENABLE_SFU_API
+    s->use_logical_transport = false;
+#endif
 }
+
+#ifdef MRTC_ENABLE_SFU_API
+void rtc_rtp_sender_attach_logical(struct rtc_rtp_sender *s, rtc_transport_t *transport) {
+    if (!s || !s->active)
+        return;
+    s->srtp = NULL;
+    s->transport = transport;
+    s->use_logical_transport = true;
+}
+#endif
 
 void rtc_rtp_sender_attach_twcc(struct rtc_rtp_sender *s, void *twcc_sender, uint8_t ext_id) {
 #ifdef MRTC_ENABLE_TWCC

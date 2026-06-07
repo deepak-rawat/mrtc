@@ -51,6 +51,9 @@ struct rtc_rtp_sender {
     rtc_rtp_session_t rtp_session;
     rtc_srtp_ctx_t *srtp;
     void *transport;
+#ifdef MRTC_ENABLE_SFU_API
+    bool use_logical_transport;
+#endif
     rtc_rtcp_stats_t rtcp_stats;
 #ifdef MRTC_ENABLE_RATE_CONTROL
     rtc_rate_controller_t *rate_ctrl;
@@ -249,6 +252,11 @@ void rtc_rtp_transceiver_close_resources(struct rtc_rtp_transceiver *t);
 /* Wire a sender to its SRTP send context + transport so it can send. */
 void rtc_rtp_sender_attach(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
                            rtc_packet_io_t *transport);
+
+#ifdef MRTC_ENABLE_SFU_API
+/* Wire a sender to a logical transport. The logical transport owns SRTP. */
+void rtc_rtp_sender_attach_logical(struct rtc_rtp_sender *s, rtc_transport_t *transport);
+#endif
 
 /* Bind transport-cc tagging on a sender (no-op when MRTC_ENABLE_TWCC is off). */
 void rtc_rtp_sender_attach_twcc(struct rtc_rtp_sender *s, void *twcc_sender, uint8_t ext_id);
