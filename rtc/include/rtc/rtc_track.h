@@ -8,6 +8,10 @@
 #ifndef RTC_TRACK_H
 #define RTC_TRACK_H
 
+#ifndef MRTC_ENABLE_CLIENT_API
+#  error "rtc_track.h requires MRTC_ENABLE_CLIENT_API"
+#endif
+
 #include "rtc_common.h"
 
 #define RTC_MAX_TRANSCEIVERS 8

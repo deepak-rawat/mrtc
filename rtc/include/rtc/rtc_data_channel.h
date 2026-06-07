@@ -11,6 +11,10 @@
 #ifndef RTC_DATA_CHANNEL_H
 #define RTC_DATA_CHANNEL_H
 
+#ifndef MRTC_ENABLE_CLIENT_API
+#  error "rtc_data_channel.h requires MRTC_ENABLE_CLIENT_API"
+#endif
+
 #include "rtc_common.h"
 
 #define RTC_DC_MAX_LABEL    128

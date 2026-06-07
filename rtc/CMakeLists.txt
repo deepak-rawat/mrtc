@@ -1,8 +1,11 @@
-# mrtc - core WebRTC transport library
-set(LIB_SOURCES
+# mrtc - core RTC transport library
+set(RTC_CORE_SOURCES
     src/rtc_utils.c
     src/rtc_poller.c
     src/rtc_transport.c
+)
+
+set(RTC_PROTOCOL_SOURCES
     src/rtc_stun.c
     src/rtc_ice.c
     src/rtc_dtls.c
@@ -13,12 +16,27 @@ set(LIB_SOURCES
     src/rtc_rtcp.c
     src/rtc_nack_buf.c
     src/rtc_rate_control.c
+    src/rtc_turn.c
+)
+
+set(RTC_CLIENT_SOURCES
     src/rtc_track.c
     src/rtc_data_channel.c
     src/rtc_peer.c
     src/rtc_peer_packets.c
-    src/rtc_turn.c
 )
+
+set(RTC_SFU_SOURCES)
+
+set(LIB_SOURCES ${RTC_CORE_SOURCES} ${RTC_PROTOCOL_SOURCES})
+
+if(MRTC_ENABLE_CLIENT_API)
+    list(APPEND LIB_SOURCES ${RTC_CLIENT_SOURCES})
+endif()
+
+if(MRTC_ENABLE_SFU_API)
+    list(APPEND LIB_SOURCES ${RTC_SFU_SOURCES})
+endif()
 
 # Conditional sources
 if(MRTC_ENABLE_TWCC)
@@ -40,12 +58,21 @@ endif()
 if(MRTC_ENABLE_RATE_CONTROL)
     target_compile_definitions(mrtc PUBLIC MRTC_ENABLE_RATE_CONTROL)
 endif()
+if(MRTC_ENABLE_CLIENT_API)
+    target_compile_definitions(mrtc PUBLIC MRTC_ENABLE_CLIENT_API)
+endif()
+if(MRTC_ENABLE_SFU_API)
+    target_compile_definitions(mrtc PUBLIC MRTC_ENABLE_SFU_API)
+endif()
 
 # Tests (need access to internal headers for component-level testing)
 if(MRTC_BUILD_TESTS)
-    set(TEST_NAMES test_stun test_rtp test_srtp test_dtls test_ice test_sdp test_transport test_peer
-                   test_sdp_video test_rtcp test_data_channel test_turn test_rate_control
-                   test_rtcp_feedback test_nack_buf test_rtp_ext test_poller)
+    set(TEST_NAMES test_stun test_rtp test_srtp test_dtls test_ice test_sdp test_transport
+                   test_sdp_video test_rtcp test_turn test_rate_control test_rtcp_feedback
+                   test_nack_buf test_rtp_ext test_poller)
+    if(MRTC_ENABLE_CLIENT_API)
+        list(APPEND TEST_NAMES test_peer test_data_channel)
+    endif()
     if(MRTC_ENABLE_TWCC)
         list(APPEND TEST_NAMES test_twcc test_bwe)
     endif()

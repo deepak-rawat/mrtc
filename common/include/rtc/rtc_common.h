@@ -44,6 +44,15 @@ typedef enum {
     RTC_ERR_SDP = -9,
 } rtc_err_t;
 
+/* ---------- Session description basics ---------- */
+#define SDP_MAX_SIZE 8192
+
+typedef enum {
+    RTC_SDP_OFFER,
+    RTC_SDP_ANSWER,
+    RTC_SDP_PRANSWER,
+} rtc_sdp_type_t;
+
 /* ---------- Network address ---------- */
 typedef struct {
     struct sockaddr_storage addr;

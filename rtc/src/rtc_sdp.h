@@ -12,7 +12,7 @@
 
 #include "rtc_common.h"
 #include "rtc_vec.h"
-#include "rtc/rtc_peer.h" /* SDP_MAX_SIZE, rtc_sdp_type_t (public surface) */
+#include "rtc_common.h" /* SDP_MAX_SIZE, rtc_sdp_type_t */
 
 /* ICE candidate types (shared with ICE agent internals) */
 #define ICE_MAX_CANDIDATES 16
