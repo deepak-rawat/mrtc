@@ -23,4 +23,13 @@ typedef struct {
     int channels;
 } rtc_rtp_codec_parameters_t;
 
+#define RTC_RTP_MAX_CODECS 4
+
+typedef struct {
+    rtc_rtp_codec_parameters_t codecs[RTC_RTP_MAX_CODECS];
+    int codec_count;
+    uint32_t ssrc;
+    char mid[32];
+} rtc_rtp_parameters_t;
+
 #endif /* RTC_RTP_PARAMS_H */

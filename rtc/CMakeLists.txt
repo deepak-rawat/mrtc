@@ -32,6 +32,8 @@ set(RTC_SFU_SOURCES
     src/rtc_listener.c
     src/rtc_router.c
     src/rtc_transport.c
+    src/rtc_producer.c
+    src/rtc_consumer.c
 )
 
 set(LIB_SOURCES ${RTC_CORE_SOURCES} ${RTC_PROTOCOL_SOURCES})
@@ -80,7 +82,7 @@ if(MRTC_BUILD_TESTS)
         list(APPEND TEST_NAMES test_peer test_data_channel)
     endif()
     if(MRTC_ENABLE_SFU_API)
-        list(APPEND TEST_NAMES test_worker test_listener test_sfu_transport)
+        list(APPEND TEST_NAMES test_worker test_listener test_sfu_transport test_sfu_media)
     endif()
     if(MRTC_ENABLE_TWCC)
         list(APPEND TEST_NAMES test_twcc test_bwe)
