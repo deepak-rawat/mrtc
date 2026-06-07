@@ -10,7 +10,11 @@
 
 #include "rtc_common.h"
 
+#define RTC_ICE_UFRAG_MAX 8
+#define RTC_ICE_PWD_MAX   24
+
 typedef struct rtc_transport rtc_transport_t;
+typedef struct rtc_listener rtc_listener_t;
 
 typedef enum {
     RTC_TRANSPORT_CANDIDATE_HOST,
@@ -30,9 +34,29 @@ typedef enum {
 } rtc_ice_mode_t;
 
 typedef struct {
-    const char *username_fragment;
-    const char *password;
+    char username_fragment[RTC_ICE_UFRAG_MAX];
+    char password[RTC_ICE_PWD_MAX];
     rtc_ice_mode_t mode;
 } rtc_ice_parameters_t;
+
+typedef struct {
+    rtc_listener_t *listener;
+    rtc_ice_mode_t ice_mode;
+    bool enable_sctp;
+    bool enable_twcc;
+    uint32_t initial_outgoing_bitrate_bps;
+} rtc_transport_config_t;
+
+typedef struct {
+    bool closed;
+    rtc_ice_mode_t ice_mode;
+    uint64_t packets_received;
+    uint64_t bytes_received;
+} rtc_transport_stats_t;
+
+int rtc_transport_get_ice_parameters(rtc_transport_t *transport, rtc_ice_parameters_t *out);
+int rtc_transport_get_stats(rtc_transport_t *transport, rtc_transport_stats_t *out);
+void rtc_transport_close(rtc_transport_t *transport);
+void rtc_transport_destroy(rtc_transport_t *transport);
 
 #endif /* RTC_PUBLIC_TRANSPORT_H */
