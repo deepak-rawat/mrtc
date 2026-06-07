@@ -27,6 +27,7 @@
 #  include "rtc/rtc_router.h"
 #  include "rtc/rtc_transport.h"
 #  include "rtc/rtc_worker.h"
+#  include "rtc_worker_internal.h"
 #endif
 
 #ifdef MRTC_ENABLE_RATE_CONTROL
@@ -107,13 +108,18 @@ struct rtc_peer_connection {
     rtc_packet_io_t transport;
 
 #ifdef MRTC_ENABLE_SFU_API
-    /* Private runtime scaffold for the future peer facade migration. The
-     * legacy packet I/O transport remains the active path until peer media and
-     * data-channel handling are moved onto logical transports. */
+    /* Private logical runtime used by the peer facade when the SFU transport
+     * layer is available. */
     rtc_worker_t *runtime_worker;
     rtc_listener_t *runtime_listener;
     rtc_router_t *runtime_router;
     rtc_transport_t *runtime_transport;
+    rtc_worker_timer_t runtime_connect_timer;
+    rtc_worker_timer_t runtime_rtcp_timer;
+#  ifdef MRTC_ENABLE_TWCC
+    rtc_worker_timer_t runtime_twcc_fb_timer;
+#  endif
+    bool runtime_connected;
 #endif
 
     /* Protocol components (touched only on transport thread after connect) */
@@ -273,6 +279,11 @@ void rtc_rtp_sender_emit_sr(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
 void rtc_rtp_receiver_emit_rr(struct rtc_rtp_receiver *r, rtc_srtp_ctx_t *srtp_send,
                               rtc_packet_io_t *transport);
 
+#ifdef MRTC_ENABLE_SFU_API
+void rtc_rtp_sender_emit_sr_logical(struct rtc_rtp_sender *s, rtc_transport_t *transport);
+void rtc_rtp_receiver_emit_rr_logical(struct rtc_rtp_receiver *r, rtc_transport_t *transport);
+#endif
+
 /* Serialize a single transceiver into an SDP m= section. */
 void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc_sdp_media_t *m);
 
@@ -285,6 +296,8 @@ void peer_complete_connection(rtc_peer_connection_t *pc);
 /* Transport recv callback (registered with rtc_packet_io_init). */
 void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                          const rtc_addr_t *from, void *user);
+void peer_handle_plain_rtp(rtc_peer_connection_t *pc, const rtc_rtp_packet_t *pkt);
+void peer_handle_plain_rtcp(rtc_peer_connection_t *pc, const uint8_t *buf, size_t pkt_len);
 
 /* RTCP send timer + interval (scheduled from peer_complete_connection). */
 #define RTCP_INTERVAL_MS 5000

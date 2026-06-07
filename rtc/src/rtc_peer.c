@@ -24,6 +24,10 @@ static int peer_dc_send(const uint8_t *data, size_t len, void *user);
 
 #ifdef MRTC_ENABLE_SFU_API
 static void peer_runtime_close(rtc_peer_connection_t *pc);
+static void peer_runtime_connect_timer(void *user);
+static void peer_runtime_on_rtp(const rtc_rtp_packet_t *pkt, void *user);
+static void peer_runtime_on_rtcp(const uint8_t *data, size_t len, void *user);
+static void peer_runtime_on_data(const uint8_t *data, size_t len, void *user);
 
 static int peer_runtime_init(rtc_peer_connection_t *pc) {
     pc->runtime_worker = rtc_worker_create(NULL);
@@ -51,11 +55,33 @@ static int peer_runtime_init(rtc_peer_connection_t *pc) {
         peer_runtime_close(pc);
         return RTC_ERR_GENERIC;
     }
+    rtc_transport_on_rtp(pc->runtime_transport, peer_runtime_on_rtp, pc);
+    rtc_transport_on_rtcp(pc->runtime_transport, peer_runtime_on_rtcp, pc);
+    rtc_transport_on_data(pc->runtime_transport, peer_runtime_on_data, pc);
+    pc->runtime_connect_timer = RTC_WORKER_TIMER_INVALID;
+    pc->runtime_rtcp_timer = RTC_WORKER_TIMER_INVALID;
+#  ifdef MRTC_ENABLE_TWCC
+    pc->runtime_twcc_fb_timer = RTC_WORKER_TIMER_INVALID;
+#  endif
 
     return RTC_OK;
 }
 
 static void peer_runtime_close(rtc_peer_connection_t *pc) {
+    if (pc->runtime_worker && pc->runtime_connect_timer != RTC_WORKER_TIMER_INVALID) {
+        rtc_worker_cancel_timer(pc->runtime_worker, pc->runtime_connect_timer);
+        pc->runtime_connect_timer = RTC_WORKER_TIMER_INVALID;
+    }
+    if (pc->runtime_worker && pc->runtime_rtcp_timer != RTC_WORKER_TIMER_INVALID) {
+        rtc_worker_cancel_timer(pc->runtime_worker, pc->runtime_rtcp_timer);
+        pc->runtime_rtcp_timer = RTC_WORKER_TIMER_INVALID;
+    }
+#  ifdef MRTC_ENABLE_TWCC
+    if (pc->runtime_worker && pc->runtime_twcc_fb_timer != RTC_WORKER_TIMER_INVALID) {
+        rtc_worker_cancel_timer(pc->runtime_worker, pc->runtime_twcc_fb_timer);
+        pc->runtime_twcc_fb_timer = RTC_WORKER_TIMER_INVALID;
+    }
+#  endif
     if (pc->runtime_transport) {
         rtc_transport_destroy(pc->runtime_transport);
         pc->runtime_transport = NULL;
@@ -72,6 +98,48 @@ static void peer_runtime_close(rtc_peer_connection_t *pc) {
         rtc_worker_destroy(pc->runtime_worker);
         pc->runtime_worker = NULL;
     }
+}
+
+static int peer_runtime_fill_sdp_transport(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
+    if (!pc->runtime_transport || !pc->runtime_listener)
+        return RTC_ERR_INVALID;
+
+    rtc_ice_parameters_t ice;
+    int rc = rtc_transport_get_ice_parameters(pc->runtime_transport, &ice);
+    if (rc != RTC_OK)
+        return rc;
+    memcpy(sdp->ice_ufrag, ice.username_fragment, sizeof(sdp->ice_ufrag));
+    memcpy(sdp->ice_pwd, ice.password, sizeof(sdp->ice_pwd));
+
+    rtc_dtls_parameters_t dtls;
+    rc = rtc_transport_get_dtls_parameters(pc->runtime_transport, &dtls);
+    if (rc != RTC_OK)
+        return rc;
+    memcpy(sdp->fingerprint, dtls.fingerprint, sizeof(sdp->fingerprint));
+
+    rtc_transport_candidate_t candidates[ICE_MAX_CANDIDATES];
+    int count = ICE_MAX_CANDIDATES;
+    rc = rtc_listener_get_candidates(pc->runtime_listener, candidates, &count);
+    if (rc != RTC_OK)
+        return rc;
+
+    for (int i = 0; i < count; i++) {
+        rtc_ice_candidate_t c;
+        memset(&c, 0, sizeof(c));
+        c.type = ICE_CANDIDATE_HOST;
+        c.component = 1;
+        c.priority = 2130706431u;
+        size_t flen = strlen(candidates[i].foundation);
+        if (flen >= sizeof(c.foundation))
+            flen = sizeof(c.foundation) - 1;
+        memcpy(c.foundation, candidates[i].foundation, flen);
+        c.foundation[flen] = '\0';
+        rc = rtc_addr_from_string(&c.addr, candidates[i].address, candidates[i].port);
+        if (rc != RTC_OK)
+            return rc;
+        rtc_sdp_add_candidate(sdp, &c);
+    }
+    return RTC_OK;
 }
 
 static void peer_runtime_add_remote_candidate(rtc_peer_connection_t *pc,
@@ -125,6 +193,96 @@ static void peer_runtime_set_remote_desc(rtc_peer_connection_t *pc, const rtc_sd
         (void)rtc_transport_set_dtls_role_internal(pc->runtime_transport,
                                                   RTC_TRANSPORT_DTLS_ROLE_CLIENT);
     }
+}
+
+static void peer_runtime_complete_connection(rtc_peer_connection_t *pc) {
+    if (pc->runtime_connected)
+        return;
+    pc->runtime_connected = true;
+
+    for (int i = 0; i < pc->transceiver_count; i++) {
+        struct rtc_rtp_sender *s = &pc->transceivers[i].sender;
+        if (!s->active)
+            continue;
+        rtc_rtp_sender_attach_logical(s, pc->runtime_transport);
+#  ifdef MRTC_ENABLE_TWCC
+        if (pc->twcc_ext_id_send != 0) {
+            rtc_rtp_sender_attach_twcc(s, &pc->twcc_sender, pc->twcc_ext_id_send);
+            if (pc->twcc_local_ssrc == 0)
+                pc->twcc_local_ssrc = s->rtp_session.ssrc;
+        }
+#  endif
+        rtc_rtp_sender_arm_video(s);
+    }
+
+    if (!pc->dc_manager.send_fn)
+        rtc_dc_manager_init(&pc->dc_manager, peer_dc_send, pc);
+    rtc_dc_manager_on_dtls_connected(&pc->dc_manager);
+    if (pc->on_data_channel)
+        rtc_dc_manager_on_channel(&pc->dc_manager, pc->on_data_channel, pc->on_data_channel_user);
+
+    pc->runtime_rtcp_timer = rtc_worker_add_timer(pc->runtime_worker,
+                                                  rtc_time_ms() + RTCP_INTERVAL_MS,
+                                                  peer_rtcp_timer, pc);
+#  ifdef MRTC_ENABLE_TWCC
+    if (pc->twcc_ext_id_recv != 0) {
+        pc->runtime_twcc_fb_timer = rtc_worker_add_timer(pc->runtime_worker,
+                                                        rtc_time_ms() + TWCC_FB_INTERVAL_MS,
+                                                        peer_twcc_fb_timer, pc);
+    }
+#  endif
+
+    peer_set_ice_connection(pc, RTC_ICE_CONNECTION_CONNECTED);
+    peer_set_connection(pc, RTC_CONNECTION_CONNECTED);
+}
+
+static void peer_runtime_connect_timer(void *user) {
+    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+    pc->runtime_connect_timer = RTC_WORKER_TIMER_INVALID;
+    if (pc->connection_state == RTC_CONNECTION_CLOSED ||
+        pc->connection_state == RTC_CONNECTION_FAILED || pc->runtime_connected)
+        return;
+
+    rtc_transport_stats_t stats;
+    if (rtc_transport_get_stats(pc->runtime_transport, &stats) != RTC_OK) {
+        peer_set_connection(pc, RTC_CONNECTION_FAILED);
+        return;
+    }
+
+    if (!stats.selected_tuple_valid) {
+        pc->runtime_connect_timer = rtc_worker_add_timer(pc->runtime_worker, rtc_time_ms() + 50,
+                                                        peer_runtime_connect_timer, pc);
+        return;
+    }
+
+    if (stats.dtls_state == RTC_TRANSPORT_DTLS_NEW &&
+        rtc_transport_start_dtls(pc->runtime_transport) != RTC_OK) {
+        peer_set_connection(pc, RTC_CONNECTION_FAILED);
+        return;
+    }
+
+    if (stats.dtls_state == RTC_TRANSPORT_DTLS_CONNECTED && stats.srtp_ready) {
+        peer_runtime_complete_connection(pc);
+        return;
+    }
+
+    pc->runtime_connect_timer = rtc_worker_add_timer(pc->runtime_worker, rtc_time_ms() + 50,
+                                                    peer_runtime_connect_timer, pc);
+}
+
+static void peer_runtime_on_rtp(const rtc_rtp_packet_t *pkt, void *user) {
+    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+    peer_handle_plain_rtp(pc, pkt);
+}
+
+static void peer_runtime_on_rtcp(const uint8_t *data, size_t len, void *user) {
+    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+    peer_handle_plain_rtcp(pc, data, len);
+}
+
+static void peer_runtime_on_data(const uint8_t *data, size_t len, void *user) {
+    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+    rtc_dc_manager_recv(&pc->dc_manager, data, len);
 }
 #endif
 
@@ -348,6 +506,14 @@ static void parse_stun_url(const char *url, char *host, size_t host_len, uint16_
 /* ---- Helper: fill rtc_sdp_t from transceivers + ICE + DTLS ---- */
 
 static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
+#ifdef MRTC_ENABLE_SFU_API
+    if (pc->runtime_transport && pc->runtime_listener) {
+        int rc = peer_runtime_fill_sdp_transport(pc, sdp);
+        if (rc != RTC_OK)
+            return rc;
+    } else
+#endif
+    {
     /* ICE credentials */
     memcpy(sdp->ice_ufrag, pc->ice.ufrag, ICE_UFRAG_LEN);
     memcpy(sdp->ice_pwd, pc->ice.pwd, ICE_PWD_LEN);
@@ -358,6 +524,7 @@ static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
     /* Candidates */
     for (int i = 0; i < pc->ice.local_candidate_count; i++) {
         rtc_sdp_add_candidate(sdp, &pc->ice.local_candidates[i]);
+    }
     }
 
     /* Build multi-media descriptions from transceivers */
@@ -409,6 +576,22 @@ static void peer_try_connect(rtc_peer_connection_t *pc) {
         return;
 
     pc->connect_started = true;
+
+#ifdef MRTC_ENABLE_SFU_API
+    if (pc->runtime_transport && pc->runtime_worker) {
+        peer_set_connection(pc, RTC_CONNECTION_CONNECTING);
+        peer_set_ice_connection(pc, RTC_ICE_CONNECTION_CHECKING);
+        int rc = rtc_transport_start_ice(pc->runtime_transport);
+        if (rc != RTC_OK && rc != RTC_ERR_INVALID) {
+            peer_set_ice_connection(pc, RTC_ICE_CONNECTION_FAILED);
+            peer_set_connection(pc, RTC_CONNECTION_FAILED);
+            return;
+        }
+        pc->runtime_connect_timer = rtc_worker_add_timer(pc->runtime_worker, rtc_time_ms(),
+                                                        peer_runtime_connect_timer, pc);
+        return;
+    }
+#endif
 
     /* Schedule connection on transport thread (0-delay timer) */
     rtc_packet_io_add_timer(&pc->transport, rtc_time_ms(), peer_connect_timer, pc);
@@ -754,11 +937,14 @@ int rtc_peer_connection_set_local_desc(rtc_peer_connection_t *pc, const rtc_desc
      * (candidate × transceiver). If there are no transceivers (e.g.,
      * data-channel-only), emit once with the default mid "0". */
     peer_set_ice_gathering(pc, RTC_ICE_GATHERING_GATHERING);
-    for (int i = 0; i < pc->ice.local_candidate_count; i++) {
+    size_t local_candidate_count = rtc_sdp_candidate_count(&pc->local_sdp);
+    for (size_t i = 0; i < local_candidate_count; i++) {
         if (!pc->on_ice_candidate)
             continue;
 
-        rtc_ice_candidate_t *c = &pc->ice.local_candidates[i];
+        const rtc_ice_candidate_t *c = rtc_sdp_get_candidate(&pc->local_sdp, i);
+        if (!c)
+            continue;
         char ip[64];
         uint16_t port;
         rtc_addr_to_string(&c->addr, ip, sizeof(ip), &port);
@@ -959,6 +1145,10 @@ int rtc_peer_connection_restart_ice(rtc_peer_connection_t *pc) {
 /* Send callback for data channel manager (sends via DTLS) */
 static int peer_dc_send(const uint8_t *data, size_t len, void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+#ifdef MRTC_ENABLE_SFU_API
+    if (pc->runtime_transport && pc->runtime_connected)
+        return rtc_transport_send_data(pc->runtime_transport, data, len);
+#endif
     if (pc->dtls.state != RTC_DTLS_STATE_CONNECTED)
         return RTC_ERR_INVALID;
 

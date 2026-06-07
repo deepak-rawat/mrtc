@@ -419,6 +419,40 @@ void rtc_rtp_receiver_emit_rr(struct rtc_rtp_receiver *r, rtc_srtp_ctx_t *srtp_s
     r->rtcp_stats.last_report_time = rtc_time_ms();
 }
 
+#ifdef MRTC_ENABLE_SFU_API
+void rtc_rtp_sender_emit_sr_logical(struct rtc_rtp_sender *s, rtc_transport_t *transport) {
+    if (!s || !s->active || !transport || s->rtcp_stats.packets_sent == 0)
+        return;
+    rtc_rtcp_packet_t pkt;
+    if (rtc_rtcp_build_sr(&pkt, &s->rtcp_stats) != RTC_OK)
+        return;
+    uint8_t buf[RTCP_MAX_PACKET + 4 + SRTP_AUTH_TAG_LEN];
+    if (pkt.buf_len > sizeof(buf))
+        return;
+    memcpy(buf, pkt.buf, pkt.buf_len);
+    size_t len = pkt.buf_len;
+    if (rtc_transport_send_rtcp(transport, buf, &len, sizeof(buf)) != RTC_OK)
+        return;
+    s->rtcp_stats.last_report_time = rtc_time_ms();
+}
+
+void rtc_rtp_receiver_emit_rr_logical(struct rtc_rtp_receiver *r, rtc_transport_t *transport) {
+    if (!r || !r->active || !transport || r->rtcp_stats.packets_received == 0)
+        return;
+    rtc_rtcp_packet_t pkt;
+    if (rtc_rtcp_build_rr(&pkt, &r->rtcp_stats) != RTC_OK)
+        return;
+    uint8_t buf[RTCP_MAX_PACKET + 4 + SRTP_AUTH_TAG_LEN];
+    if (pkt.buf_len > sizeof(buf))
+        return;
+    memcpy(buf, pkt.buf, pkt.buf_len);
+    size_t len = pkt.buf_len;
+    if (rtc_transport_send_rtcp(transport, buf, &len, sizeof(buf)) != RTC_OK)
+        return;
+    r->rtcp_stats.last_report_time = rtc_time_ms();
+}
+#endif
+
 void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc_sdp_media_t *m) {
     memset(m, 0, sizeof(*m));
 

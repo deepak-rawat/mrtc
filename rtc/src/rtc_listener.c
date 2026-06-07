@@ -13,6 +13,13 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef _WIN32
+#  include <iphlpapi.h>
+#else
+#  include <ifaddrs.h>
+#  include <net/if.h>
+#endif
+
 typedef struct {
     rtc_listener_packet_fn fn;
     void *user;
@@ -48,6 +55,68 @@ static void copy_string(char *dst, size_t dst_len, const char *src) {
 
 static bool is_wildcard_ip(const char *ip) {
     return !ip || ip[0] == '\0' || strcmp(ip, "0.0.0.0") == 0 || strcmp(ip, "::") == 0;
+}
+
+static int listener_find_host_ip(char *out, size_t out_len) {
+    if (!out || out_len == 0)
+        return RTC_ERR_INVALID;
+
+#ifdef _WIN32
+    ULONG bufsize = 15000;
+    PIP_ADAPTER_ADDRESSES addrs = (PIP_ADAPTER_ADDRESSES)malloc(bufsize);
+    if (!addrs)
+        return RTC_ERR_NOMEM;
+
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    ULONG ret = GetAdaptersAddresses(AF_INET, flags, NULL, addrs, &bufsize);
+    if (ret == ERROR_BUFFER_OVERFLOW) {
+        free(addrs);
+        addrs = (PIP_ADAPTER_ADDRESSES)malloc(bufsize);
+        if (!addrs)
+            return RTC_ERR_NOMEM;
+        ret = GetAdaptersAddresses(AF_INET, flags, NULL, addrs, &bufsize);
+    }
+    if (ret != NO_ERROR) {
+        free(addrs);
+        return RTC_ERR_GENERIC;
+    }
+
+    int rc = RTC_ERR_GENERIC;
+    for (PIP_ADAPTER_ADDRESSES a = addrs; a && rc != RTC_OK; a = a->Next) {
+        if (a->OperStatus != IfOperStatusUp)
+            continue;
+        for (PIP_ADAPTER_UNICAST_ADDRESS ua = a->FirstUnicastAddress; ua; ua = ua->Next) {
+            struct sockaddr_in *sin = (struct sockaddr_in *)ua->Address.lpSockaddr;
+            if (!sin || sin->sin_family != AF_INET)
+                continue;
+            if (sin->sin_addr.s_addr == htonl(INADDR_LOOPBACK))
+                continue;
+            if (inet_ntop(AF_INET, &sin->sin_addr, out, (socklen_t)out_len)) {
+                rc = RTC_OK;
+                break;
+            }
+        }
+    }
+    free(addrs);
+    return rc;
+#else
+    struct ifaddrs *ifap = NULL;
+    if (getifaddrs(&ifap) != 0)
+        return RTC_ERR_SOCKET;
+
+    int rc = RTC_ERR_GENERIC;
+    for (struct ifaddrs *ifa = ifap; ifa && rc != RTC_OK; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+            continue;
+        if ((ifa->ifa_flags & IFF_LOOPBACK) || !(ifa->ifa_flags & IFF_UP))
+            continue;
+        struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
+        if (inet_ntop(AF_INET, &sin->sin_addr, out, out_len))
+            rc = RTC_OK;
+    }
+    freeifaddrs(ifap);
+    return rc;
+#endif
 }
 
 static listener_route_t *route_create(rtc_listener_packet_fn fn, void *user) {
@@ -203,7 +272,13 @@ static int listener_fill_candidate(rtc_listener_t *listener, const rtc_listener_
         copy_string(listener->candidate.address, sizeof(listener->candidate.address),
                     cfg->listen_ip);
     } else {
-        copy_string(listener->candidate.address, sizeof(listener->candidate.address), ip);
+        char host_ip[64];
+        if (is_wildcard_ip(ip) &&
+            listener_find_host_ip(host_ip, sizeof(host_ip)) == RTC_OK) {
+            copy_string(listener->candidate.address, sizeof(listener->candidate.address), host_ip);
+        } else {
+            copy_string(listener->candidate.address, sizeof(listener->candidate.address), ip);
+        }
     }
     return RTC_OK;
 }

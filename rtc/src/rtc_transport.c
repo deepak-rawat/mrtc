@@ -638,3 +638,16 @@ int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len
         return rc;
     return rtc_listener_send_to(transport->listener, buf, *len, &transport->selected_remote);
 }
+
+int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *len,
+                            size_t buf_cap) {
+    if (!transport || !buf || !len)
+        return RTC_ERR_INVALID;
+    if (!transport->srtp_ready || !transport->selected_remote_valid)
+        return RTC_ERR_INVALID;
+
+    int rc = rtc_srtp_protect_rtcp(&transport->srtp_send, buf, len, buf_cap);
+    if (rc != RTC_OK)
+        return rc;
+    return rtc_listener_send_to(transport->listener, buf, *len, &transport->selected_remote);
+}

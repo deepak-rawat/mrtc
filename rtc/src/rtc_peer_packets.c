@@ -9,6 +9,9 @@
  * Feature-gated sections: TWCC arrival recording, BWE feedback, rate control.
  */
 #include "rtc_peer_internal.h"
+#ifdef MRTC_ENABLE_SFU_API
+#  include "rtc_transport_internal.h"
+#endif
 
 #include <string.h>
 
@@ -81,6 +84,23 @@ static void record_twcc_arrival(rtc_peer_connection_t *pc, const rtc_rtp_packet_
 }
 #endif
 
+void peer_handle_plain_rtp(rtc_peer_connection_t *pc, const rtc_rtp_packet_t *pkt) {
+    if (!pc || !pkt || pc->connection_state != RTC_CONNECTION_CONNECTED)
+        return;
+
+    struct rtc_rtp_receiver *r = demux_rtp_receiver(pc, pkt);
+    if (r) {
+        rtc_rtcp_stats_on_rtp_recv(&r->rtcp_stats, pkt->header.seq, pkt->header.timestamp,
+                                   pkt->header.ssrc, r->codec.clock_rate);
+        r->on_frame(pkt->payload, pkt->payload_len, pkt->header.seq, pkt->header.timestamp,
+                    pkt->header.ssrc, pkt->header.marker, r->on_frame_user);
+    }
+
+#ifdef MRTC_ENABLE_TWCC
+    record_twcc_arrival(pc, pkt);
+#endif
+}
+
 static void handle_rtp(rtc_peer_connection_t *pc, const uint8_t *data, size_t len) {
     if (pc->connection_state != RTC_CONNECTION_CONNECTED || len <= 12)
         return;
@@ -100,18 +120,7 @@ static void handle_rtp(rtc_peer_connection_t *pc, const uint8_t *data, size_t le
     rtc_rtp_packet_t pkt;
     if (rtc_rtp_parse(&pkt, buf, pkt_len) != RTC_OK)
         return;
-
-    struct rtc_rtp_receiver *r = demux_rtp_receiver(pc, &pkt);
-    if (r) {
-        rtc_rtcp_stats_on_rtp_recv(&r->rtcp_stats, pkt.header.seq, pkt.header.timestamp,
-                                   pkt.header.ssrc, r->codec.clock_rate);
-        r->on_frame(pkt.payload, pkt.payload_len, pkt.header.seq, pkt.header.timestamp,
-                    pkt.header.ssrc, pkt.header.marker, r->on_frame_user);
-    }
-
-#ifdef MRTC_ENABLE_TWCC
-    record_twcc_arrival(pc, &pkt);
-#endif
+    peer_handle_plain_rtp(pc, &pkt);
 }
 
 /* ---- RTCP receive path ---- */
@@ -229,21 +238,9 @@ static void handle_rtcp_psfb(rtc_peer_connection_t *pc, uint8_t fmt, const uint8
         rtc_rtp_sender_handle_pli(sender);
 }
 
-static void handle_rtcp(rtc_peer_connection_t *pc, const uint8_t *data, size_t len) {
-    if (pc->connection_state != RTC_CONNECTION_CONNECTED || len <= 8)
+void peer_handle_plain_rtcp(rtc_peer_connection_t *pc, const uint8_t *buf, size_t pkt_len) {
+    if (!pc || !buf || pc->connection_state != RTC_CONNECTION_CONNECTED || pkt_len <= 8)
         return;
-
-    uint8_t buf[PEER_RECV_BUF_SIZE];
-    if (len > sizeof(buf))
-        return;
-    memcpy(buf, data, len);
-
-    /* SRTCP unprotect */
-    size_t pkt_len = len;
-    if (rtc_srtp_unprotect_rtcp(&pc->srtp_recv, buf, &pkt_len) != RTC_OK) {
-        RTC_LOG_WARN("Peer: SRTCP unprotect failed");
-        return;
-    }
 
     uint8_t pt, fmt;
     if (!rtc_rtcp_get_pt_fmt(buf, pkt_len, &pt, &fmt))
@@ -270,6 +267,24 @@ static void handle_rtcp(rtc_peer_connection_t *pc, const uint8_t *data, size_t l
         default:
             break;
     }
+}
+
+static void handle_rtcp(rtc_peer_connection_t *pc, const uint8_t *data, size_t len) {
+    if (pc->connection_state != RTC_CONNECTION_CONNECTED || len <= 8)
+        return;
+
+    uint8_t buf[PEER_RECV_BUF_SIZE];
+    if (len > sizeof(buf))
+        return;
+    memcpy(buf, data, len);
+
+    /* SRTCP unprotect */
+    size_t pkt_len = len;
+    if (rtc_srtp_unprotect_rtcp(&pc->srtp_recv, buf, &pkt_len) != RTC_OK) {
+        RTC_LOG_WARN("Peer: SRTCP unprotect failed");
+        return;
+    }
+    peer_handle_plain_rtcp(pc, buf, pkt_len);
 }
 
 /* ---- Transport recv callback (fires on transport thread) ---- */
@@ -300,17 +315,36 @@ void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t len,
 
 void peer_rtcp_timer(void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+#ifdef MRTC_ENABLE_SFU_API
+    if (pc->runtime_transport && pc->runtime_connected)
+        pc->runtime_rtcp_timer = RTC_WORKER_TIMER_INVALID;
+#endif
     if (pc->connection_state != RTC_CONNECTION_CONNECTED)
         return;
 
     /* Build and send RTCP for each active transceiver */
     for (int i = 0; i < pc->transceiver_count; i++) {
         struct rtc_rtp_transceiver *t = &pc->transceivers[i];
+#ifdef MRTC_ENABLE_SFU_API
+        if (pc->runtime_transport && pc->runtime_connected) {
+            rtc_rtp_sender_emit_sr_logical(&t->sender, pc->runtime_transport);
+            rtc_rtp_receiver_emit_rr_logical(&t->receiver, pc->runtime_transport);
+            continue;
+        }
+#endif
         rtc_rtp_sender_emit_sr(&t->sender, &pc->srtp_send, &pc->transport);
         rtc_rtp_receiver_emit_rr(&t->receiver, &pc->srtp_send, &pc->transport);
     }
 
     /* Re-arm timer */
+#ifdef MRTC_ENABLE_SFU_API
+    if (pc->runtime_transport && pc->runtime_connected) {
+        pc->runtime_rtcp_timer = rtc_worker_add_timer(pc->runtime_worker,
+                                                      rtc_time_ms() + RTCP_INTERVAL_MS,
+                                                      peer_rtcp_timer, pc);
+        return;
+    }
+#endif
     pc->rtcp_timer_id = rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + RTCP_INTERVAL_MS,
                                                 peer_rtcp_timer, pc);
 }
@@ -321,7 +355,19 @@ void peer_rtcp_timer(void *user) {
 
 void peer_twcc_fb_timer(void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+#ifdef MRTC_ENABLE_SFU_API
+    if (pc->runtime_transport && pc->runtime_connected)
+        pc->runtime_twcc_fb_timer = RTC_WORKER_TIMER_INVALID;
+#endif
     if (pc->connection_state != RTC_CONNECTION_CONNECTED) {
+#ifdef MRTC_ENABLE_SFU_API
+        if (pc->runtime_transport && pc->runtime_connected) {
+            pc->runtime_twcc_fb_timer = rtc_worker_add_timer(pc->runtime_worker,
+                                                            rtc_time_ms() + TWCC_FB_INTERVAL_MS,
+                                                            peer_twcc_fb_timer, pc);
+            return;
+        }
+#endif
         pc->twcc_fb_timer_id = rtc_packet_io_add_timer(
             &pc->transport, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
         return;
@@ -337,13 +383,30 @@ void peer_twcc_fb_timer(void *user) {
             if (fb_len <= sizeof(buf)) {
                 memcpy(buf, fb, fb_len);
                 size_t out_len = fb_len;
-                if (rtc_srtp_protect_rtcp(&pc->srtp_send, buf, &out_len, sizeof(buf)) == RTC_OK)
-                    rtc_packet_io_send_to_remote(&pc->transport, buf, out_len);
+#ifdef MRTC_ENABLE_SFU_API
+                if (pc->runtime_transport && pc->runtime_connected) {
+                    (void)rtc_transport_send_rtcp(pc->runtime_transport, buf, &out_len,
+                                                  sizeof(buf));
+                } else
+#endif
+                {
+                    if (rtc_srtp_protect_rtcp(&pc->srtp_send, buf, &out_len, sizeof(buf)) ==
+                        RTC_OK)
+                        rtc_packet_io_send_to_remote(&pc->transport, buf, out_len);
+                }
             }
         }
         pc->twcc_have_packets = false;
     }
 
+#ifdef MRTC_ENABLE_SFU_API
+    if (pc->runtime_transport && pc->runtime_connected) {
+        pc->runtime_twcc_fb_timer = rtc_worker_add_timer(pc->runtime_worker,
+                                                        rtc_time_ms() + TWCC_FB_INTERVAL_MS,
+                                                        peer_twcc_fb_timer, pc);
+        return;
+    }
+#endif
     pc->twcc_fb_timer_id = rtc_packet_io_add_timer(
         &pc->transport, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
 }
