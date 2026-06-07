@@ -36,14 +36,10 @@ set(RTC_RUNTIME_SOURCES
     src/rtc_consumer.c
 )
 
-set(LIB_SOURCES ${RTC_CORE_SOURCES} ${RTC_PROTOCOL_SOURCES})
+set(LIB_SOURCES ${RTC_CORE_SOURCES} ${RTC_PROTOCOL_SOURCES} ${RTC_RUNTIME_SOURCES})
 
 if(MRTC_ENABLE_CLIENT_API)
     list(APPEND LIB_SOURCES ${RTC_CLIENT_SOURCES})
-endif()
-
-if(MRTC_ENABLE_RUNTIME_TRANSPORT)
-    list(APPEND LIB_SOURCES ${RTC_RUNTIME_SOURCES})
 endif()
 
 # Conditional sources
@@ -72,10 +68,6 @@ endif()
 if(MRTC_ENABLE_SFU_API)
     target_compile_definitions(mrtc PUBLIC MRTC_ENABLE_SFU_API)
 endif()
-if(MRTC_ENABLE_RUNTIME_TRANSPORT)
-    target_compile_definitions(mrtc PRIVATE MRTC_ENABLE_RUNTIME_TRANSPORT)
-endif()
-
 # Tests (need access to internal headers for component-level testing)
 if(MRTC_BUILD_TESTS)
     set(TEST_NAMES test_stun test_rtp test_srtp test_dtls test_ice test_sdp test_packet_io

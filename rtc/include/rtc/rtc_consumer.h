@@ -4,10 +4,6 @@
 #ifndef RTC_CONSUMER_H
 #define RTC_CONSUMER_H
 
-#if !defined(MRTC_ENABLE_SFU_API) && !defined(MRTC_ENABLE_RUNTIME_TRANSPORT)
-#  error "rtc_consumer.h requires MRTC_ENABLE_SFU_API or MRTC_ENABLE_RUNTIME_TRANSPORT"
-#endif
-
 #include "rtc_producer.h"
 #include "rtc_rtp_params.h"
 #include "rtc_transport.h"

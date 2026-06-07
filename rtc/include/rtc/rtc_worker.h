@@ -4,10 +4,6 @@
 #ifndef RTC_WORKER_H
 #define RTC_WORKER_H
 
-#if !defined(MRTC_ENABLE_SFU_API) && !defined(MRTC_ENABLE_RUNTIME_TRANSPORT)
-#  error "rtc_worker.h requires MRTC_ENABLE_SFU_API or MRTC_ENABLE_RUNTIME_TRANSPORT"
-#endif
-
 #include "rtc_common.h"
 
 typedef struct rtc_worker rtc_worker_t;

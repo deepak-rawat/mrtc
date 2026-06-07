@@ -4,10 +4,6 @@
 #ifndef RTC_RTP_PARAMS_H
 #define RTC_RTP_PARAMS_H
 
-#if !defined(MRTC_ENABLE_SFU_API) && !defined(MRTC_ENABLE_RUNTIME_TRANSPORT)
-#  error "rtc_rtp_params.h requires MRTC_ENABLE_SFU_API or MRTC_ENABLE_RUNTIME_TRANSPORT"
-#endif
-
 #include "rtc_common.h"
 
 typedef enum {

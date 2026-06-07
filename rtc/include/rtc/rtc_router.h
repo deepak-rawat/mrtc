@@ -4,10 +4,6 @@
 #ifndef RTC_ROUTER_H
 #define RTC_ROUTER_H
 
-#if !defined(MRTC_ENABLE_SFU_API) && !defined(MRTC_ENABLE_RUNTIME_TRANSPORT)
-#  error "rtc_router.h requires MRTC_ENABLE_SFU_API or MRTC_ENABLE_RUNTIME_TRANSPORT"
-#endif
-
 #include "rtc_common.h"
 #include "rtc_transport.h"
 #include "rtc_worker.h"

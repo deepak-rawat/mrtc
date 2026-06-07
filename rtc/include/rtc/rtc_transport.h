@@ -4,10 +4,6 @@
 #ifndef RTC_PUBLIC_TRANSPORT_H
 #define RTC_PUBLIC_TRANSPORT_H
 
-#if !defined(MRTC_ENABLE_SFU_API) && !defined(MRTC_ENABLE_RUNTIME_TRANSPORT)
-#  error "rtc_transport.h requires MRTC_ENABLE_SFU_API or MRTC_ENABLE_RUNTIME_TRANSPORT"
-#endif
-
 #include "rtc_common.h"
 
 #define RTC_ICE_UFRAG_MAX        8
