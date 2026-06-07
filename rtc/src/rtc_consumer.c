@@ -3,6 +3,10 @@
  */
 #include "rtc/rtc_consumer.h"
 
+#include "rtc_consumer_internal.h"
+#include "rtc_producer_internal.h"
+#include "rtc_transport_internal.h"
+
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +18,7 @@ struct rtc_consumer {
     rtc_producer_t *producer;
     rtc_rtp_parameters_t rtp;
     rtc_media_kind_t kind;
+    uint16_t seq;
     void *app_data;
     _Atomic bool closed;
     _Atomic bool paused;
@@ -44,8 +49,16 @@ rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
     consumer->transport = transport;
     consumer->producer = opts->producer;
     consumer->kind = producer_stats.kind;
+    rtc_random_bytes((uint8_t *)&consumer->rtp.ssrc, sizeof(consumer->rtp.ssrc));
+    if (consumer->rtp.ssrc == 0)
+        consumer->rtp.ssrc = 1;
+    rtc_random_bytes((uint8_t *)&consumer->seq, sizeof(consumer->seq));
     consumer->app_data = opts->app_data;
     atomic_store_explicit(&consumer->paused, opts->paused, memory_order_release);
+    if (rtc_producer_add_consumer(opts->producer, consumer) != RTC_OK) {
+        free(consumer);
+        return NULL;
+    }
     return consumer;
 }
 
@@ -75,7 +88,11 @@ void rtc_consumer_resume(rtc_consumer_t *consumer) {
 void rtc_consumer_close(rtc_consumer_t *consumer) {
     if (!consumer)
         return;
-    atomic_store_explicit(&consumer->closed, true, memory_order_release);
+    bool was_closed = atomic_exchange_explicit(&consumer->closed, true, memory_order_acq_rel);
+    if (was_closed)
+        return;
+    if (consumer->producer)
+        rtc_producer_remove_consumer(consumer->producer, consumer);
 }
 
 void rtc_consumer_destroy(rtc_consumer_t *consumer) {
@@ -95,4 +112,30 @@ int rtc_consumer_get_stats(rtc_consumer_t *consumer, rtc_consumer_stats_t *out) 
     out->packets_sent = atomic_load_explicit(&consumer->packets_sent, memory_order_relaxed);
     out->bytes_sent = atomic_load_explicit(&consumer->bytes_sent, memory_order_relaxed);
     return RTC_OK;
+}
+
+void rtc_consumer_on_producer_rtp(rtc_consumer_t *consumer, const rtc_rtp_packet_t *pkt) {
+    if (!consumer || !pkt)
+        return;
+    if (atomic_load_explicit(&consumer->closed, memory_order_acquire) ||
+        atomic_load_explicit(&consumer->paused, memory_order_acquire)) {
+        return;
+    }
+
+    rtc_rtp_packet_t out_pkt;
+    uint16_t seq = consumer->seq++;
+    int rc = rtc_rtp_build(&out_pkt, pkt->header.payload_type, seq, pkt->header.timestamp,
+                           consumer->rtp.ssrc, pkt->header.marker, pkt->payload,
+                           pkt->payload_len);
+    if (rc != RTC_OK)
+        return;
+
+    size_t wire_len = out_pkt.buf_len;
+    rc = rtc_transport_send_rtp(consumer->transport, out_pkt.buf, &wire_len, sizeof(out_pkt.buf));
+    if (rc != RTC_OK)
+        return;
+
+    atomic_fetch_add_explicit(&consumer->packets_sent, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&consumer->bytes_sent, (uint64_t)pkt->payload_len,
+                              memory_order_relaxed);
 }

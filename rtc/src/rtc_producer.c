@@ -2,7 +2,9 @@
  * rtc_producer.c - SFU inbound media producer skeleton.
  */
 #include "rtc/rtc_producer.h"
+#include "rtc/rtc_vec.h"
 
+#include "rtc_consumer_internal.h"
 #include "rtc_producer_internal.h"
 #include "rtc_transport_internal.h"
 
@@ -18,6 +20,9 @@ struct rtc_producer {
     rtc_rtp_parameters_t rtp;
     char label[64];
     void *app_data;
+    rtc_vec_t consumers;
+    rtc_mutex_t consumers_mutex;
+    bool consumers_ready;
     _Atomic bool closed;
     _Atomic uint64_t packets_received;
     _Atomic uint64_t bytes_received;
@@ -55,7 +60,16 @@ rtc_producer_t *rtc_transport_produce(rtc_transport_t *transport,
     producer->rtp = opts->rtp;
     copy_label(producer->label, sizeof(producer->label), opts->label);
     producer->app_data = opts->app_data;
+    if (rtc_vec_init(&producer->consumers, sizeof(rtc_consumer_t *)) != RTC_OK ||
+        rtc_mutex_init(&producer->consumers_mutex) != RTC_OK) {
+        rtc_vec_free(&producer->consumers);
+        free(producer);
+        return NULL;
+    }
+    producer->consumers_ready = true;
     if (rtc_transport_register_producer(transport, producer, producer->rtp.ssrc) != RTC_OK) {
+        rtc_mutex_destroy(&producer->consumers_mutex);
+        rtc_vec_free(&producer->consumers);
         free(producer);
         return NULL;
     }
@@ -80,6 +94,11 @@ void rtc_producer_destroy(rtc_producer_t *producer) {
     if (!producer)
         return;
     rtc_producer_close(producer);
+    if (producer->consumers_ready) {
+        rtc_mutex_destroy(&producer->consumers_mutex);
+        producer->consumers_ready = false;
+    }
+    rtc_vec_free(&producer->consumers);
     free(producer);
 }
 
@@ -98,10 +117,47 @@ uint32_t rtc_producer_ssrc(const rtc_producer_t *producer) {
     return producer ? producer->rtp.ssrc : 0;
 }
 
+int rtc_producer_add_consumer(rtc_producer_t *producer, rtc_consumer_t *consumer) {
+    if (!producer || !consumer)
+        return RTC_ERR_INVALID;
+    if (atomic_load_explicit(&producer->closed, memory_order_acquire))
+        return RTC_ERR_INVALID;
+
+    rtc_mutex_lock(&producer->consumers_mutex);
+    int rc = rtc_vec_push(&producer->consumers, &consumer);
+    rtc_mutex_unlock(&producer->consumers_mutex);
+    return rc;
+}
+
+void rtc_producer_remove_consumer(rtc_producer_t *producer, rtc_consumer_t *consumer) {
+    if (!producer || !consumer || !producer->consumers_ready)
+        return;
+
+    rtc_mutex_lock(&producer->consumers_mutex);
+    size_t count = rtc_vec_len(&producer->consumers);
+    for (size_t i = 0; i < count; i++) {
+        rtc_consumer_t **slot = (rtc_consumer_t **)rtc_vec_at(&producer->consumers, i);
+        if (slot && *slot == consumer) {
+            rtc_vec_swap_remove(&producer->consumers, i);
+            break;
+        }
+    }
+    rtc_mutex_unlock(&producer->consumers_mutex);
+}
+
 void rtc_producer_on_rtp(rtc_producer_t *producer, const rtc_rtp_packet_t *pkt) {
     if (!producer || !pkt || atomic_load_explicit(&producer->closed, memory_order_acquire))
         return;
     atomic_fetch_add_explicit(&producer->packets_received, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&producer->bytes_received, (uint64_t)pkt->payload_len,
                               memory_order_relaxed);
+
+    rtc_mutex_lock(&producer->consumers_mutex);
+    size_t count = rtc_vec_len(&producer->consumers);
+    for (size_t i = 0; i < count; i++) {
+        rtc_consumer_t **slot = (rtc_consumer_t **)rtc_vec_at(&producer->consumers, i);
+        if (slot && *slot)
+            rtc_consumer_on_producer_rtp(*slot, pkt);
+    }
+    rtc_mutex_unlock(&producer->consumers_mutex);
 }

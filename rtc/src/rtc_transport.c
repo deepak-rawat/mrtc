@@ -294,3 +294,15 @@ void rtc_transport_unregister_producer(rtc_transport_t *transport, uint32_t ssrc
     rtc_u32_map_remove(&transport->producers_by_ssrc, ssrc);
     rtc_mutex_unlock(&transport->producer_mutex);
 }
+
+int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap) {
+    if (!transport || !buf || !len)
+        return RTC_ERR_INVALID;
+    if (!transport->srtp_ready || !transport->selected_remote_valid)
+        return RTC_ERR_INVALID;
+
+    int rc = rtc_srtp_protect(&transport->srtp_send, buf, len, buf_cap);
+    if (rc != RTC_OK)
+        return rc;
+    return rtc_listener_send_to(transport->listener, buf, *len, &transport->selected_remote);
+}

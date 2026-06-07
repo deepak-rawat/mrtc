@@ -94,6 +94,20 @@ static bool recv_stun_response(rtc_socket_t sender, uint8_t *buf, size_t buf_len
     return false;
 }
 
+static bool recv_udp_packet(rtc_socket_t sender, uint8_t *buf, size_t buf_len, size_t *out_len,
+                            int timeout_ms) {
+    uint64_t deadline = rtc_time_ms() + (uint64_t)timeout_ms;
+    while (rtc_time_ms() < deadline) {
+        int n = recv(sender, (char *)buf, (int)buf_len, 0);
+        if (n > 0) {
+            *out_len = (size_t)n;
+            return true;
+        }
+        SLEEP_MS(10);
+    }
+    return false;
+}
+
 static bool select_transport_tuple(rtc_listener_t *listener, rtc_transport_t *transport,
                                    rtc_socket_t sender, const char *ufrag) {
     char username[64];
@@ -157,6 +171,17 @@ static bool wait_for_producer_packets(rtc_producer_t *producer, uint64_t target,
             stats.packets_received >= target) {
             return true;
         }
+        SLEEP_MS(10);
+    }
+    return false;
+}
+
+static bool wait_for_consumer_packets(rtc_consumer_t *consumer, uint64_t target, int timeout_ms) {
+    uint64_t deadline = rtc_time_ms() + (uint64_t)timeout_ms;
+    while (rtc_time_ms() < deadline) {
+        rtc_consumer_stats_t stats;
+        if (rtc_consumer_get_stats(consumer, &stats) == RTC_OK && stats.packets_sent >= target)
+            return true;
         SLEEP_MS(10);
     }
     return false;
@@ -369,6 +394,108 @@ TEST(transport_routes_srtp_to_producer) {
     rtc_worker_destroy(worker);
 }
 
+TEST(transport_forwards_producer_rtp_to_consumer) {
+    rtc_worker_t *worker = rtc_worker_create(NULL);
+    ASSERT(worker != NULL);
+    rtc_listener_t *listener = rtc_listener_create(worker, NULL);
+    ASSERT(listener != NULL);
+    rtc_router_t *router = rtc_router_create(worker, NULL);
+    ASSERT(router != NULL);
+
+    rtc_transport_t *pub_transport = rtc_router_create_transport(router, &(rtc_transport_config_t){
+                                                                           .listener = listener,
+                                                                           .ice_mode = RTC_ICE_MODE_LITE,
+                                                                       });
+    rtc_transport_t *sub_transport = rtc_router_create_transport(router, &(rtc_transport_config_t){
+                                                                           .listener = listener,
+                                                                           .ice_mode = RTC_ICE_MODE_LITE,
+                                                                       });
+    ASSERT(pub_transport != NULL);
+    ASSERT(sub_transport != NULL);
+
+    rtc_ice_parameters_t pub_ice, sub_ice;
+    ASSERT_EQ(rtc_transport_get_ice_parameters(pub_transport, &pub_ice), RTC_OK);
+    ASSERT_EQ(rtc_transport_get_ice_parameters(sub_transport, &sub_ice), RTC_OK);
+
+    rtc_socket_t pub_sock = make_bound_sender();
+    rtc_socket_t sub_sock = make_bound_sender();
+    ASSERT(pub_sock != RTC_INVALID_SOCKET);
+    ASSERT(sub_sock != RTC_INVALID_SOCKET);
+    ASSERT(select_transport_tuple(listener, pub_transport, pub_sock, pub_ice.username_fragment));
+    ASSERT(select_transport_tuple(listener, sub_transport, sub_sock, sub_ice.username_fragment));
+
+    rtc_dtls_transport_t pub_client, sub_client;
+    ASSERT(drive_dtls_handshake(listener, pub_transport, pub_sock, &pub_client));
+    ASSERT(drive_dtls_handshake(listener, sub_transport, sub_sock, &sub_client));
+    ASSERT_EQ(rtc_dtls_export_srtp_keys(&pub_client), RTC_OK);
+    ASSERT_EQ(rtc_dtls_export_srtp_keys(&sub_client), RTC_OK);
+
+    rtc_producer_t *producer = rtc_transport_produce(pub_transport, &(rtc_producer_options_t){
+                                                                       .kind = RTC_MEDIA_KIND_VIDEO,
+                                                                       .rtp = {
+                                                                           .ssrc = 0x12345678,
+                                                                           .codec_count = 1,
+                                                                           .codecs = {{
+                                                                               .kind = RTC_MEDIA_KIND_VIDEO,
+                                                                               .payload_type = 96,
+                                                                               .clock_rate = 90000,
+                                                                               .mime_type = "video/VP8",
+                                                                           }},
+                                                                       },
+                                                                       .label = "camera",
+                                                                   });
+    ASSERT(producer != NULL);
+    rtc_consumer_t *consumer = rtc_transport_consume(sub_transport, &(rtc_consumer_options_t){
+                                                                      .producer = producer,
+                                                                      .paused = false,
+                                                                  });
+    ASSERT(consumer != NULL);
+
+    rtc_srtp_ctx_t pub_send;
+    rtc_srtp_ctx_t sub_recv;
+    ASSERT_EQ(rtc_srtp_init(&pub_send, pub_client.srtp_client_key, RTC_SRTP_MASTER_KEY_LEN,
+                            pub_client.srtp_client_salt, RTC_SRTP_MASTER_SALT_LEN), RTC_OK);
+    ASSERT_EQ(rtc_srtp_init(&sub_recv, sub_client.srtp_server_key, RTC_SRTP_MASTER_KEY_LEN,
+                            sub_client.srtp_server_salt, RTC_SRTP_MASTER_SALT_LEN), RTC_OK);
+
+    const uint8_t payload[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    rtc_rtp_packet_t pkt;
+    ASSERT_EQ(rtc_rtp_build(&pkt, 96, 77, 9000, 0x12345678, true, payload, sizeof(payload)),
+              RTC_OK);
+    uint8_t wire[1500];
+    memcpy(wire, pkt.buf, pkt.buf_len);
+    size_t wire_len = pkt.buf_len;
+    ASSERT_EQ(rtc_srtp_protect(&pub_send, wire, &wire_len, sizeof(wire)), RTC_OK);
+    ASSERT_EQ(send_udp_from(listener, wire, wire_len, pub_sock), RTC_OK);
+
+    ASSERT(wait_for_producer_packets(producer, 1, 1000));
+    ASSERT(wait_for_consumer_packets(consumer, 1, 1000));
+
+    uint8_t recv_buf[1500];
+    size_t recv_len = 0;
+    ASSERT(recv_udp_packet(sub_sock, recv_buf, sizeof(recv_buf), &recv_len, 1000));
+    ASSERT_EQ(rtc_srtp_unprotect(&sub_recv, recv_buf, &recv_len), RTC_OK);
+    rtc_rtp_packet_t recv_pkt;
+    ASSERT_EQ(rtc_rtp_parse(&recv_pkt, recv_buf, recv_len), RTC_OK);
+    ASSERT_EQ(recv_pkt.header.payload_type, 96);
+    ASSERT(recv_pkt.header.ssrc != 0x12345678);
+    ASSERT_MEM_EQ(recv_pkt.payload, payload, sizeof(payload));
+
+    rtc_srtp_close(&pub_send);
+    rtc_srtp_close(&sub_recv);
+    rtc_consumer_destroy(consumer);
+    rtc_producer_destroy(producer);
+    rtc_dtls_close(&pub_client);
+    rtc_dtls_close(&sub_client);
+    rtc_close_socket(pub_sock);
+    rtc_close_socket(sub_sock);
+    rtc_transport_destroy(pub_transport);
+    rtc_transport_destroy(sub_transport);
+    rtc_router_destroy(router);
+    rtc_listener_destroy(listener);
+    rtc_worker_destroy(worker);
+}
+
 TEST(router_rejects_closed_create) {
     rtc_worker_t *worker = rtc_worker_create(NULL);
     ASSERT(worker != NULL);
@@ -392,6 +519,7 @@ int main(void) {
     RUN_TEST(transport_receives_stun_by_ufrag);
     RUN_TEST(transport_dtls_handshake_exports_srtp);
     RUN_TEST(transport_routes_srtp_to_producer);
+    RUN_TEST(transport_forwards_producer_rtp_to_consumer);
     RUN_TEST(router_rejects_closed_create);
     rtc_cleanup();
     TEST_SUMMARY();
