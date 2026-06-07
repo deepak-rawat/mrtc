@@ -240,8 +240,8 @@ int rtc_sdp_parse_candidate_line(const char *line, rtc_ice_candidate_t *out) {
     int component = 0;
     unsigned int priority = 0, port = 0;
 
-    int parsed = sscanf(p, "%7s %d %7s %u %63s %u typ %7s", foundation, &component,
-                        transport, &priority, ip, &port, type_str);
+    int parsed = sscanf(p, "%7s %d %7s %u %63s %u typ %7s", foundation, &component, transport,
+                        &priority, ip, &port, type_str);
     if (parsed < 7)
         return RTC_ERR_SDP;
     if (strcmp(transport, "udp") != 0 && strcmp(transport, "UDP") != 0)

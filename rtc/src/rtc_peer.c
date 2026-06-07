@@ -675,7 +675,7 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
 #ifdef MRTC_ENABLE_SFU_API
         peer_runtime_close(pc);
 #else
-    rtc_packet_io_close(&pc->transport);
+        rtc_packet_io_close(&pc->transport);
 #endif
         free(pc->app_buf);
         free(pc);

@@ -16,8 +16,7 @@
 #include <openssl/evp.h>
 
 /* Generate a self-signed ECDSA certificate + key */
-static int dtls_generate_cert(X509 **cert_out, EVP_PKEY **pkey_out, char *fp_out,
-                              size_t fp_size) {
+static int dtls_generate_cert(X509 **cert_out, EVP_PKEY **pkey_out, char *fp_out, size_t fp_size) {
     EVP_PKEY *pkey = NULL;
     X509 *x509 = NULL;
     int ret = RTC_ERR_SSL;
@@ -48,8 +47,7 @@ static int dtls_generate_cert(X509 **cert_out, EVP_PKEY **pkey_out, char *fp_out
     X509_set_pubkey(x509, pkey);
 
     X509_NAME *name = X509_get_subject_name(x509);
-    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (const unsigned char *)"mrtc", -1, -1,
-                               0);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (const unsigned char *)"mrtc", -1, -1, 0);
     X509_set_issuer_name(x509, name);
     X509_sign(x509, pkey, EVP_sha256());
 
