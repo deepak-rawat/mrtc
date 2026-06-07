@@ -13,10 +13,9 @@
 
 #include "rtc_common.h"
 #include "rtc_poller.h"
+#include "rtc_timer_sched.h"
 
 #include <stdatomic.h>
-
-#define RTC_PACKET_IO_MAX_TIMERS 16
 
 /* Recv buffer sized for jumbo frames so DTLS records / RTP packets near
  * the jumbo MTU are not silently truncated. */
@@ -66,21 +65,8 @@ typedef struct {
 /* Timer callback */
 typedef void (*rtc_timer_fn)(void *user);
 
-/* Timer slot */
-typedef struct {
-    uint64_t deadline_ms; /* absolute time (rtc_time_ms) */
-    rtc_timer_fn fn;
-    void *user;
-    bool active;
-} rtc_timer_t;
-
-/* TODO: replace the fixed-size timer array with a min-heap if
- * RTC_PACKET_IO_MAX_TIMERS ever grows past ~32. Each poll-wakeup walks
- * the array twice (next-deadline + fire-expired) so O(N) is fine at 16
- * slots but becomes the loop at hundreds. */
-
-/* Timer handle (index + generation for ABA safety) */
-typedef int rtc_timer_id_t;
+/* Timer handle (generation-checked scheduler handle). */
+typedef rtc_timer_handle_t rtc_timer_id_t;
 
 typedef struct rtc_packet_io {
     /* Socket. Atomic so concurrent senders that race with close see
@@ -101,11 +87,8 @@ typedef struct rtc_packet_io {
     rtc_packet_io_recv_fn on_recv;
     void *recv_user;
 
-    /* Timer slots, their mutex, and the high-water mark of how many were
-     * ever in use simultaneously. HWM is logged on close to surface
-     * near-exhaustion before it bites (add_timer returning -1 silently
-     * breaks features). */
-    rtc_timer_t timers[RTC_PACKET_IO_MAX_TIMERS];
+    /* Dynamic timer scheduler and high-water mark of pending timers. */
+    rtc_timer_sched_t timers;
     rtc_mutex_t timer_mutex;
     int timer_slot_hwm;
 
@@ -188,7 +171,7 @@ void rtc_packet_io_set_remote(rtc_packet_io_t *t, const rtc_addr_t *addr);
 
 /*
  * Schedule a timer callback at absolute deadline (rtc_time_ms).
- * Returns timer ID >= 0, or < 0 on error.
+ * Returns a timer ID, or RTC_TIMER_HANDLE_INVALID on error.
  * Thread-safe.
  */
 rtc_timer_id_t rtc_packet_io_add_timer(rtc_packet_io_t *t, uint64_t deadline_ms, rtc_timer_fn fn,

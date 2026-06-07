@@ -112,89 +112,21 @@ static rtc_pkt_type_t transport_classify(const uint8_t *data, size_t len) {
 /* ------------------------------------------------------------------ */
 /*  Timer subsystem                                                    */
 /* ------------------------------------------------------------------ */
-/* Self-contained: operates on a caller-provided rtc_timer_t[] array,
- * mutex, and optional HWM counter. Transport composes one but the code
- * has no other transport coupling. */
+/* Packet I/O still owns timers for the legacy peer path, but storage is
+ * dynamic via rtc_timer_sched_t so old peer timers no longer have a fixed
+ * 16-slot ceiling. */
 
-/* Compute next poller timeout (ms) from the nearest active deadline.
- * Caller must hold the mutex. Returns a default poll interval when no
- * timers are scheduled. */
-static int timer_next_timeout_ms(const rtc_timer_t *timers, int max) {
-    uint64_t earliest = UINT64_MAX;
-    for (int i = 0; i < max; i++) {
-        if (timers[i].active && timers[i].deadline_ms < earliest)
-            earliest = timers[i].deadline_ms;
+static void timer_fire_expired(rtc_packet_io_t *t) {
+    rtc_timer_sched_fn fn = NULL;
+    void *user = NULL;
+    for (;;) {
+        rtc_mutex_lock(&t->timer_mutex);
+        bool has_timer = rtc_timer_sched_pop_due(&t->timers, rtc_time_ms(), &fn, &user);
+        rtc_mutex_unlock(&t->timer_mutex);
+        if (!has_timer)
+            return;
+        fn(user);
     }
-    if (earliest == UINT64_MAX)
-        return 100; /* default poll interval when no timers */
-
-    uint64_t now = rtc_time_ms();
-    if (now >= earliest)
-        return 0;
-
-    uint64_t diff = earliest - now;
-    return (diff > (uint64_t)INT32_MAX) ? INT32_MAX : (int)diff;
-}
-
-/* Fire any expired timers. Collects under the lock, then invokes callbacks
- * outside it so user code cannot deadlock against the timer subsystem. */
-static void timer_fire_expired(rtc_timer_t *timers, int max, rtc_mutex_t *mutex) {
-    uint64_t now = rtc_time_ms();
-
-    rtc_timer_fn fns[RTC_PACKET_IO_MAX_TIMERS];
-    void *users[RTC_PACKET_IO_MAX_TIMERS];
-    int count = 0;
-
-    rtc_mutex_lock(mutex);
-    for (int i = 0; i < max; i++) {
-        if (timers[i].active && now >= timers[i].deadline_ms) {
-            fns[count] = timers[i].fn;
-            users[count] = timers[i].user;
-            count++;
-            timers[i].active = false;
-        }
-    }
-    rtc_mutex_unlock(mutex);
-
-    for (int i = 0; i < count; i++)
-        fns[i](users[i]);
-}
-
-/* Allocate a timer slot. Returns slot index >= 0 or -1 if all are in use.
- * Updates *hwm with the new high-water mark of slots in use. */
-static rtc_timer_id_t timer_add(rtc_timer_t *timers, int max, rtc_mutex_t *mutex, int *hwm,
-                                uint64_t deadline_ms, rtc_timer_fn fn, void *user) {
-    rtc_mutex_lock(mutex);
-    int free_slot = -1;
-    int in_use = 0;
-    for (int i = 0; i < max; i++) {
-        if (timers[i].active) {
-            in_use++;
-        } else if (free_slot < 0) {
-            free_slot = i;
-        }
-    }
-    if (free_slot < 0) {
-        rtc_mutex_unlock(mutex);
-        return -1;
-    }
-    timers[free_slot].deadline_ms = deadline_ms;
-    timers[free_slot].fn = fn;
-    timers[free_slot].user = user;
-    timers[free_slot].active = true;
-    in_use++;
-    if (hwm && in_use > *hwm)
-        *hwm = in_use;
-    rtc_mutex_unlock(mutex);
-    return free_slot;
-}
-
-static void timer_cancel(rtc_timer_t *timers, int max, rtc_mutex_t *mutex, rtc_timer_id_t id) {
-    if (id < 0 || id >= max)
-        return;
-    rtc_mutex_lock(mutex);
-    timers[id].active = false;
-    rtc_mutex_unlock(mutex);
 }
 
 /* ------------------------------------------------------------------ */
@@ -330,7 +262,7 @@ static void *transport_thread_fn(void *arg) {
 
     while (t->running) {
         rtc_mutex_lock(&t->timer_mutex);
-        int timeout = timer_next_timeout_ms(t->timers, RTC_PACKET_IO_MAX_TIMERS);
+        int timeout = rtc_timer_sched_next_timeout_ms(&t->timers, rtc_time_ms(), 100);
         rtc_mutex_unlock(&t->timer_mutex);
 
         int n = rtc_poller_wait(&t->poller, evs, RTC_POLLER_MAX_EVENTS, timeout);
@@ -468,7 +400,7 @@ static void *transport_thread_fn(void *arg) {
                 atomic_fetch_add_explicit(&t->recv_drain_full, 1, memory_order_relaxed);
         }
 
-        timer_fire_expired(t->timers, RTC_PACKET_IO_MAX_TIMERS, &t->timer_mutex);
+        timer_fire_expired(t);
     }
 
     return NULL;
@@ -659,12 +591,20 @@ int rtc_packet_io_init_ex(rtc_packet_io_t *t, const rtc_packet_io_config_t *cfg,
 
     /* Init synchronization */
     rtc_mutex_init(&t->timer_mutex);
+    rc = rtc_timer_sched_init(&t->timers);
+    if (rc != RTC_OK) {
+        rtc_mutex_destroy(&t->timer_mutex);
+        rtc_poller_close(&t->poller);
+        rtc_close_socket(s);
+        return rc;
+    }
 
 #if RTC_PACKET_IO_HAS_RECVMMSG
     /* Heap arena for the recvmmsg batch: too big for the thread stack
      * (16 * 9216 ≈ 144KB). One allocation for the transport's lifetime. */
     t->recv_batch_arena = calloc(RTC_PACKET_IO_RECV_BATCH, sizeof(mmsg_slot_t));
     if (!t->recv_batch_arena) {
+        rtc_timer_sched_close(&t->timers);
         rtc_mutex_destroy(&t->timer_mutex);
         rtc_poller_close(&t->poller);
         rtc_close_socket(s);
@@ -686,6 +626,7 @@ int rtc_packet_io_init_ex(rtc_packet_io_t *t, const rtc_packet_io_config_t *cfg,
         atomic_store_explicit(&t->sock, RTC_INVALID_SOCKET, memory_order_relaxed);
         rtc_poller_close(&t->poller);
         rtc_close_socket(s);
+        rtc_timer_sched_close(&t->timers);
         rtc_mutex_destroy(&t->timer_mutex);
 #if RTC_PACKET_IO_HAS_RECVMMSG
         free(t->recv_batch_arena);
@@ -825,12 +766,16 @@ void rtc_packet_io_set_remote(rtc_packet_io_t *t, const rtc_addr_t *addr) {
 
 rtc_timer_id_t rtc_packet_io_add_timer(rtc_packet_io_t *t, uint64_t deadline_ms, rtc_timer_fn fn,
                                        void *user) {
-    rtc_timer_id_t id = timer_add(t->timers, RTC_PACKET_IO_MAX_TIMERS, &t->timer_mutex,
-                                  &t->timer_slot_hwm, deadline_ms, fn, user);
-    if (id < 0) {
-        RTC_LOG_WARN("Transport: no free timer slots (max=%d) — caller will"
-                     " silently lose this scheduling; raise RTC_PACKET_IO_MAX_TIMERS",
-                     RTC_PACKET_IO_MAX_TIMERS);
+    if (!t || !fn)
+        return RTC_TIMER_HANDLE_INVALID;
+    rtc_mutex_lock(&t->timer_mutex);
+    rtc_timer_id_t id = rtc_timer_sched_add(&t->timers, deadline_ms, fn, user);
+    int pending = rtc_timer_sched_pending_count(&t->timers);
+    if (pending > t->timer_slot_hwm)
+        t->timer_slot_hwm = pending;
+    rtc_mutex_unlock(&t->timer_mutex);
+    if (id == RTC_TIMER_HANDLE_INVALID) {
+        RTC_LOG_WARN("Transport: failed to schedule timer");
         return id;
     }
     /* Break the poll loop so the new (possibly sooner) deadline is
@@ -841,7 +786,11 @@ rtc_timer_id_t rtc_packet_io_add_timer(rtc_packet_io_t *t, uint64_t deadline_ms,
 }
 
 void rtc_packet_io_cancel_timer(rtc_packet_io_t *t, rtc_timer_id_t id) {
-    timer_cancel(t->timers, RTC_PACKET_IO_MAX_TIMERS, &t->timer_mutex, id);
+    if (!t || id == RTC_TIMER_HANDLE_INVALID)
+        return;
+    rtc_mutex_lock(&t->timer_mutex);
+    rtc_timer_sched_cancel(&t->timers, id);
+    rtc_mutex_unlock(&t->timer_mutex);
 }
 
 rtc_socket_t rtc_packet_io_get_socket(const rtc_packet_io_t *t) {
@@ -886,6 +835,7 @@ void rtc_packet_io_close(rtc_packet_io_t *t) {
     if (s != RTC_INVALID_SOCKET)
         rtc_close_socket(s);
 
+    rtc_timer_sched_close(&t->timers);
     rtc_mutex_destroy(&t->timer_mutex);
 
 #if RTC_PACKET_IO_HAS_RECVMMSG
@@ -893,6 +843,5 @@ void rtc_packet_io_close(rtc_packet_io_t *t) {
     t->recv_batch_arena = NULL;
 #endif
 
-    RTC_LOG_INFO("Transport: closed (timer slot hwm=%d/%d)", t->timer_slot_hwm,
-                 RTC_PACKET_IO_MAX_TIMERS);
+    RTC_LOG_INFO("Transport: closed (timer pending hwm=%d)", t->timer_slot_hwm);
 }

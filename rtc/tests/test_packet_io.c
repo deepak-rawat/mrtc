@@ -219,7 +219,7 @@ TEST(transport_timer_fires) {
     g_timer_count = 0;
     uint64_t now = rtc_time_ms();
     rtc_timer_id_t id = rtc_packet_io_add_timer(&t, now + 100, test_timer_callback, NULL);
-    ASSERT(id >= 0);
+    ASSERT(id != RTC_TIMER_HANDLE_INVALID);
 
     /* Wait for timer (should fire within ~200ms) */
     bool fired = wait_for_timer(1, 500);
@@ -241,7 +241,7 @@ TEST(transport_timer_cancel) {
     g_timer_count = 0;
     uint64_t now = rtc_time_ms();
     rtc_timer_id_t id = rtc_packet_io_add_timer(&t, now + 100, test_timer_callback, NULL);
-    ASSERT(id >= 0);
+    ASSERT(id != RTC_TIMER_HANDLE_INVALID);
 
     /* Cancel immediately */
     rtc_packet_io_cancel_timer(&t, id);
