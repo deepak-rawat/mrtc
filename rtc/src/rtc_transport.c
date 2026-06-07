@@ -39,6 +39,12 @@ struct rtc_transport {
     bool producer_mutex_ready;
     rtc_transport_rtp_fn on_rtp;
     void *on_rtp_user;
+    rtc_transport_rtcp_fn on_rtcp;
+    void *on_rtcp_user;
+    rtc_transport_data_fn on_data;
+    void *on_data_user;
+    uint8_t *app_buf;
+    size_t app_buf_cap;
     rtc_addr_t selected_remote;
     bool selected_remote_valid;
     rtc_addr_t remote_candidate;
@@ -249,6 +255,28 @@ static void transport_handle_rtp(rtc_transport_t *transport, const uint8_t *data
         transport->on_rtp(&pkt, transport->on_rtp_user);
 }
 
+static void transport_handle_rtcp(rtc_transport_t *transport, const uint8_t *data, size_t len) {
+    if (!transport->srtp_ready || !transport->on_rtcp || len > SRTP_MAX_PACKET)
+        return;
+    uint8_t buf[SRTP_MAX_PACKET];
+    memcpy(buf, data, len);
+    size_t pkt_len = len;
+    if (rtc_srtp_unprotect_rtcp(&transport->srtp_recv, buf, &pkt_len) != RTC_OK)
+        return;
+    transport->on_rtcp(buf, pkt_len, transport->on_rtcp_user);
+}
+
+static void transport_read_app_data(rtc_transport_t *transport) {
+    if (!transport->on_data || transport->dtls.state != RTC_DTLS_STATE_CONNECTED ||
+        !transport->app_buf)
+        return;
+    int app_len;
+    while ((app_len = SSL_read(transport->dtls.ssl, transport->app_buf,
+                               (int)transport->app_buf_cap)) > 0) {
+        transport->on_data(transport->app_buf, (size_t)app_len, transport->on_data_user);
+    }
+}
+
 static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                                 const rtc_addr_t *from, void *user) {
     rtc_transport_t *transport = (rtc_transport_t *)user;
@@ -302,9 +330,12 @@ maybe_dtls:
         if (rtc_dtls_recv(&transport->dtls, data, len) == RTC_OK) {
             transport_arm_dtls_timer(transport, 1000);
             transport_try_export_srtp(transport);
+            transport_read_app_data(transport);
         }
     } else if (type == RTC_PKT_RTP) {
         transport_handle_rtp(transport, data, len);
+    } else if (type == RTC_PKT_RTCP) {
+        transport_handle_rtcp(transport, data, len);
     }
 }
 
@@ -342,9 +373,17 @@ rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
         return NULL;
     }
 
+    transport->app_buf_cap = 65536;
+    transport->app_buf = (uint8_t *)malloc(transport->app_buf_cap);
+    if (!transport->app_buf) {
+        free(transport);
+        return NULL;
+    }
+
     if (rtc_u32_map_init(&transport->producers_by_ssrc) != RTC_OK ||
         rtc_mutex_init(&transport->producer_mutex) != RTC_OK) {
         rtc_u32_map_free(&transport->producers_by_ssrc);
+        free(transport->app_buf);
         free(transport);
         return NULL;
     }
@@ -355,6 +394,7 @@ rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
     if (rtc_dtls_init(&transport->dtls, dtls_role, transport_dtls_send, transport) != RTC_OK) {
         rtc_mutex_destroy(&transport->producer_mutex);
         rtc_u32_map_free(&transport->producers_by_ssrc);
+        free(transport->app_buf);
         free(transport);
         return NULL;
     }
@@ -365,6 +405,7 @@ rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
         rtc_dtls_close(&transport->dtls);
         rtc_mutex_destroy(&transport->producer_mutex);
         rtc_u32_map_free(&transport->producers_by_ssrc);
+        free(transport->app_buf);
         free(transport);
         return NULL;
     }
@@ -511,6 +552,7 @@ void rtc_transport_destroy(rtc_transport_t *transport) {
         transport->producer_mutex_ready = false;
     }
     rtc_u32_map_free(&transport->producers_by_ssrc);
+    free(transport->app_buf);
     free(transport);
 }
 
@@ -534,6 +576,37 @@ void rtc_transport_on_rtp(rtc_transport_t *transport, rtc_transport_rtp_fn fn, v
         return;
     transport->on_rtp = fn;
     transport->on_rtp_user = user;
+}
+
+void rtc_transport_on_rtcp(rtc_transport_t *transport, rtc_transport_rtcp_fn fn, void *user) {
+    if (!transport)
+        return;
+    transport->on_rtcp = fn;
+    transport->on_rtcp_user = user;
+}
+
+void rtc_transport_on_data(rtc_transport_t *transport, rtc_transport_data_fn fn, void *user) {
+    if (!transport)
+        return;
+    transport->on_data = fn;
+    transport->on_data_user = user;
+}
+
+int rtc_transport_send_data(rtc_transport_t *transport, const uint8_t *data, size_t len) {
+    if (!transport || !data || transport->dtls.state != RTC_DTLS_STATE_CONNECTED)
+        return RTC_ERR_INVALID;
+    int written = SSL_write(transport->dtls.ssl, data, (int)len);
+    if (written <= 0)
+        return RTC_ERR_SSL;
+
+    uint8_t buf[2048];
+    int pending;
+    while ((pending = BIO_read(transport->dtls.wbio, buf, sizeof(buf))) > 0) {
+        int rc = transport_dtls_send(buf, (size_t)pending, transport);
+        if (rc != RTC_OK)
+            return rc;
+    }
+    return RTC_OK;
 }
 
 int rtc_transport_register_producer(rtc_transport_t *transport, rtc_producer_t *producer,
