@@ -74,6 +74,11 @@ static rtc_transport_dtls_state_t transport_dtls_state(rtc_dtls_state_t state) {
     }
 }
 
+static rtc_transport_dtls_role_t transport_public_dtls_role(rtc_dtls_role_t role) {
+    return role == RTC_DTLS_ROLE_CLIENT ? RTC_TRANSPORT_DTLS_ROLE_CLIENT
+                                        : RTC_TRANSPORT_DTLS_ROLE_SERVER;
+}
+
 static int transport_dtls_send(const uint8_t *data, size_t len, void *user) {
     rtc_transport_t *transport = (rtc_transport_t *)user;
     if (!transport->selected_remote_valid)
@@ -188,15 +193,26 @@ static void transport_try_export_srtp(rtc_transport_t *transport) {
         return;
     }
 
-    int rc = rtc_srtp_init(&transport->srtp_send, transport->dtls.srtp_server_key,
-                           RTC_SRTP_MASTER_KEY_LEN, transport->dtls.srtp_server_salt,
+    const uint8_t *send_key = transport->dtls.role == RTC_DTLS_ROLE_CLIENT
+                                  ? transport->dtls.srtp_client_key
+                                  : transport->dtls.srtp_server_key;
+    const uint8_t *send_salt = transport->dtls.role == RTC_DTLS_ROLE_CLIENT
+                                   ? transport->dtls.srtp_client_salt
+                                   : transport->dtls.srtp_server_salt;
+    const uint8_t *recv_key = transport->dtls.role == RTC_DTLS_ROLE_CLIENT
+                                  ? transport->dtls.srtp_server_key
+                                  : transport->dtls.srtp_client_key;
+    const uint8_t *recv_salt = transport->dtls.role == RTC_DTLS_ROLE_CLIENT
+                                   ? transport->dtls.srtp_server_salt
+                                   : transport->dtls.srtp_client_salt;
+
+    int rc = rtc_srtp_init(&transport->srtp_send, send_key, RTC_SRTP_MASTER_KEY_LEN, send_salt,
                            RTC_SRTP_MASTER_SALT_LEN);
     if (rc != RTC_OK) {
         transport->dtls.state = RTC_DTLS_STATE_FAILED;
         return;
     }
-    rc = rtc_srtp_init(&transport->srtp_recv, transport->dtls.srtp_client_key,
-                       RTC_SRTP_MASTER_KEY_LEN, transport->dtls.srtp_client_salt,
+    rc = rtc_srtp_init(&transport->srtp_recv, recv_key, RTC_SRTP_MASTER_KEY_LEN, recv_salt,
                        RTC_SRTP_MASTER_SALT_LEN);
     if (rc != RTC_OK) {
         rtc_srtp_close(&transport->srtp_send);
@@ -330,8 +346,9 @@ rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
     }
     transport->producer_mutex_ready = true;
 
-    if (rtc_dtls_init(&transport->dtls, RTC_DTLS_ROLE_SERVER, transport_dtls_send, transport) !=
-        RTC_OK) {
+    rtc_dtls_role_t dtls_role =
+        transport->ice_mode == RTC_ICE_MODE_FULL ? RTC_DTLS_ROLE_CLIENT : RTC_DTLS_ROLE_SERVER;
+    if (rtc_dtls_init(&transport->dtls, dtls_role, transport_dtls_send, transport) != RTC_OK) {
         rtc_mutex_destroy(&transport->producer_mutex);
         rtc_u32_map_free(&transport->producers_by_ssrc);
         free(transport);
@@ -395,11 +412,27 @@ int rtc_transport_start_ice(rtc_transport_t *transport) {
     return RTC_OK;
 }
 
+int rtc_transport_start_dtls(rtc_transport_t *transport) {
+    if (!transport)
+        return RTC_ERR_INVALID;
+    if (!transport->selected_remote_valid)
+        return RTC_ERR_INVALID;
+    if (transport->dtls.state == RTC_DTLS_STATE_CONNECTED)
+        return RTC_OK;
+
+    int rc = rtc_dtls_handshake(&transport->dtls);
+    if (rc == RTC_OK) {
+        transport_arm_dtls_timer(transport, 1000);
+        transport_try_export_srtp(transport);
+    }
+    return rc;
+}
+
 int rtc_transport_get_dtls_parameters(rtc_transport_t *transport, rtc_dtls_parameters_t *out) {
     if (!transport || !out)
         return RTC_ERR_INVALID;
     memset(out, 0, sizeof(*out));
-    out->role = RTC_TRANSPORT_DTLS_ROLE_SERVER;
+    out->role = transport_public_dtls_role(transport->dtls.role);
     memcpy(out->fingerprint, rtc_dtls_get_fingerprint(&transport->dtls), sizeof(out->fingerprint));
     return RTC_OK;
 }
