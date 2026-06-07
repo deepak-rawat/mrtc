@@ -4,7 +4,9 @@
 #include "rtc_transport_internal.h"
 
 #include "rtc_listener_internal.h"
+#include "rtc_dtls.h"
 #include "rtc_sdp.h"
+#include "rtc_srtp.h"
 #include "rtc_stun.h"
 
 #include <stdatomic.h>
@@ -20,12 +22,67 @@ struct rtc_transport {
     bool enable_sctp;
     bool enable_twcc;
     uint32_t initial_outgoing_bitrate_bps;
+    rtc_dtls_transport_t dtls;
+    rtc_srtp_ctx_t srtp_send;
+    rtc_srtp_ctx_t srtp_recv;
     rtc_addr_t selected_remote;
     bool selected_remote_valid;
+    bool srtp_ready;
     _Atomic bool closed;
     _Atomic uint64_t packets_received;
     _Atomic uint64_t bytes_received;
+    _Atomic uint64_t dtls_packets_received;
 };
+
+static rtc_transport_dtls_state_t transport_dtls_state(rtc_dtls_state_t state) {
+    switch (state) {
+        case RTC_DTLS_STATE_NEW:
+            return RTC_TRANSPORT_DTLS_NEW;
+        case RTC_DTLS_STATE_CONNECTING:
+            return RTC_TRANSPORT_DTLS_CONNECTING;
+        case RTC_DTLS_STATE_CONNECTED:
+            return RTC_TRANSPORT_DTLS_CONNECTED;
+        case RTC_DTLS_STATE_FAILED:
+            return RTC_TRANSPORT_DTLS_FAILED;
+        case RTC_DTLS_STATE_CLOSED:
+            return RTC_TRANSPORT_DTLS_CLOSED;
+        default:
+            return RTC_TRANSPORT_DTLS_FAILED;
+    }
+}
+
+static int transport_dtls_send(const uint8_t *data, size_t len, void *user) {
+    rtc_transport_t *transport = (rtc_transport_t *)user;
+    if (!transport->selected_remote_valid)
+        return RTC_ERR_INVALID;
+    return rtc_listener_send_to(transport->listener, data, len, &transport->selected_remote);
+}
+
+static void transport_try_export_srtp(rtc_transport_t *transport) {
+    if (transport->srtp_ready || transport->dtls.state != RTC_DTLS_STATE_CONNECTED)
+        return;
+    if (rtc_dtls_export_srtp_keys(&transport->dtls) != RTC_OK) {
+        transport->dtls.state = RTC_DTLS_STATE_FAILED;
+        return;
+    }
+
+    int rc = rtc_srtp_init(&transport->srtp_send, transport->dtls.srtp_server_key,
+                           RTC_SRTP_MASTER_KEY_LEN, transport->dtls.srtp_server_salt,
+                           RTC_SRTP_MASTER_SALT_LEN);
+    if (rc != RTC_OK) {
+        transport->dtls.state = RTC_DTLS_STATE_FAILED;
+        return;
+    }
+    rc = rtc_srtp_init(&transport->srtp_recv, transport->dtls.srtp_client_key,
+                       RTC_SRTP_MASTER_KEY_LEN, transport->dtls.srtp_client_salt,
+                       RTC_SRTP_MASTER_SALT_LEN);
+    if (rc != RTC_OK) {
+        rtc_srtp_close(&transport->srtp_send);
+        transport->dtls.state = RTC_DTLS_STATE_FAILED;
+        return;
+    }
+    transport->srtp_ready = true;
+}
 
 static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                                 const rtc_addr_t *from, void *user) {
@@ -36,7 +93,7 @@ static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t
     atomic_fetch_add_explicit(&transport->bytes_received, (uint64_t)len, memory_order_relaxed);
 
     if (type != RTC_PKT_STUN)
-        return;
+        goto maybe_dtls;
 
     rtc_stun_msg_t msg;
     if (rtc_stun_parse(&msg, data, len) != RTC_OK || msg.type != STUN_BINDING_REQUEST)
@@ -53,6 +110,14 @@ static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t
     size_t resp_len = 0;
     if (rtc_stun_build_binding_response(data, len, from, resp, sizeof(resp), &resp_len) == RTC_OK)
         (void)rtc_listener_send_to(transport->listener, resp, resp_len, from);
+    return;
+
+maybe_dtls:
+    if (type == RTC_PKT_DTLS) {
+        atomic_fetch_add_explicit(&transport->dtls_packets_received, 1, memory_order_relaxed);
+        if (rtc_dtls_recv(&transport->dtls, data, len) == RTC_OK)
+            transport_try_export_srtp(transport);
+    }
 }
 
 static void transport_copy_ice_parameters(rtc_transport_t *transport,
@@ -87,9 +152,16 @@ rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
         return NULL;
     }
 
+    if (rtc_dtls_init(&transport->dtls, RTC_DTLS_ROLE_SERVER, transport_dtls_send, transport) !=
+        RTC_OK) {
+        free(transport);
+        return NULL;
+    }
+
     int rc = rtc_listener_register_ufrag(transport->listener, transport->ice_ufrag,
                                          transport_on_packet, transport);
     if (rc != RTC_OK) {
+        rtc_dtls_close(&transport->dtls);
         free(transport);
         return NULL;
     }
@@ -103,6 +175,15 @@ int rtc_transport_get_ice_parameters(rtc_transport_t *transport, rtc_ice_paramet
     return RTC_OK;
 }
 
+int rtc_transport_get_dtls_parameters(rtc_transport_t *transport, rtc_dtls_parameters_t *out) {
+    if (!transport || !out)
+        return RTC_ERR_INVALID;
+    memset(out, 0, sizeof(*out));
+    out->role = RTC_TRANSPORT_DTLS_ROLE_SERVER;
+    memcpy(out->fingerprint, rtc_dtls_get_fingerprint(&transport->dtls), sizeof(out->fingerprint));
+    return RTC_OK;
+}
+
 int rtc_transport_get_stats(rtc_transport_t *transport, rtc_transport_stats_t *out) {
     if (!transport || !out)
         return RTC_ERR_INVALID;
@@ -112,9 +193,13 @@ int rtc_transport_get_stats(rtc_transport_t *transport, rtc_transport_stats_t *o
     out->selected_tuple_valid = transport->selected_remote_valid;
     if (transport->selected_remote_valid)
         out->selected_remote = transport->selected_remote;
+    out->dtls_state = transport_dtls_state(transport->dtls.state);
+    out->srtp_ready = transport->srtp_ready;
     out->packets_received =
         atomic_load_explicit(&transport->packets_received, memory_order_relaxed);
     out->bytes_received = atomic_load_explicit(&transport->bytes_received, memory_order_relaxed);
+    out->dtls_packets_received =
+        atomic_load_explicit(&transport->dtls_packets_received, memory_order_relaxed);
     return RTC_OK;
 }
 
@@ -129,6 +214,12 @@ void rtc_transport_close(rtc_transport_t *transport) {
         if (transport->selected_remote_valid)
             rtc_listener_unregister_tuple(transport->listener, &transport->selected_remote);
     }
+    if (transport->srtp_ready) {
+        rtc_srtp_close(&transport->srtp_send);
+        rtc_srtp_close(&transport->srtp_recv);
+        transport->srtp_ready = false;
+    }
+    rtc_dtls_close(&transport->dtls);
 }
 
 void rtc_transport_destroy(rtc_transport_t *transport) {
