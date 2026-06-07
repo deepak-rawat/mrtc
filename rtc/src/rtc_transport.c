@@ -569,8 +569,7 @@ int rtc_transport_set_dtls_role_internal(rtc_transport_t *transport,
     if (transport->dtls.role == internal_role)
         return RTC_OK;
 
-    rtc_dtls_close(&transport->dtls);
-    return rtc_dtls_init(&transport->dtls, internal_role, transport_dtls_send, transport);
+    return rtc_dtls_set_role(&transport->dtls, internal_role);
 }
 
 void rtc_transport_on_rtp(rtc_transport_t *transport, rtc_transport_rtp_fn fn, void *user) {

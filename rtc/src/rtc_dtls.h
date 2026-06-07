@@ -8,7 +8,9 @@
 #define RTC_DTLS_H
 
 #include "rtc_common.h"
+#include <openssl/evp.h>
 #include <openssl/ssl.h>
+#include <openssl/x509.h>
 
 #define RTC_DTLS_FINGERPRINT_SIZE 96 /* SHA-256 hex string + colons */
 #define RTC_SRTP_MASTER_KEY_LEN   16
@@ -35,6 +37,8 @@ typedef struct {
     SSL *ssl;
     BIO *rbio; /* reading: we write received data here */
     BIO *wbio; /* writing: SSL writes outgoing data here */
+    X509 *cert;
+    EVP_PKEY *pkey;
 
     rtc_dtls_state_t state;
     rtc_dtls_role_t role;
@@ -57,6 +61,9 @@ typedef struct {
 /* Initialize DTLS transport. Generates a self-signed certificate. */
 int rtc_dtls_init(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role, rtc_dtls_send_fn send_fn,
                   void *user);
+
+/* Recreate the DTLS handshake state with the same certificate/fingerprint. */
+int rtc_dtls_set_role(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role);
 
 /* Get the local certificate fingerprint (SHA-256 hex) */
 const char *rtc_dtls_get_fingerprint(const rtc_dtls_transport_t *dtls);

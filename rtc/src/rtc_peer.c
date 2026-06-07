@@ -1051,8 +1051,7 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
 
     /* DTLS role negotiation */
     if (pc->local_sdp.type == RTC_SDP_OFFER && pc->remote_sdp.setup == RTC_SETUP_ACTIVE) {
-        rtc_dtls_close(&pc->dtls);
-        rc = rtc_dtls_init(&pc->dtls, RTC_DTLS_ROLE_SERVER, peer_dtls_send, pc);
+        rc = rtc_dtls_set_role(&pc->dtls, RTC_DTLS_ROLE_SERVER);
         if (rc != RTC_OK)
             return rc;
         RTC_LOG_INFO("Peer: DTLS role → server (remote chose active)");

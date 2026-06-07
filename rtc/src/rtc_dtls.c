@@ -16,10 +16,14 @@
 #include <openssl/evp.h>
 
 /* Generate a self-signed ECDSA certificate + key */
-static int dtls_generate_cert(SSL_CTX *ctx, char *fp_out, size_t fp_size) {
+static int dtls_generate_cert(X509 **cert_out, EVP_PKEY **pkey_out, char *fp_out,
+                              size_t fp_size) {
     EVP_PKEY *pkey = NULL;
     X509 *x509 = NULL;
     int ret = RTC_ERR_SSL;
+
+    if (!cert_out || !pkey_out || !fp_out || fp_size == 0)
+        return RTC_ERR_INVALID;
 
     /* Generate EC key (P-256) */
     EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
@@ -49,12 +53,6 @@ static int dtls_generate_cert(SSL_CTX *ctx, char *fp_out, size_t fp_size) {
     X509_set_issuer_name(x509, name);
     X509_sign(x509, pkey, EVP_sha256());
 
-    /* Set in SSL context */
-    if (SSL_CTX_use_certificate(ctx, x509) != 1)
-        goto fail;
-    if (SSL_CTX_use_PrivateKey(ctx, pkey) != 1)
-        goto fail;
-
     /* Compute SHA-256 fingerprint */
     unsigned int flen = 0;
     uint8_t digest[EVP_MAX_MD_SIZE];
@@ -73,6 +71,10 @@ static int dtls_generate_cert(SSL_CTX *ctx, char *fp_out, size_t fp_size) {
     fp_out[offset] = '\0';
 
     ret = RTC_OK;
+    *cert_out = x509;
+    *pkey_out = pkey;
+    x509 = NULL;
+    pkey = NULL;
 
 fail:
     if (pctx)
@@ -84,6 +86,20 @@ fail:
     return ret;
 }
 
+static void dtls_close_ssl(rtc_dtls_transport_t *dtls) {
+    if (dtls->ssl) {
+        SSL_shutdown(dtls->ssl);
+        SSL_free(dtls->ssl); /* also frees rbio and wbio */
+        dtls->ssl = NULL;
+        dtls->rbio = NULL;
+        dtls->wbio = NULL;
+    }
+    if (dtls->ctx) {
+        SSL_CTX_free(dtls->ctx);
+        dtls->ctx = NULL;
+    }
+}
+
 /* OpenSSL verify callback - accept any peer cert (we verify fingerprint separately) */
 static int dtls_verify_cb(int preverify_ok, X509_STORE_CTX *ctx) {
     (void)preverify_ok;
@@ -91,15 +107,10 @@ static int dtls_verify_cb(int preverify_ok, X509_STORE_CTX *ctx) {
     return 1; /* always accept */
 }
 
-int rtc_dtls_init(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role, rtc_dtls_send_fn send_fn,
-                  void *user) {
-    memset(dtls, 0, sizeof(*dtls));
-    dtls->state = RTC_DTLS_STATE_NEW;
-    dtls->role = role;
-    dtls->send_fn = send_fn;
-    dtls->send_user = user;
+static int dtls_setup_ssl(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role) {
+    if (!dtls || !dtls->cert || !dtls->pkey)
+        return RTC_ERR_INVALID;
 
-    /* Create DTLS context */
     const SSL_METHOD *method =
         (role == RTC_DTLS_ROLE_CLIENT) ? DTLS_client_method() : DTLS_server_method();
     dtls->ctx = SSL_CTX_new(method);
@@ -108,46 +119,99 @@ int rtc_dtls_init(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role, rtc_dtls_sen
         return RTC_ERR_SSL;
     }
 
-    /* Set DTLS-SRTP profile */
     if (SSL_CTX_set_tlsext_use_srtp(dtls->ctx, "SRTP_AES128_CM_SHA1_80") != 0) {
         RTC_LOG_ERR("DTLS: failed to set SRTP profile");
-        SSL_CTX_free(dtls->ctx);
-        dtls->ctx = NULL;
+        dtls_close_ssl(dtls);
         return RTC_ERR_SSL;
     }
 
     SSL_CTX_set_verify(dtls->ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
                        dtls_verify_cb);
 
-    /* Generate certificate */
-    int rc =
-        dtls_generate_cert(dtls->ctx, dtls->local_fingerprint, sizeof(dtls->local_fingerprint));
-    if (rc != RTC_OK) {
-        SSL_CTX_free(dtls->ctx);
-        dtls->ctx = NULL;
-        return rc;
-    }
-
-    /* Create SSL object with memory BIOs */
-    dtls->ssl = SSL_new(dtls->ctx);
-    if (!dtls->ssl) {
-        SSL_CTX_free(dtls->ctx);
-        dtls->ctx = NULL;
+    if (SSL_CTX_use_certificate(dtls->ctx, dtls->cert) != 1 ||
+        SSL_CTX_use_PrivateKey(dtls->ctx, dtls->pkey) != 1 ||
+        SSL_CTX_check_private_key(dtls->ctx) != 1) {
+        RTC_LOG_ERR("DTLS: failed to install certificate");
+        dtls_close_ssl(dtls);
         return RTC_ERR_SSL;
     }
 
-    dtls->rbio = BIO_new(BIO_s_mem());
-    dtls->wbio = BIO_new(BIO_s_mem());
-    BIO_set_mem_eof_return(dtls->rbio, -1);
-    BIO_set_mem_eof_return(dtls->wbio, -1);
-    SSL_set_bio(dtls->ssl, dtls->rbio, dtls->wbio);
+    dtls->ssl = SSL_new(dtls->ctx);
+    if (!dtls->ssl) {
+        dtls_close_ssl(dtls);
+        return RTC_ERR_SSL;
+    }
+
+    BIO *rbio = BIO_new(BIO_s_mem());
+    BIO *wbio = BIO_new(BIO_s_mem());
+    if (!rbio || !wbio) {
+        if (rbio)
+            BIO_free(rbio);
+        if (wbio)
+            BIO_free(wbio);
+        dtls_close_ssl(dtls);
+        return RTC_ERR_SSL;
+    }
+
+    BIO_set_mem_eof_return(rbio, -1);
+    BIO_set_mem_eof_return(wbio, -1);
+    SSL_set_bio(dtls->ssl, rbio, wbio);
+    dtls->rbio = rbio;
+    dtls->wbio = wbio;
 
     if (role == RTC_DTLS_ROLE_CLIENT)
         SSL_set_connect_state(dtls->ssl);
     else
         SSL_set_accept_state(dtls->ssl);
 
+    dtls->state = RTC_DTLS_STATE_NEW;
+    dtls->role = role;
+    dtls->srtp_keys_ready = false;
+    memset(dtls->srtp_client_key, 0, sizeof(dtls->srtp_client_key));
+    memset(dtls->srtp_client_salt, 0, sizeof(dtls->srtp_client_salt));
+    memset(dtls->srtp_server_key, 0, sizeof(dtls->srtp_server_key));
+    memset(dtls->srtp_server_salt, 0, sizeof(dtls->srtp_server_salt));
+    return RTC_OK;
+}
+
+int rtc_dtls_init(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role, rtc_dtls_send_fn send_fn,
+                  void *user) {
+    memset(dtls, 0, sizeof(*dtls));
+    dtls->send_fn = send_fn;
+    dtls->send_user = user;
+
+    /* Generate certificate */
+    int rc = dtls_generate_cert(&dtls->cert, &dtls->pkey, dtls->local_fingerprint,
+                                sizeof(dtls->local_fingerprint));
+    if (rc != RTC_OK)
+        return rc;
+
+    rc = dtls_setup_ssl(dtls, role);
+    if (rc != RTC_OK) {
+        rtc_dtls_close(dtls);
+        return rc;
+    }
+
     RTC_LOG_INFO("DTLS: initialized (role=%s, fingerprint=%s)",
+                 role == RTC_DTLS_ROLE_CLIENT ? "client" : "server", dtls->local_fingerprint);
+    return RTC_OK;
+}
+
+int rtc_dtls_set_role(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role) {
+    if (!dtls || !dtls->cert || !dtls->pkey)
+        return RTC_ERR_INVALID;
+    if (dtls->state != RTC_DTLS_STATE_NEW)
+        return RTC_ERR_INVALID;
+    if (dtls->role == role)
+        return RTC_OK;
+
+    dtls_close_ssl(dtls);
+    int rc = dtls_setup_ssl(dtls, role);
+    if (rc != RTC_OK) {
+        dtls->state = RTC_DTLS_STATE_FAILED;
+        return rc;
+    }
+    RTC_LOG_INFO("DTLS: role changed to %s (fingerprint=%s)",
                  role == RTC_DTLS_ROLE_CLIENT ? "client" : "server", dtls->local_fingerprint);
     return RTC_OK;
 }
@@ -254,16 +318,14 @@ int rtc_dtls_export_srtp_keys(rtc_dtls_transport_t *dtls) {
 }
 
 void rtc_dtls_close(rtc_dtls_transport_t *dtls) {
-    if (dtls->ssl) {
-        SSL_shutdown(dtls->ssl);
-        SSL_free(dtls->ssl); /* also frees rbio and wbio */
-        dtls->ssl = NULL;
-        dtls->rbio = NULL;
-        dtls->wbio = NULL;
+    dtls_close_ssl(dtls);
+    if (dtls->cert) {
+        X509_free(dtls->cert);
+        dtls->cert = NULL;
     }
-    if (dtls->ctx) {
-        SSL_CTX_free(dtls->ctx);
-        dtls->ctx = NULL;
+    if (dtls->pkey) {
+        EVP_PKEY_free(dtls->pkey);
+        dtls->pkey = NULL;
     }
     dtls->state = RTC_DTLS_STATE_CLOSED;
 }

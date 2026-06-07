@@ -101,6 +101,27 @@ TEST(dtls_unique_certs) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: role changes preserve the advertised certificate             */
+/* ------------------------------------------------------------------ */
+TEST(dtls_role_change_keeps_fingerprint) {
+    rtc_dtls_transport_t dtls;
+    int rc = rtc_dtls_init(&dtls, RTC_DTLS_ROLE_CLIENT, client_send_fn, NULL);
+    ASSERT_EQ(rc, RTC_OK);
+
+    char fp_before[RTC_DTLS_FINGERPRINT_SIZE];
+    memcpy(fp_before, rtc_dtls_get_fingerprint(&dtls), sizeof(fp_before));
+
+    rc = rtc_dtls_set_role(&dtls, RTC_DTLS_ROLE_SERVER);
+    ASSERT_EQ(rc, RTC_OK);
+    ASSERT_EQ(dtls.role, RTC_DTLS_ROLE_SERVER);
+    ASSERT_EQ(dtls.state, RTC_DTLS_STATE_NEW);
+    ASSERT_STR_EQ(fp_before, rtc_dtls_get_fingerprint(&dtls));
+
+    printf("    role switch kept fingerprint: %.20s...\n", rtc_dtls_get_fingerprint(&dtls));
+    rtc_dtls_close(&dtls);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Test: full DTLS handshake via memory pipe                          */
 /* ------------------------------------------------------------------ */
 TEST(dtls_handshake) {
@@ -289,6 +310,7 @@ int main(void) {
     RUN_TEST(dtls_init_client);
     RUN_TEST(dtls_init_server);
     RUN_TEST(dtls_unique_certs);
+    RUN_TEST(dtls_role_change_keeps_fingerprint);
     RUN_TEST(dtls_handshake);
     RUN_TEST(dtls_srtp_key_export);
     RUN_TEST(dtls_srtp_e2e);
