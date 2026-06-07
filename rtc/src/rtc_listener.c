@@ -415,3 +415,10 @@ void rtc_listener_unregister_tuple(rtc_listener_t *listener, const rtc_addr_t *r
         return;
     listener_unregister_route(listener, &listener->tuple_routes, key);
 }
+
+int rtc_listener_send_to(rtc_listener_t *listener, const uint8_t *data, size_t len,
+                         const rtc_addr_t *dest) {
+    if (!listener || !data || !dest)
+        return RTC_ERR_INVALID;
+    return rtc_packet_io_send(&listener->io, data, len, dest);
+}

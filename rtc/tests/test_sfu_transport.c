@@ -23,18 +23,59 @@ static int listener_loopback_addr(rtc_listener_t *listener, rtc_addr_t *out) {
     return rtc_addr_from_string(out, "127.0.0.1", port);
 }
 
-static int send_udp(rtc_listener_t *listener, const uint8_t *data, size_t len) {
+static rtc_socket_t make_bound_sender(void) {
+    rtc_socket_t sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sender == RTC_INVALID_SOCKET)
+        return RTC_INVALID_SOCKET;
+
+    struct sockaddr_in bind_addr;
+    memset(&bind_addr, 0, sizeof(bind_addr));
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    bind_addr.sin_port = 0;
+    if (bind(sender, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
+        rtc_close_socket(sender);
+        return RTC_INVALID_SOCKET;
+    }
+    if (rtc_set_nonblocking(sender) != RTC_OK) {
+        rtc_close_socket(sender);
+        return RTC_INVALID_SOCKET;
+    }
+    return sender;
+}
+
+static int send_udp_from(rtc_listener_t *listener, const uint8_t *data, size_t len,
+                         rtc_socket_t sender) {
     rtc_addr_t dest;
     int rc = listener_loopback_addr(listener, &dest);
     if (rc != RTC_OK)
         return rc;
-    rtc_socket_t sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sender == RTC_INVALID_SOCKET)
-        return RTC_ERR_SOCKET;
     int sent = sendto(sender, (const char *)data, (int)len, 0,
                       (const struct sockaddr *)&dest.addr, dest.len);
-    rtc_close_socket(sender);
     return sent == (int)len ? RTC_OK : RTC_ERR_SOCKET;
+}
+
+static int send_udp(rtc_listener_t *listener, const uint8_t *data, size_t len) {
+    rtc_socket_t sender = make_bound_sender();
+    if (sender == RTC_INVALID_SOCKET)
+        return RTC_ERR_SOCKET;
+    int rc = send_udp_from(listener, data, len, sender);
+    rtc_close_socket(sender);
+    return rc;
+}
+
+static bool recv_stun_response(rtc_socket_t sender, uint8_t *buf, size_t buf_len, size_t *out_len,
+                               int timeout_ms) {
+    uint64_t deadline = rtc_time_ms() + (uint64_t)timeout_ms;
+    while (rtc_time_ms() < deadline) {
+        int n = recv(sender, (char *)buf, (int)buf_len, 0);
+        if (n > 0) {
+            *out_len = (size_t)n;
+            return true;
+        }
+        SLEEP_MS(10);
+    }
+    return false;
 }
 
 static bool wait_for_transport_packets(rtc_transport_t *transport, uint64_t target,
@@ -102,14 +143,31 @@ TEST(transport_receives_stun_by_ufrag) {
     snprintf(username, sizeof(username), "%s:remote", ice.username_fragment);
     rtc_stun_msg_t req;
     ASSERT_EQ(rtc_stun_build_binding_request(&req, username, NULL, 1234, true, 99, true), RTC_OK);
-    ASSERT_EQ(send_udp(listener, req.buf, req.buf_len), RTC_OK);
+    rtc_socket_t sender = make_bound_sender();
+    ASSERT(sender != RTC_INVALID_SOCKET);
+    ASSERT_EQ(send_udp_from(listener, req.buf, req.buf_len, sender), RTC_OK);
     ASSERT(wait_for_transport_packets(transport, 1, 1000));
 
-    rtc_transport_close(transport);
+    uint8_t resp_buf[256];
+    size_t resp_len = 0;
+    ASSERT(recv_stun_response(sender, resp_buf, sizeof(resp_buf), &resp_len, 1000));
+    rtc_stun_msg_t resp;
+    ASSERT_EQ(rtc_stun_parse(&resp, resp_buf, resp_len), RTC_OK);
+    ASSERT_EQ(resp.type, STUN_BINDING_RESPONSE);
+
     rtc_transport_stats_t stats;
+    ASSERT_EQ(rtc_transport_get_stats(transport, &stats), RTC_OK);
+    ASSERT(stats.selected_tuple_valid);
+
+    const uint8_t rtp[] = {0x80, 0x60, 0x00, 0x01, 0, 0, 0, 1, 0x12, 0x34, 0x56, 0x78};
+    ASSERT_EQ(send_udp_from(listener, rtp, sizeof(rtp), sender), RTC_OK);
+    ASSERT(wait_for_transport_packets(transport, 2, 1000));
+
+    rtc_transport_close(transport);
     ASSERT_EQ(rtc_transport_get_stats(transport, &stats), RTC_OK);
     ASSERT(stats.closed);
 
+    rtc_close_socket(sender);
     rtc_transport_destroy(transport);
     rtc_router_destroy(router);
     rtc_listener_destroy(listener);

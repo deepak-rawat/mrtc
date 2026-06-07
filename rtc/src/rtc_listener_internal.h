@@ -26,4 +26,7 @@ int rtc_listener_register_tuple(rtc_listener_t *listener, const rtc_addr_t *remo
                                 rtc_listener_packet_fn fn, void *user);
 void rtc_listener_unregister_tuple(rtc_listener_t *listener, const rtc_addr_t *remote);
 
+int rtc_listener_send_to(rtc_listener_t *listener, const uint8_t *data, size_t len,
+                         const rtc_addr_t *dest);
+
 #endif /* RTC_LISTENER_INTERNAL_H */

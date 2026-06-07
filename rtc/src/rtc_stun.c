@@ -248,6 +248,45 @@ int rtc_stun_parse(rtc_stun_msg_t *msg, const uint8_t *data, size_t len) {
     return RTC_OK;
 }
 
+int rtc_stun_build_binding_response(const uint8_t *req_buf, size_t req_len,
+                                    const rtc_addr_t *mapped_addr, uint8_t *out,
+                                    size_t out_cap, size_t *out_len) {
+    if (!req_buf || req_len < STUN_HEADER_SIZE || !mapped_addr || !out || !out_len)
+        return RTC_ERR_INVALID;
+    if (out_cap < 128)
+        return RTC_ERR_NOMEM;
+
+    const struct sockaddr *sa = (const struct sockaddr *)&mapped_addr->addr;
+    if (sa->sa_family != AF_INET)
+        return RTC_ERR_INVALID;
+
+    size_t pos = STUN_HEADER_SIZE;
+    const struct sockaddr_in *sin = (const struct sockaddr_in *)&mapped_addr->addr;
+    uint16_t xport = ntohs(sin->sin_port) ^ (uint16_t)(STUN_MAGIC_COOKIE >> 16);
+    uint32_t xip = ntohl(sin->sin_addr.s_addr) ^ STUN_MAGIC_COOKIE;
+
+    uint8_t val[8];
+    val[0] = 0x00;
+    val[1] = 0x01;
+    val[2] = (uint8_t)(xport >> 8);
+    val[3] = (uint8_t)xport;
+    val[4] = (uint8_t)(xip >> 24);
+    val[5] = (uint8_t)(xip >> 16);
+    val[6] = (uint8_t)(xip >> 8);
+    val[7] = (uint8_t)xip;
+
+    int rc = append_attr(out, &pos, out_cap, STUN_ATTR_XOR_MAPPED_ADDRESS, val, sizeof(val));
+    if (rc != RTC_OK)
+        return rc;
+
+    write_u16(out + 0, STUN_BINDING_RESPONSE);
+    write_u16(out + 2, (uint16_t)(pos - STUN_HEADER_SIZE));
+    write_u32(out + 4, STUN_MAGIC_COOKIE);
+    memcpy(out + 8, req_buf + 8, STUN_TXN_ID_SIZE);
+    *out_len = pos;
+    return RTC_OK;
+}
+
 int rtc_stun_get_mapped_address(const rtc_stun_msg_t *msg, rtc_addr_t *addr) {
     const uint8_t *buf = msg->buf;
     size_t pos = STUN_HEADER_SIZE;

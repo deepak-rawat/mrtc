@@ -5,6 +5,7 @@
 
 #include "rtc_listener_internal.h"
 #include "rtc_sdp.h"
+#include "rtc_stun.h"
 
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -19,6 +20,8 @@ struct rtc_transport {
     bool enable_sctp;
     bool enable_twcc;
     uint32_t initial_outgoing_bitrate_bps;
+    rtc_addr_t selected_remote;
+    bool selected_remote_valid;
     _Atomic bool closed;
     _Atomic uint64_t packets_received;
     _Atomic uint64_t bytes_received;
@@ -26,14 +29,30 @@ struct rtc_transport {
 
 static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                                 const rtc_addr_t *from, void *user) {
-    (void)type;
-    (void)data;
-    (void)from;
     rtc_transport_t *transport = (rtc_transport_t *)user;
     if (atomic_load_explicit(&transport->closed, memory_order_acquire))
         return;
     atomic_fetch_add_explicit(&transport->packets_received, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&transport->bytes_received, (uint64_t)len, memory_order_relaxed);
+
+    if (type != RTC_PKT_STUN)
+        return;
+
+    rtc_stun_msg_t msg;
+    if (rtc_stun_parse(&msg, data, len) != RTC_OK || msg.type != STUN_BINDING_REQUEST)
+        return;
+
+    if (!transport->selected_remote_valid) {
+        transport->selected_remote = *from;
+        transport->selected_remote_valid = true;
+        (void)rtc_listener_register_tuple(transport->listener, &transport->selected_remote,
+                                          transport_on_packet, transport);
+    }
+
+    uint8_t resp[128];
+    size_t resp_len = 0;
+    if (rtc_stun_build_binding_response(data, len, from, resp, sizeof(resp), &resp_len) == RTC_OK)
+        (void)rtc_listener_send_to(transport->listener, resp, resp_len, from);
 }
 
 static void transport_copy_ice_parameters(rtc_transport_t *transport,
@@ -90,6 +109,9 @@ int rtc_transport_get_stats(rtc_transport_t *transport, rtc_transport_stats_t *o
     memset(out, 0, sizeof(*out));
     out->closed = atomic_load_explicit(&transport->closed, memory_order_acquire);
     out->ice_mode = transport->ice_mode;
+    out->selected_tuple_valid = transport->selected_remote_valid;
+    if (transport->selected_remote_valid)
+        out->selected_remote = transport->selected_remote;
     out->packets_received =
         atomic_load_explicit(&transport->packets_received, memory_order_relaxed);
     out->bytes_received = atomic_load_explicit(&transport->bytes_received, memory_order_relaxed);
@@ -102,8 +124,11 @@ void rtc_transport_close(rtc_transport_t *transport) {
     bool was_closed = atomic_exchange_explicit(&transport->closed, true, memory_order_acq_rel);
     if (was_closed)
         return;
-    if (transport->listener)
+    if (transport->listener) {
         rtc_listener_unregister_ufrag(transport->listener, transport->ice_ufrag);
+        if (transport->selected_remote_valid)
+            rtc_listener_unregister_tuple(transport->listener, &transport->selected_remote);
+    }
 }
 
 void rtc_transport_destroy(rtc_transport_t *transport) {

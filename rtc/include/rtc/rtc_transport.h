@@ -50,6 +50,8 @@ typedef struct {
 typedef struct {
     bool closed;
     rtc_ice_mode_t ice_mode;
+    bool selected_tuple_valid;
+    rtc_addr_t selected_remote;
     uint64_t packets_received;
     uint64_t bytes_received;
 } rtc_transport_stats_t;
