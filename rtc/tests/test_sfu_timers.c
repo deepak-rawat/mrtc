@@ -50,8 +50,8 @@ static int send_udp_from(rtc_listener_t *listener, const uint8_t *data, size_t l
     int rc = listener_loopback_addr(listener, &dest);
     if (rc != RTC_OK)
         return rc;
-    int sent = sendto(sender, (const char *)data, (int)len, 0,
-                      (const struct sockaddr *)&dest.addr, dest.len);
+    int sent = sendto(sender, (const char *)data, (int)len, 0, (const struct sockaddr *)&dest.addr,
+                      dest.len);
     return sent == (int)len ? RTC_OK : RTC_ERR_SOCKET;
 }
 
@@ -131,10 +131,11 @@ TEST(logical_transport_uses_worker_timer_for_dtls) {
     ASSERT(listener != NULL);
     rtc_router_t *router = rtc_router_create(worker, NULL);
     ASSERT(router != NULL);
-    rtc_transport_t *transport = rtc_router_create_transport(router, &(rtc_transport_config_t){
-                                                                       .listener = listener,
-                                                                       .ice_mode = RTC_ICE_MODE_LITE,
-                                                                   });
+    rtc_transport_t *transport =
+        rtc_router_create_transport(router, &(rtc_transport_config_t){
+                                                .listener = listener,
+                                                .ice_mode = RTC_ICE_MODE_LITE,
+                                            });
     ASSERT(transport != NULL);
 
     rtc_ice_parameters_t ice;

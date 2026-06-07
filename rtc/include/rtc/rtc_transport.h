@@ -10,8 +10,8 @@
 
 #include "rtc_common.h"
 
-#define RTC_ICE_UFRAG_MAX 8
-#define RTC_ICE_PWD_MAX   24
+#define RTC_ICE_UFRAG_MAX        8
+#define RTC_ICE_PWD_MAX          24
 #define RTC_DTLS_FINGERPRINT_MAX 96
 
 typedef struct rtc_transport rtc_transport_t;

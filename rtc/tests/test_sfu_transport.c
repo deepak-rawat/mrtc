@@ -53,8 +53,8 @@ static int send_udp_from(rtc_listener_t *listener, const uint8_t *data, size_t l
     int rc = listener_loopback_addr(listener, &dest);
     if (rc != RTC_OK)
         return rc;
-    int sent = sendto(sender, (const char *)data, (int)len, 0,
-                      (const struct sockaddr *)&dest.addr, dest.len);
+    int sent = sendto(sender, (const char *)data, (int)len, 0, (const struct sockaddr *)&dest.addr,
+                      dest.len);
     return sent == (int)len ? RTC_OK : RTC_ERR_SOCKET;
 }
 
@@ -63,8 +63,7 @@ typedef struct {
     rtc_socket_t sender;
 } dtls_client_send_ctx_t;
 
-static bool wait_for_transport_packets(rtc_transport_t *transport, uint64_t target,
-                                       int timeout_ms);
+static bool wait_for_transport_packets(rtc_transport_t *transport, uint64_t target, int timeout_ms);
 
 static int dtls_client_send(const uint8_t *data, size_t len, void *user) {
     dtls_client_send_ctx_t *ctx = (dtls_client_send_ctx_t *)user;
@@ -209,11 +208,12 @@ TEST(transport_create_ice_params) {
     rtc_router_t *router = rtc_router_create(worker, NULL);
     ASSERT(router != NULL);
 
-    rtc_transport_t *transport = rtc_router_create_transport(router, &(rtc_transport_config_t){
-                                                                       .listener = listener,
-                                                                       .ice_mode = RTC_ICE_MODE_LITE,
-                                                                       .enable_twcc = true,
-                                                                   });
+    rtc_transport_t *transport =
+        rtc_router_create_transport(router, &(rtc_transport_config_t){
+                                                .listener = listener,
+                                                .ice_mode = RTC_ICE_MODE_LITE,
+                                                .enable_twcc = true,
+                                            });
     ASSERT(transport != NULL);
 
     rtc_ice_parameters_t ice;
@@ -244,10 +244,11 @@ TEST(transport_receives_stun_by_ufrag) {
     ASSERT(listener != NULL);
     rtc_router_t *router = rtc_router_create(worker, NULL);
     ASSERT(router != NULL);
-    rtc_transport_t *transport = rtc_router_create_transport(router, &(rtc_transport_config_t){
-                                                                       .listener = listener,
-                                                                       .ice_mode = RTC_ICE_MODE_LITE,
-                                                                   });
+    rtc_transport_t *transport =
+        rtc_router_create_transport(router, &(rtc_transport_config_t){
+                                                .listener = listener,
+                                                .ice_mode = RTC_ICE_MODE_LITE,
+                                            });
     ASSERT(transport != NULL);
 
     rtc_ice_parameters_t ice;
@@ -295,10 +296,11 @@ TEST(transport_dtls_handshake_exports_srtp) {
     ASSERT(listener != NULL);
     rtc_router_t *router = rtc_router_create(worker, NULL);
     ASSERT(router != NULL);
-    rtc_transport_t *transport = rtc_router_create_transport(router, &(rtc_transport_config_t){
-                                                                       .listener = listener,
-                                                                       .ice_mode = RTC_ICE_MODE_LITE,
-                                                                   });
+    rtc_transport_t *transport =
+        rtc_router_create_transport(router, &(rtc_transport_config_t){
+                                                .listener = listener,
+                                                .ice_mode = RTC_ICE_MODE_LITE,
+                                            });
     ASSERT(transport != NULL);
 
     rtc_ice_parameters_t ice;
@@ -331,10 +333,11 @@ TEST(transport_routes_srtp_to_producer) {
     ASSERT(listener != NULL);
     rtc_router_t *router = rtc_router_create(worker, NULL);
     ASSERT(router != NULL);
-    rtc_transport_t *transport = rtc_router_create_transport(router, &(rtc_transport_config_t){
-                                                                       .listener = listener,
-                                                                       .ice_mode = RTC_ICE_MODE_LITE,
-                                                                   });
+    rtc_transport_t *transport =
+        rtc_router_create_transport(router, &(rtc_transport_config_t){
+                                                .listener = listener,
+                                                .ice_mode = RTC_ICE_MODE_LITE,
+                                            });
     ASSERT(transport != NULL);
 
     rtc_ice_parameters_t ice;
@@ -347,25 +350,28 @@ TEST(transport_routes_srtp_to_producer) {
     ASSERT(drive_dtls_handshake(listener, transport, sender, &client));
     ASSERT_EQ(rtc_dtls_export_srtp_keys(&client), RTC_OK);
 
-    rtc_producer_t *producer = rtc_transport_produce(transport, &(rtc_producer_options_t){
-                                                                    .kind = RTC_MEDIA_KIND_VIDEO,
-                                                                    .rtp = {
-                                                                        .ssrc = 0x12345678,
-                                                                        .codec_count = 1,
-                                                                        .codecs = {{
-                                                                            .kind = RTC_MEDIA_KIND_VIDEO,
-                                                                            .payload_type = 96,
-                                                                            .clock_rate = 90000,
-                                                                            .mime_type = "video/VP8",
-                                                                        }},
-                                                                    },
-                                                                    .label = "camera",
-                                                                });
+    rtc_producer_t *producer =
+        rtc_transport_produce(transport, &(rtc_producer_options_t){
+                                             .kind = RTC_MEDIA_KIND_VIDEO,
+                                             .rtp =
+                                                 {
+                                                     .ssrc = 0x12345678,
+                                                     .codec_count = 1,
+                                                     .codecs = {{
+                                                         .kind = RTC_MEDIA_KIND_VIDEO,
+                                                         .payload_type = 96,
+                                                         .clock_rate = 90000,
+                                                         .mime_type = "video/VP8",
+                                                     }},
+                                                 },
+                                             .label = "camera",
+                                         });
     ASSERT(producer != NULL);
 
     rtc_srtp_ctx_t client_srtp;
     ASSERT_EQ(rtc_srtp_init(&client_srtp, client.srtp_client_key, RTC_SRTP_MASTER_KEY_LEN,
-                            client.srtp_client_salt, RTC_SRTP_MASTER_SALT_LEN), RTC_OK);
+                            client.srtp_client_salt, RTC_SRTP_MASTER_SALT_LEN),
+              RTC_OK);
 
     const uint8_t payload[] = {0x11, 0x22, 0x33, 0x44};
     rtc_rtp_packet_t pkt;
@@ -402,14 +408,16 @@ TEST(transport_forwards_producer_rtp_to_consumer) {
     rtc_router_t *router = rtc_router_create(worker, NULL);
     ASSERT(router != NULL);
 
-    rtc_transport_t *pub_transport = rtc_router_create_transport(router, &(rtc_transport_config_t){
-                                                                           .listener = listener,
-                                                                           .ice_mode = RTC_ICE_MODE_LITE,
-                                                                       });
-    rtc_transport_t *sub_transport = rtc_router_create_transport(router, &(rtc_transport_config_t){
-                                                                           .listener = listener,
-                                                                           .ice_mode = RTC_ICE_MODE_LITE,
-                                                                       });
+    rtc_transport_t *pub_transport =
+        rtc_router_create_transport(router, &(rtc_transport_config_t){
+                                                .listener = listener,
+                                                .ice_mode = RTC_ICE_MODE_LITE,
+                                            });
+    rtc_transport_t *sub_transport =
+        rtc_router_create_transport(router, &(rtc_transport_config_t){
+                                                .listener = listener,
+                                                .ice_mode = RTC_ICE_MODE_LITE,
+                                            });
     ASSERT(pub_transport != NULL);
     ASSERT(sub_transport != NULL);
 
@@ -430,33 +438,37 @@ TEST(transport_forwards_producer_rtp_to_consumer) {
     ASSERT_EQ(rtc_dtls_export_srtp_keys(&pub_client), RTC_OK);
     ASSERT_EQ(rtc_dtls_export_srtp_keys(&sub_client), RTC_OK);
 
-    rtc_producer_t *producer = rtc_transport_produce(pub_transport, &(rtc_producer_options_t){
-                                                                       .kind = RTC_MEDIA_KIND_VIDEO,
-                                                                       .rtp = {
-                                                                           .ssrc = 0x12345678,
-                                                                           .codec_count = 1,
-                                                                           .codecs = {{
-                                                                               .kind = RTC_MEDIA_KIND_VIDEO,
-                                                                               .payload_type = 96,
-                                                                               .clock_rate = 90000,
-                                                                               .mime_type = "video/VP8",
-                                                                           }},
-                                                                       },
-                                                                       .label = "camera",
-                                                                   });
+    rtc_producer_t *producer =
+        rtc_transport_produce(pub_transport, &(rtc_producer_options_t){
+                                                 .kind = RTC_MEDIA_KIND_VIDEO,
+                                                 .rtp =
+                                                     {
+                                                         .ssrc = 0x12345678,
+                                                         .codec_count = 1,
+                                                         .codecs = {{
+                                                             .kind = RTC_MEDIA_KIND_VIDEO,
+                                                             .payload_type = 96,
+                                                             .clock_rate = 90000,
+                                                             .mime_type = "video/VP8",
+                                                         }},
+                                                     },
+                                                 .label = "camera",
+                                             });
     ASSERT(producer != NULL);
     rtc_consumer_t *consumer = rtc_transport_consume(sub_transport, &(rtc_consumer_options_t){
-                                                                      .producer = producer,
-                                                                      .paused = false,
-                                                                  });
+                                                                        .producer = producer,
+                                                                        .paused = false,
+                                                                    });
     ASSERT(consumer != NULL);
 
     rtc_srtp_ctx_t pub_send;
     rtc_srtp_ctx_t sub_recv;
     ASSERT_EQ(rtc_srtp_init(&pub_send, pub_client.srtp_client_key, RTC_SRTP_MASTER_KEY_LEN,
-                            pub_client.srtp_client_salt, RTC_SRTP_MASTER_SALT_LEN), RTC_OK);
+                            pub_client.srtp_client_salt, RTC_SRTP_MASTER_SALT_LEN),
+              RTC_OK);
     ASSERT_EQ(rtc_srtp_init(&sub_recv, sub_client.srtp_server_key, RTC_SRTP_MASTER_KEY_LEN,
-                            sub_client.srtp_server_salt, RTC_SRTP_MASTER_SALT_LEN), RTC_OK);
+                            sub_client.srtp_server_salt, RTC_SRTP_MASTER_SALT_LEN),
+              RTC_OK);
 
     const uint8_t payload[] = {0xDE, 0xAD, 0xBE, 0xEF};
     rtc_rtp_packet_t pkt;
