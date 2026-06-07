@@ -199,16 +199,29 @@ int rtc_timer_sched_next_timeout_ms(rtc_timer_sched_t *sched, uint64_t now_ms,
 void rtc_timer_sched_fire_due(rtc_timer_sched_t *sched, uint64_t now_ms) {
     if (!sched)
         return;
+    rtc_timer_sched_fn fn;
+    void *user;
+    while (rtc_timer_sched_pop_due(sched, now_ms, &fn, &user)) {
+        fn(user);
+    }
+}
+
+bool rtc_timer_sched_pop_due(rtc_timer_sched_t *sched, uint64_t now_ms,
+                             rtc_timer_sched_fn *fn, void **user) {
+    if (!sched || !fn || !user)
+        return false;
     for (;;) {
         prune_stale_roots(sched);
         if (sched->heap_count == 0 || sched->heap[0].deadline_ms > now_ms)
-            return;
+            return false;
 
         rtc_timer_sched_node_t node = heap_pop(sched);
         if (!timer_node_active(sched, &node))
             continue;
         sched->active[node.slot] = false;
-        node.fn(node.user);
+        *fn = node.fn;
+        *user = node.user;
+        return true;
     }
 }
 
