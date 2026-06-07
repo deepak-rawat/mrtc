@@ -58,6 +58,11 @@ typedef enum {
 typedef void (*rtc_packet_io_recv_fn)(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                                       const rtc_addr_t *from, void *user);
 
+typedef struct {
+    const char *listen_ip;
+    uint16_t port;
+} rtc_packet_io_config_t;
+
 /* Timer callback */
 typedef void (*rtc_timer_fn)(void *user);
 
@@ -169,6 +174,8 @@ typedef struct {
  * thread. on_recv (may be NULL) fires on the transport thread.
  */
 int rtc_packet_io_init(rtc_packet_io_t *t, rtc_packet_io_recv_fn on_recv, void *user);
+int rtc_packet_io_init_ex(rtc_packet_io_t *t, const rtc_packet_io_config_t *cfg,
+                          rtc_packet_io_recv_fn on_recv, void *user);
 
 /* Thread-safe: send data to a specific destination address */
 int rtc_packet_io_send(rtc_packet_io_t *t, const uint8_t *data, size_t len, const rtc_addr_t *dest);

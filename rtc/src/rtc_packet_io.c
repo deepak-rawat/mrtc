@@ -478,9 +478,41 @@ static void *transport_thread_fn(void *arg) {
 /*  Public API                                                         */
 /* ------------------------------------------------------------------ */
 
+static int packet_io_fill_bind_addr(struct sockaddr_in6 *bind_addr,
+                                    const rtc_packet_io_config_t *cfg) {
+    memset(bind_addr, 0, sizeof(*bind_addr));
+    bind_addr->sin6_family = AF_INET6;
+    bind_addr->sin6_addr = in6addr_any;
+    bind_addr->sin6_port = htons(cfg ? cfg->port : 0);
+
+    if (!cfg || !cfg->listen_ip || cfg->listen_ip[0] == '\0' ||
+        strcmp(cfg->listen_ip, "0.0.0.0") == 0 || strcmp(cfg->listen_ip, "::") == 0) {
+        return RTC_OK;
+    }
+
+    if (inet_pton(AF_INET6, cfg->listen_ip, &bind_addr->sin6_addr) == 1)
+        return RTC_OK;
+
+    struct in_addr v4;
+    if (inet_pton(AF_INET, cfg->listen_ip, &v4) == 1) {
+        bind_addr->sin6_addr.s6_addr[10] = 0xFF;
+        bind_addr->sin6_addr.s6_addr[11] = 0xFF;
+        memcpy(&bind_addr->sin6_addr.s6_addr[12], &v4.s_addr, sizeof(v4.s_addr));
+        return RTC_OK;
+    }
+
+    return RTC_ERR_INVALID;
+}
+
 int rtc_packet_io_init(rtc_packet_io_t *t, rtc_packet_io_recv_fn on_recv, void *user) {
+    return rtc_packet_io_init_ex(t, NULL, on_recv, user);
+}
+
+int rtc_packet_io_init_ex(rtc_packet_io_t *t, const rtc_packet_io_config_t *cfg,
+                          rtc_packet_io_recv_fn on_recv, void *user) {
     memset(t, 0, sizeof(*t));
     atomic_store_explicit(&t->sock, RTC_INVALID_SOCKET, memory_order_relaxed);
+    int rc;
 
     /* Dual-stack UDP socket: one fd accepts both IPv4 and IPv6 traffic.
      * IPv4 senders arrive as IPv4-mapped IPv6 addresses; we unmap them
@@ -496,12 +528,13 @@ int rtc_packet_io_init(rtc_packet_io_t *t, rtc_packet_io_recv_fn on_recv, void *
         RTC_LOG_WARN("Transport: IPV6_V6ONLY=0 failed; IPv4 traffic may not be accepted");
     }
 
-    /* Bind to any available port on both families. */
+    /* Bind to the requested port on both families. */
     struct sockaddr_in6 bind_addr;
-    memset(&bind_addr, 0, sizeof(bind_addr));
-    bind_addr.sin6_family = AF_INET6;
-    bind_addr.sin6_addr = in6addr_any;
-    bind_addr.sin6_port = 0;
+    rc = packet_io_fill_bind_addr(&bind_addr, cfg);
+    if (rc != RTC_OK) {
+        rtc_close_socket(s);
+        return rc;
+    }
     if (bind(s, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
         RTC_LOG_ERR("Transport: bind failed");
         rtc_close_socket(s);
@@ -516,7 +549,7 @@ int rtc_packet_io_init(rtc_packet_io_t *t, rtc_packet_io_recv_fn on_recv, void *
     }
 
     /* Set non-blocking for use with poller */
-    int rc = rtc_set_nonblocking(s);
+    rc = rtc_set_nonblocking(s);
     if (rc != RTC_OK) {
         rtc_close_socket(s);
         return rc;
