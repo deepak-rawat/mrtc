@@ -10,15 +10,17 @@
 ├──────────────────────────────────────┤
 │          Media Pipeline              │  media/ (codecs, jitter, packetizer)
 ├──────────────────────────────────────┤
-│          Peer Connection API         │  rtc/ (codec-agnostic transport)
+│   Client Peer API  │  SFU API        │  rtc/ public surfaces
+├──────────────────────────────────────┤
+│ Runtime Transport Core               │  worker, listener, router, logical transport
 ├──────────┬───────────┬───────────────┤
-│   SDP    │  RTP/RTCP │  SRTP + DC    │
+│   SDP    │  RTP/RTCP │  SRTP + DC    │  protocol primitives
 ├──────────┴───────────┴───────────────┤
 │        DTLS (OpenSSL 3.0+)           │
 ├──────────────────────────────────────┤
-│   ICE Agent + STUN / TURN Client    │
+│   ICE/STUN checks + TURN Client      │
 ├──────────────────────────────────────┤
-│     Transport (epoll/kqueue/select)  │
+│     Packet I/O (epoll/kqueue/select) │
 ├──────────────────────────────────────┤
 │     Platform Abstraction             │  common/ (sockets, threads, logging)
 └──────────────────────────────────────┘
@@ -33,6 +35,12 @@ payloads. The `media` library is a separate layer providing codecs, packetizers,
 and pipeline orchestration — it depends on `rtc` and uses its typed
 `rtc_rtp_sender_t*` interface directly (no callback indirection).
 
+The runtime transport core is now always built into `libmrtc`. Both the client
+peer-connection facade and the SFU public API use the same worker, shared UDP
+listener, logical transport, router, producer, and consumer implementation. The
+`MRTC_ENABLE_SFU_API` CMake option controls whether SFU public headers are
+exposed through the umbrella API, not whether the runtime core exists.
+
 All public API functions use the `rtc_` prefix.
 
 ## Project Structure
@@ -43,7 +51,7 @@ All public API functions use the `rtc_` prefix.
 │   ├── include/rtc/        #   rtc_common.h — sockets, threads, errors, logging
 │   └── src/
 ├── rtc/                    # Core transport library (libmrtc)
-│   ├── include/rtc/        #   rtc_peer.h, rtc_track.h — public API surface
+│   ├── include/rtc/        #   rtc_peer.h, rtc_track.h, rtc_sfu.h — public API surface
 │   ├── src/                #   private helpers (rtc_stun.h, rtc_turn.h), ICE, DTLS,
 │   │                       #   SRTP, rate control, NACK buffer, TWCC, BWE
 │   └── tests/              #   18 test executables
@@ -82,11 +90,11 @@ Each component has its own `ARCHITECTURE.md` with detailed design, API, and usag
 ## How a WebRTC Connection Works
 
 1. **Signaling** — Exchange SDP offer/answer between peers via WebSocket
-2. **ICE Gathering** — Each peer discovers its network addresses (host, server-reflexive)
-3. **ICE Connectivity Checks** — Peers probe each other's candidates with STUN
+2. **Runtime Candidate Setup** — The shared listener exposes local UDP candidates and ICE credentials
+3. **ICE Connectivity Checks** — Logical transports probe each other's candidates with STUN
 4. **DTLS Handshake** — Encrypted channel established over the working ICE pair
 5. **SRTP Key Export** — DTLS provides keying material for SRTP
-6. **Media Flow** — RTP packets encrypted with SRTP flow over the ICE transport
+6. **Media Flow** — RTP packets encrypted with SRTP flow over the selected logical transport
 
 ## Library Dependencies
 

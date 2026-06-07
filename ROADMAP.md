@@ -19,10 +19,11 @@ and pipeline orchestration — it depends on `rtc` and uses its public types dir
 │         holds rtc_rtp_sender_t* directly (typed)          │
 ├───────────────────────────────────────────────────────────┤
 │  rtc (core, codec-agnostic)                               │
-│    ├─ RTCPeerConnection, RTCRtpSender/Receiver            │
-│    ├─ ICE, DTLS 1.2, SRTP (AES-128-CM)                   │
-│    ├─ RTCP SR/RR, SDP, Data Channels                     │
-│    └─ STUN client + external TURN relay support          │
+│    ├─ Runtime transport: worker/listener/router/transport │
+│    ├─ Client API: RTCPeerConnection, sender/receiver      │
+│    ├─ SFU API: router, logical transport, producer/consumer│
+│    ├─ ICE/STUN checks, DTLS 1.2, SRTP (AES-128-CM)        │
+│    └─ RTCP SR/RR, SDP, Data Channels, TURN client         │
 ├───────────────────────────────────────────────────────────┤
 │  signaling (WebSocket client + server)                    │
 ├───────────────────────────────────────────────────────────┤
@@ -38,13 +39,16 @@ and pipeline orchestration — it depends on `rtc` and uses its public types dir
 RTP/RTCP SR/RR, RTP header extensions (RFC 8285 one-byte form), SDP (multi-media
 with `a=extmap:` negotiation), data channels (wire protocol with OPEN/ACK
 handshake, up to 16 concurrent channels), peer connection with automatic
-ICE→DTLS→SRTP on both descriptions set. STUN binding, TURN client (allocate,
+ICE→DTLS→SRTP on both descriptions set. The peer facade and SFU APIs share the
+same always-built runtime transport core: worker, shared UDP listener, router,
+logical transport, producers, and consumers. STUN binding, TURN client (allocate,
 channel bind, channel data). Per-sender AIMD rate control driven by RTCP RR.
 RTCP feedback (NACK / PLI / FIR) with per-video NACK retransmit buffer.
 Transport-Wide Congestion Control end-to-end (draft-holmer-rmcat-transport-wide-cc):
 sender tagging, periodic feedback, parser. Per-peer Google Congestion Control
 bandwidth estimator (delay trendline + loss controller) exposed via
-`rtc_peer_connection_on_bitrate_estimate()`.
+`rtc_peer_connection_on_bitrate_estimate()`. Trickle candidate ingestion through
+`rtc_peer_connection_add_ice_candidate()` is implemented.
 
 **Media** — VP8 encode/decode (libvpx), Opus encode/decode (libopus),
 VP8 RTP packetizer/depacketizer (RFC 7741), jitter buffer, AIMD rate control,
@@ -64,7 +68,8 @@ connection lifecycle.
 tiled video grid, keyboard controls. Chat app (terminal) for text messaging
 over data channels.
 
-**Tests** — 31 test executables, 239 individual test cases covering all components.
+**Tests** — 40 test executables covering protocol primitives, runtime transport,
+client peer connections, SFU media forwarding, media, signaling, and apps.
 
 ---
 
@@ -158,8 +163,9 @@ Media pipeline wires: `on_pli` → `video_encoder_request_keyframe()`.
 
 **2.4 — RTCP dispatch in peer connection**
 
-Wire `peer_transport_recv` to parse RTCP packet type and dispatch to matching
-sender/receiver callbacks.
+Runtime logical transports deliver plaintext RTCP to `peer_handle_plain_rtcp`,
+which parses RTCP packet type and dispatches to matching sender/receiver
+callbacks.
 
 **2.5 — Per-sender rate control + RR demux**
 
@@ -265,7 +271,8 @@ int rtc_rtp_receiver_get_stats(receiver, out);
 
 ### Phase 6: ICE Improvements
 
-- ICE trickle — send candidates as gathered instead of all-in-SDP
+- ICE gathering is still synchronous for local candidates; remote trickle
+    candidate ingestion is implemented through `rtc_peer_connection_add_ice_candidate()`
 - TURN relay candidate integration into ICE gathering
 - ICE-controlled role support (currently always controlling)
 
@@ -282,7 +289,8 @@ int rtc_rtp_receiver_get_stats(receiver, out);
 
 ### Phase 8: Scale
 
-- SFU server (selective forwarding unit) — enables 10+ participants
+- Full SFU server application on top of the runtime router/producer/consumer APIs
+    — enables 10+ participants
 - Simulcast (multi-layer encode, SDP `a=simulcast:` + `a=rid:`)
 - Server-side recording (WebM mux of VP8+Opus)
 

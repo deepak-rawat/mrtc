@@ -14,7 +14,7 @@ Status of each IETF RFC relevant to the WebRTC protocol stack as implemented in 
 | [RFC 3550](#rfc-3550--rtprtcp) | RTP / RTCP | ⚠️ Partial | ~50% | Updated by 10 RFCs |
 | [RFC 3711](#rfc-3711--srtp) | SRTP | ⚠️ Partial | ~75% | Updated by 6904, 8723 |
 | [RFC 4566](#rfc-4566--sdp) | SDP | ⚠️ Partial | ~70% | **Obsoleted by 8866** |
-| [RFC 4585](#rfc-4585--rtcp-feedback) | RTCP Feedback (NACK, PLI, FIR) | ❌ Not Impl | 0% | Updated by 5506, 8108 |
+| [RFC 4585](#rfc-4585--rtcp-feedback) | RTCP Feedback (NACK, PLI, FIR) | ⚠️ Partial | NACK/PLI/FIR implemented | Updated by 5506, 8108 |
 | [RFC 5109](#rfc-5109--ulpfec) | UlpFEC | ❌ Not Impl | 0% | Current |
 | [RFC 5389](#rfc-5389--stun) | STUN | ✅ Implemented | ~95% | **Obsoleted by 8489** |
 | [RFC 5764](#rfc-5764--dtls-srtp) | DTLS-SRTP | ✅ Implemented | ~95% | Updated by 7983 |
@@ -173,16 +173,15 @@ Files: `rtc/src/rtc_sdp.c`, `rtc/include/rtc/rtc_sdp.h`
 | 5.9 | `z=` (time zones) | Not generated |
 | 5.10 | `k=` (encryption keys) — deprecated | Not generated (correct to omit) |
 | — | `a=fmtp:` (format parameters) | Not generated; no codec-specific params |
-| — | `a=extmap:` (RTP header extensions) | Not generated; needed for transport-cc, abs-send-time |
-| — | `a=ssrc:` (SSRC attributes) | Not generated |
+| — | `a=extmap:` (RTP header extensions) | Generated and parsed for negotiated RTP extensions |
+| — | `a=ssrc:` (SSRC attributes) | Generated and parsed for audio/video media |
 | — | `a=rtcp-fb:` (RTCP feedback capabilities) | Not generated; needed for NACK/PLI/FIR |
-| — | `a=ice-options:trickle` | No trickle ICE support |
+| — | `a=ice-options:trickle` | Generated and parsed |
 | — | Full SDP parsing | Minimal parser sufficient for WebRTC; not RFC-complete |
 
-### Known Bugs
+### Known Limitations
 
-- **Buffer overflow in `sdp_write_media_section`**: `*remain -= n` unsigned underflow wraps to `SIZE_MAX`, causing writes past `sdp->raw[8192]`. Remote-triggerable via many candidates.
-- **Parse underflow in `rtc_sdp_parse`**: `vlen = line_len - prefix_len` underflows when `line_len < prefix_len`, causing massive `memcpy` overflow.
+- SDP parsing remains intentionally minimal and accepts only the subset needed by this stack.
 - **Relay candidates labeled "host"**: Missing `ICE_CANDIDATE_RELAY` case defaults to "host" type string.
 
 ---
@@ -194,14 +193,12 @@ Files: `rtc/src/rtc_sdp.c`, `rtc/include/rtc/rtc_sdp.h`
 > **Updated by:** RFC 5506 (allows reduced-size RTCP-FB without compound), RFC 8108 (SSRC-specific attributes).
 > Still the base specification — not obsoleted.
 
-📋 **Planned for Phase 2** (see ROADMAP.md)
-
 | Feature | Status |
 |---------|--------|
-| Generic NACK (negative acknowledgement) | ❌ Not implemented |
-| PLI (Picture Loss Indication) | ❌ Not implemented |
-| FIR (Full Intra Request) | ❌ Not implemented |
-| NACK retransmit buffer | ❌ Not implemented |
+| Generic NACK (negative acknowledgement) | ✅ Build, parse, dispatch implemented |
+| PLI (Picture Loss Indication) | ✅ Build, parse, dispatch implemented |
+| FIR (Full Intra Request) | ✅ Build, parse, dispatch implemented |
+| NACK retransmit buffer | ✅ Per-video sender buffer with logical raw retransmit |
 | `a=rtcp-fb:` SDP negotiation | ❌ Not implemented |
 
 ---
@@ -479,15 +476,15 @@ Files: `media/src/vp8_packetizer.c`, `media/src/vp8_packetizer.h`, `media/src/co
 
 **"Multiplexing Scheme Updates for Secure Real-time Transport Protocol (SRTP) Extension for Datagram Transport Layer Security (DTLS)"**
 
-Files: `rtc/src/rtc_transport.c`
+Files: `rtc/src/rtc_transport.c`, `rtc/src/rtc_listener.c`
 
 ### Implemented
 
 | Feature | Notes |
 |---------|-------|
 | First-byte classification | Full demux table: STUN (0–3), DTLS (20–63), TURN ChannelData (64–79), RTP/RTCP (128–191) |
-| Single UDP socket multiplexing | All protocols share one transport socket |
-| Callback dispatch per packet type | Registered handlers for STUN, DTLS, RTP |
+| Single UDP socket multiplexing | Shared listeners demux many logical transports on one UDP socket |
+| Callback dispatch per packet type | STUN routed by ufrag/transaction, DTLS/RTP/RTCP routed by selected tuple |
 
 > **Fully compliant** with RFC 7983 packet classification.
 
@@ -499,7 +496,7 @@ Files: `rtc/src/rtc_transport.c`
 
 > **Updated by:** RFC 8863 (Trickle ICE, January 2021). Defines incremental candidate
 > exchange during gathering. Migration effort: **medium** — requires implementing
-> `add_ice_candidate()` (currently a stub), SDP `a=ice-options:trickle`, and
+> `add_ice_candidate()`, SDP `a=ice-options:trickle`, and
 > `a=end-of-candidates` signaling.
 
 Files: `rtc/src/rtc_ice.c`, `rtc/src/rtc_ice.h`
@@ -516,14 +513,16 @@ Files: `rtc/src/rtc_ice.c`, `rtc/src/rtc_ice.h`
 | — | ICE credential generation | Random `ufrag` and `pwd` |
 | — | State machine | NEW → GATHERING → CHECKING → CONNECTED / FAILED / CLOSED |
 | — | ICE-controlling role | Always controlling with tie-breaker |
-| — | Remote credential and candidate storage | From SDP parsing |
+| — | Remote credential and candidate storage | From SDP parsing and trickled candidates |
+| RFC 8863 | Trickle candidate ingestion | `rtc_peer_connection_add_ice_candidate()` parses and stores remote candidates |
+| RFC 8839 | `a=ice-options:trickle` | Emitted and parsed |
 
 ### Not Implemented
 
 | Section | Feature | Impact |
 |---------|---------|--------|
 | 5.1.1.2 | **Relay (TURN) candidate gathering** | TURN client exists but not wired into ICE gather |
-| 5.1.3 | **Trickle ICE** | All candidates gathered before offer; no incremental signaling |
+| 5.1.3 | **Full local trickle gathering** | Local candidates are still emitted synchronously today |
 | 7.3 | **ICE-controlled role** | Always controlling; no role negotiation with peer |
 | 7.2.5.3 | Triggered checks | Not implemented |
 | 8 | **Regular nomination** | Simplified: first successful check wins |
@@ -531,14 +530,14 @@ Files: `rtc/src/rtc_ice.c`, `rtc/src/rtc_ice.h`
 | 6 | Candidate pair formation / checklist ordering | Simplified: ordered by priority, not full pair algorithm |
 | 7.2.5.2.2 | Peer reflexive candidate discovery | Not implemented |
 | 11 | ICE keepalives (STUN Binding Indications) | Not implemented |
-| 12 | ICE restart | Not implemented |
+| 12 | ICE restart after connection | Restart is supported only before connection start |
 | — | Multiple components (RTP + RTCP) | Single component only (RTCP-mux assumed) |
 | — | IPv6 candidate gathering | Not implemented |
-| — | `a=end-of-candidates` signaling | Not implemented |
+| — | `a=end-of-candidates` signaling | End-of-candidates is signaled via NULL callback, not SDP attribute |
 
-### Known Bug
+### Known Limitations
 
-- **ICE/transport socket race**: Synchronous `recvfrom()` in ICE on same socket that transport thread polls. Either thread can steal packets.
+- ICE checklist, nomination, role conflict, and consent freshness remain simplified.
 
 ---
 
@@ -557,16 +556,16 @@ Files: `rtc/src/rtc_peer.c`, `rtc/include/rtc/rtc_peer.h`
 | `setLocalDescription()` | Applies local SDP, starts ICE gathering |
 | `setRemoteDescription()` | Applies remote SDP, starts connection if both set |
 | `addTrack()` | Creates transceiver with sendrecv direction |
+| `removeTrack()` | Marks sender inactive and updates transceiver direction before connection start |
 | `addIceCandidate()` | Adds trickle ICE candidate |
 | Signaling state machine | stable → have-local-offer → stable (on answer) |
-| Automatic ICE+DTLS+SRTP after both descriptions set | Connection starts on transport thread |
+| Automatic ICE+DTLS+SRTP after both descriptions set | Connection starts on the runtime logical transport |
 
 ### Not Implemented
 
 | Feature | Notes |
 |---------|-------|
-| `removeTrack()` | No track removal |
-| `restartIce()` | No ICE restart |
+| `restartIce()` after connection | Pre-connect restart exists; post-connect ICE restart is not supported |
 | Rollback (set local desc type="rollback") | Not supported |
 | `getTransceivers()` returns copy | Returns direct pointers |
 | Renegotiation (subsequent offer/answer) | Not supported |
@@ -594,10 +593,10 @@ Files: `rtc/src/rtc_peer.c`, `rtc/src/rtc_rtp.c`
 
 | Feature | Notes |
 |---------|-------|
-| RTP header extensions | No `abs-send-time`, `transport-cc`, `mid`, `audio-level` |
+| RTP header extensions | `transport-cc` and abs-send-time helpers exist; `mid` and audio-level are not wired |
 | Reduced-size RTCP | Always full-size SR/RR |
-| Bandwidth adaptation based on RTCP | AIMD only; no GCC/Transport-CC |
-| SSRC multiplexing per spec | O(n) lookup, no proper demux table |
+| Bandwidth adaptation based on RTCP | GCC/Transport-CC implemented; encoder auto-wiring remains app-owned |
+| SSRC multiplexing per spec | SSRC maps are used for peer sender/receiver demux |
 
 ---
 
@@ -621,7 +620,7 @@ Files: `rtc/src/rtc_sdp.c`
 
 | Feature | Notes |
 |---------|-------|
-| `a=ice-options:trickle` | No trickle ICE |
+| `a=ice-options:trickle` | Emitted and parsed |
 | `a=ice-lite` | Not supported |
 | `a=end-of-candidates` | Not signaled |
 | `a=remote-candidates` | Not supported |
@@ -632,15 +631,15 @@ Files: `rtc/src/rtc_sdp.c`
 
 **"RTP Control Protocol (RTCP) Feedback for Congestion Control"**
 
-📋 **Planned for Phase 3** (see ROADMAP.md)
+Implemented for the draft-holmer transport-wide CC wire format used by the stack.
 
 | Feature | Status |
 |---------|--------|
-| Transport-wide sequence numbers | ❌ Not implemented |
-| `abs-send-time` RTP header extension | ❌ Not implemented |
-| RTCP Transport Feedback packets | ❌ Not implemented |
-| Delay-based bandwidth estimation | ❌ Not implemented |
-| Google Congestion Control (GCC) | ❌ Not implemented |
+| Transport-wide sequence numbers | ✅ Implemented |
+| `abs-send-time` RTP header extension helper | ✅ Implemented helper |
+| RTCP Transport Feedback packets | ✅ Build + parse implemented |
+| Delay-based bandwidth estimation | ✅ Simplified GCC trendline estimator |
+| Google Congestion Control (GCC) | ✅ Delay + loss controller implemented |
 
 ---
 
@@ -722,12 +721,10 @@ successors, ordered by priority.
 
 ### Phase C: ICE Improvements
 
-#### C1 — Trickle ICE (RFC 8863)
+#### C1 — Full Trickle ICE Gathering (RFC 8863)
 - **Why now:** All browsers use trickle ICE. Current all-in-SDP approach adds latency.
 - **Work:**
-  - Implement `rtc_peer_connection_add_ice_candidate()` (currently a stub)
-  - Send candidates as gathered via `on_ice_candidate` callback
-  - Add `a=ice-options:trickle` to SDP generation/parsing
+  - Emit local candidates incrementally as gathering discovers them
   - Add `a=end-of-candidates` signaling
   - Handle dynamic checklist updates as remote candidates arrive
 - **Files:** `rtc/src/rtc_ice.c`, `rtc/src/rtc_peer.c`, `rtc/src/rtc_sdp.c`

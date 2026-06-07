@@ -22,7 +22,9 @@ orchestration on top. All public API functions use the `rtc_` prefix.
 - **GCC bandwidth estimator** — trendline + loss controller; exposes target via callback
 - **SDP** — multi-media session description (audio + video + data channels)
 - **Data Channels** — message framing over DTLS (OPEN/ACK handshake, up to 16 channels)
-- **Peer Connection** — high-level WebRTC API
+- **Runtime transport core** — worker, shared UDP listener, logical transports, router, producer, consumer
+- **Peer Connection** — high-level client API backed by the same runtime transport core used by SFU APIs
+- **SFU primitives** — shared listener, router, logical transports, producers, and consumers for server-side media forwarding
 - **VP8** (libvpx) + **Opus** (libopus) — video/audio codecs with RTP packetization
 - **Media pipeline** — encode-once fan-out, jitter buffer, per-sender rate control
 - **Conference library** — multi-peer orchestration
@@ -56,6 +58,20 @@ pacman -S mingw-w64-ucrt-x86_64-{gcc,cmake,openssl,ninja,libwebsockets,cjson}
 mkdir build && cd build && cmake -G Ninja .. && ninja
 ```
 
+Build options:
+
+| Option | Default | Notes |
+|---|---:|---|
+| `MRTC_ENABLE_CLIENT_API` | `ON` | Builds peer connection, tracks, and data-channel APIs |
+| `MRTC_ENABLE_SFU_API` | `ON` | Exposes SFU public headers and SFU-focused tests |
+| `MRTC_ENABLE_TWCC` | `ON` | Builds transport-wide CC and GCC bandwidth estimator |
+| `MRTC_ENABLE_RATE_CONTROL` | `ON` | Builds RR-based AIMD sender rate control |
+
+The runtime transport core is always part of `libmrtc`. Client peer connections
+and SFU APIs both use the same worker/listener/router/logical-transport stack;
+`MRTC_ENABLE_SFU_API` controls public SFU API exposure, not whether the runtime
+implementation is compiled.
+
 ## Running
 
 ```bash
@@ -71,15 +87,16 @@ mkdir build && cd build && cmake -G Ninja .. && ninja
 
 ## Tests
 
-31 executables, 239 individual test cases. No external framework.
+40 test executables. No external framework.
 
 ```bash
 # Run all tests (from build/)
-for t in rtc/test_*.exe media/test_*.exe signaling/test_*.exe; do ./$t; done
+ctest --output-on-failure
 
 # Or individually
 ./rtc/test_stun
 ./rtc/test_peer
+./rtc/test_sfu_transport
 ./media/test_media_pipeline
 ./signaling/test_signaling
 ```

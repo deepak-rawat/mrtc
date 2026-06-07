@@ -1,6 +1,8 @@
 # Core Transport Library (libmrtc)
 
-The core library implements the WebRTC protocol stack: ICE, DTLS, SRTP, RTP, RTCP, SDP, data channels, and peer connection management.
+The core library implements the WebRTC protocol stack: STUN/ICE checks, DTLS,
+SRTP, RTP, RTCP, SDP, data channels, the client peer facade, and the shared
+runtime transport used by both client and SFU APIs.
 
 Follows the **Pion model**: codec-agnostic at the RTP payload level. Senders take already-encoded payloads. Receivers deliver raw RTP payloads. Encoding/decoding is handled by the optional `media` library on top.
 
@@ -68,17 +70,19 @@ rtc_cleanup();
 
 ```
 ┌────────────────────────────────────┐
-│      Peer Connection API           │  rtc_peer.h/c
+│ Client Peer API │ SFU API          │  rtc_peer.h/c, rtc_sfu.h
+├────────────────────────────────────┤
+│ Runtime Transport Core             │  worker, listener, router, transport
 ├────────────────────────────────────┤
 │  SDP │ RTP │ SRTP │ Track/DC       │  rtc_sdp, rtc_rtp, rtc_srtp, rtc_track, rtc_data_channel
 ├────────────────────────────────────┤
 │  DTLS (OpenSSL)                    │  rtc_dtls.h/c
 ├────────────────────────────────────┤
-│  ICE Agent                         │  rtc_ice.h/c
+│  ICE/STUN Checks                   │  rtc_stun.h/c, rtc_transport.c
 ├────────────────────────────────────┤
 │  STUN Client / TURN Client         │  rtc_stun.h/c, rtc_turn.h/c
 ├────────────────────────────────────┤
-│  Transport Layer (UDP + Threading) │  rtc_packet_io.h/c
+│  Packet I/O (UDP + Threading)      │  rtc_packet_io.h/c
 ├────────────────────────────────────┤
 │  Platform Poller (epoll/kqueue)    │  rtc_poller.h/c
 └────────────────────────────────────┘
@@ -92,20 +96,37 @@ Public headers:
 - `rtc_peer.h` — `RTCPeerConnection` (lifecycle, SDP, ICE callbacks)
 - `rtc_track.h` — `RTCRtpSender` / `Receiver` / `Transceiver`
 - `rtc_data_channel.h` — `RTCDataChannel`
+- `rtc_worker.h`, `rtc_listener.h`, `rtc_router.h`, `rtc_transport.h` — runtime transport/SFU primitives
+- `rtc_producer.h`, `rtc_consumer.h`, `rtc_rtp_params.h` — SFU media graph types
 - `rtc_stats.h` — `getStats()` snapshot reporting (RFC 7867 / W3C webrtc-stats subset)
 - `rtc.h` — umbrella include
 
 ## Module Details
 
-### Transport Layer (`rtc_packet_io.h/c`)
+### Runtime Transport Core
 
-Owns the UDP socket and runs a background thread with a platform I/O poller.
+The runtime core is always built into `libmrtc`. It is the only network runtime
+used by the client peer facade and is also the public SFU foundation.
+
+- **`rtc_worker_t`** — timer/scheduling shard used by logical transports.
+- **`rtc_listener_t`** — owns a UDP packet I/O socket and demux maps. One listener can serve many logical transports on the same local port.
+- **`rtc_router_t`** — media routing graph for SFU-style producer/consumer forwarding.
+- **`rtc_transport_t`** — one logical ICE/DTLS/SRTP endpoint over a shared listener. Handles ICE-lite responses, full ICE checks, DTLS, SRTP/SRTCP, RTP/RTCP callbacks, and DTLS application data.
+- **`rtc_producer_t` / `rtc_consumer_t`** — inbound and outbound media graph edges for SFU forwarding.
+
+Client `rtc_peer_connection_t` creates a private worker/listener/router/transport internally. SFU users can create those same primitives directly when `MRTC_ENABLE_SFU_API` exposes the SFU public headers.
+
+### Packet I/O (`rtc_packet_io.h/c`)
+
+Owns a UDP socket and runs a background thread with a platform I/O poller. It is
+now a low-level primitive used by `rtc_listener_t`, not a peer-connection
+transport by itself.
 
 - **Socket:** single UDP socket, bound to an ephemeral port
 - **I/O Poller:** `rtc_poller_t` — epoll (Linux), kqueue (macOS), select (Windows)
 - **Background thread:** runs the poller loop, fires timers, dispatches packets
 - **Packet demux:** classifies incoming packets per RFC 7983 by first byte — STUN (0-3), DTLS (20-63), RTP/RTCP (128-191), TURN ChannelData (64-79)
-- **Timers:** up to 16 scheduled callbacks (used for DTLS retransmit, ICE checks)
+- **Timers:** dynamic scheduler-backed callbacks; runtime transports use worker timers for ICE/DTLS/RTCP flows
 
 Packet flow:
 ```
@@ -113,11 +134,16 @@ Recv:  UDP socket → demux (RFC 7983) → callback(type, data, from_addr)
 Send:  rtc_packet_io_send(data, dest) → UDP sendto (thread-safe)
 ```
 
-Key functions: `rtc_packet_io_init()`, `rtc_packet_io_send()`, `rtc_packet_io_set_remote()`
+Key functions: `rtc_packet_io_init_ex()`, `rtc_packet_io_send()`, `rtc_packet_io_get_local_addr()`.
 
-### ICE Agent (`rtc_ice.h/c`)
+### ICE / STUN
 
-Handles candidate gathering and connectivity checks.
+The runtime transport implements the active logical ICE path used by peers and
+SFU transports. It registers listener demux routes by local ufrag, STUN
+transaction ID, and selected remote tuple.
+
+The older `rtc_ice.h/c` agent remains as a protocol component and test target,
+but `rtc_peer_connection_t` no longer owns an `rtc_ice_agent_t`.
 
 **Candidate types:**
 | Type | Gathering method |
@@ -127,12 +153,10 @@ Handles candidate gathering and connectivity checks.
 | RELAY | TURN allocation (not yet wired into gathering) |
 
 **Algorithm:**
-1. Gather local candidates (host + STUN server-reflexive)
-2. When remote SDP arrives, parse credentials + remote candidates
-3. Run connectivity checks: STUN Binding Requests ordered by priority
-4. First successful pair → selected, transport gets `remote_addr`
-
-All ICE work runs on the transport thread via callbacks. Main thread reads `selected_remote` after `ICE_STATE_CONNECTED`.
+1. Listener exposes local host candidates and transport ICE credentials.
+2. Remote SDP/trickle candidates populate the logical transport.
+3. Full ICE transports send Binding Requests; ICE-lite transports answer Binding Requests.
+4. First successful tuple becomes the selected remote tuple and routes DTLS/RTP/RTCP.
 
 ### STUN / TURN (`rtc/src/rtc_stun.h/c`, `rtc/src/rtc_turn.h/c`)
 
@@ -174,11 +198,11 @@ AES-128-CM encryption with HMAC-SHA1-80 authentication (RFC 3711).
 
 **Thread safety.** `rtc_srtp_protect` / `rtc_srtp_unprotect` /
 `rtc_srtp_protect_rtcp` / `rtc_srtp_unprotect_rtcp` serialize on a per-context
-mutex (`rtc_srtp_ctx_t::lock`). The send-side context is touched by both the
-encoder thread (RTP send) and the transport thread (RTCP SR/RR + TWCC
-feedback timers, NACK retransmits); concurrent updates of `roc` / `last_seq`
-/ `srtcp_index` would otherwise reuse the AES-CM keystream, which breaks
-confidentiality. `init` and `close` are not thread-safe and must not race
+mutex (`rtc_srtp_ctx_t::lock`). Runtime transports own SRTP/SRTCP protection;
+RTP sends, RTCP SR/RR emission, TWCC feedback, and NACK retransmits can touch the
+same context from different runtime callbacks. Concurrent updates of `roc` /
+`last_seq` / `srtcp_index` would otherwise reuse the AES-CM keystream, which
+breaks confidentiality. `init` and `close` are not thread-safe and must not race
 with protect/unprotect calls.
 
 Key functions: `rtc_srtp_init()`, `rtc_srtp_protect()`, `rtc_srtp_unprotect()`
@@ -211,11 +235,11 @@ Offer/Answer generation and parsing (RFC 4566 WebRTC subset).
 
 RTP sender/receiver per media line. Opaque types — internal structs in `rtc_track.c`.
 
-- **`rtc_rtp_sender_t`** — takes encoded payload, builds RTP header, SRTP-protects, sends via transport. Runs on main thread.
+- **`rtc_rtp_sender_t`** — takes encoded payload, builds RTP header, and sends through a logical transport. The transport owns SRTP protection and selected tuple routing. Runs on main thread.
   ```c
   rtc_rtp_sender_send(sender, payload, len, samples, marker);
   ```
-- **`rtc_rtp_receiver_t`** — delivers raw RTP payloads (after SRTP unprotect) via callback on transport thread. Includes seq, timestamp, SSRC, and marker.
+- **`rtc_rtp_receiver_t`** — delivers raw RTP payloads after runtime SRTP unprotect via callback. Includes seq, timestamp, SSRC, and marker.
   ```c
   typedef void (*rtc_on_frame_fn)(const uint8_t *payload, size_t len,
                                   uint16_t seq, uint32_t timestamp,
@@ -249,7 +273,7 @@ Key functions: `rtc_rate_control_create()`, `rtc_rate_control_on_rtcp_rr()`, `rt
 
 ### NACK retransmit buffer (`rtc_nack_buf.h/c`)
 
-512-packet ring buffer per video sender, indexed by RTP sequence number. Stores post-SRTP packets so an incoming Generic NACK (RFC 4585 §6.2.1) can be served by re-sending the original wire packet via `rtc_packet_io_send_to_remote()` without re-encrypting. Created on connect for `RTC_KIND_VIDEO` senders.
+512-packet ring buffer per video sender, indexed by RTP sequence number. Stores post-SRTP packets so an incoming Generic NACK (RFC 4585 §6.2.1) can be served by re-sending the original wire packet through `rtc_transport_send_raw()` without re-encrypting. Created on connect for `RTC_KIND_VIDEO` senders.
 
 ### Transport-Wide CC (`rtc_twcc_sender.h/c`, `rtc_twcc_receiver.h/c`)
 
@@ -276,14 +300,15 @@ One `rtc_bwe_t` per peer is created when transport-cc is negotiated. `rtc_peer.c
 
 ### Peer Connection (`rtc_peer.h/c`)
 
-High-level WebRTC-style API (mirrors RTCPeerConnection). Owns all other components:
+High-level WebRTC-style API (mirrors RTCPeerConnection). It is a facade over the
+same runtime transport core used by the SFU API:
 
 ```c
 struct rtc_peer_connection {
-    rtc_packet_io_t transport;            // Socket + I/O thread
-    rtc_ice_agent_t ice;                  // Candidate management
-    rtc_dtls_transport_t dtls;            // Handshake + key export
-    rtc_srtp_ctx_t srtp_send, srtp_recv;  // Encryption contexts
+  rtc_worker_t *runtime_worker;         // Runtime timer/scheduling shard
+  rtc_listener_t *runtime_listener;     // Shared UDP listener
+  rtc_router_t *runtime_router;         // Private routing graph
+  rtc_transport_t *runtime_transport;   // Logical ICE/DTLS/SRTP endpoint
     rtc_rtp_transceiver_t transceivers[8]; // Media tracks
     rtc_dc_manager_t dc_manager;          // Data channels
     rtc_rate_controller_t *rate_ctrl;     // AIMD rate control
@@ -295,18 +320,19 @@ struct rtc_peer_connection {
 };
 ```
 
-**Lifecycle:** create → add_track → create_offer → set_local_desc → (signal) → set_remote_desc → (auto: ICE → DTLS → SRTP) → send media → close → destroy
+**Lifecycle:** create → add_track → create_offer → set_local_desc → (signal) → set_remote_desc → (auto: runtime ICE → DTLS → SRTP) → send media → close → destroy
 
 ## Threading Model
 
 - **Main thread:** API calls, frame capture, UI rendering
-- **Transport thread:** protocol state machine, socket I/O, packet callbacks
+- **Listener packet I/O thread:** socket I/O, RFC 7983 demux, listener route dispatch
+- **Worker timers:** logical transport ICE checks, DTLS retransmission, peer RTCP/TWCC timers
 - Peer connection uses C11 `_Atomic` state flags for cross-thread observation
   (plain reads/writes are seq_cst, giving acquire/release publication of any
   protocol state written before the state transition).
-- Transport `timer_mutex` protects the timer slot table; callback
-  registration is set-once at init (no lock needed) and remote-address
-  publication uses an atomic release/acquire flag.
+- Packet I/O uses the dynamic timer scheduler for low-level callbacks. Runtime
+  transports use worker timers and listener route maps rather than peer-owned
+  packet I/O timers.
 
 ## Tests
 
@@ -330,12 +356,19 @@ struct rtc_peer_connection {
 | `test_data_channel` | Channel open/close, message send/recv |
 | `test_turn` | TURN allocation, ChannelData framing, credentials |
 | `test_rate_control` | AIMD algorithm, bitrate adaptation, keyframe requests |
+| `test_worker` | Runtime worker lifecycle and timer scheduling |
+| `test_listener` | Shared UDP listener candidates, demux, stats |
+| `test_sfu_transport` | Logical transport ICE-lite, DTLS/SRTP, RTP/RTCP/data hooks |
+| `test_sfu_ice` | Full ICE transport connecting to ICE-lite transport |
+| `test_sfu_media` | Producer/consumer media graph forwarding |
+| `test_sfu_timers` | Runtime timer behavior |
+| `test_sfu_sender` | Peer RTP sender over logical transport |
 
 ## Known Limitations
 
-- No trickle ICE (all candidates gathered before offer; `add_ice_candidate()` is a stub)
+- Local candidates are still produced synchronously; remote trickle candidate ingestion is implemented
 - TURN relay candidates not yet wired into ICE gathering
 - Always ICE-controlling role (no nomination negotiation)
 - No RTCP compound packets (single SR or RR per interval)
-- No SRTP replay protection on RTCP path
+- No full SRTP/SRTCP replay hardening audit yet
 - BWE bitrate is exposed via callback but not auto-wired to media pipeline encoder bitrate (apps subscribe explicitly)
