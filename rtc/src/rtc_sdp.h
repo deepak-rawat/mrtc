@@ -127,6 +127,7 @@ int rtc_sdp_add_candidate(rtc_sdp_t *sdp, const rtc_ice_candidate_t *c);
 /* Candidate accessors. */
 size_t rtc_sdp_candidate_count(const rtc_sdp_t *sdp);
 const rtc_ice_candidate_t *rtc_sdp_get_candidate(const rtc_sdp_t *sdp, size_t idx);
+int rtc_sdp_parse_candidate_line(const char *line, rtc_ice_candidate_t *out);
 
 /* extmap helpers */
 int rtc_sdp_media_add_extmap(rtc_sdp_media_t *m, uint8_t id, const char *uri);

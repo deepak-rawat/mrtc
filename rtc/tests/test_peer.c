@@ -191,6 +191,34 @@ TEST(peer_ice_candidates) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: add_ice_candidate parses trickled candidates                 */
+/* ------------------------------------------------------------------ */
+TEST(peer_add_ice_candidate) {
+    rtc_config_t config;
+    memset(&config, 0, sizeof(config));
+
+    rtc_peer_connection_t *pc = rtc_peer_connection_create(&config);
+    ASSERT(pc != NULL);
+
+    rtc_ice_candidate_desc_t cand;
+    memset(&cand, 0, sizeof(cand));
+    strcpy(cand.candidate, "candidate:H0 1 udp 2130706431 127.0.0.1 50000 typ host");
+    strcpy(cand.mid, "0");
+    cand.mid_index = 0;
+
+    ASSERT_EQ(rtc_peer_connection_add_ice_candidate(pc, &cand), RTC_OK);
+    ASSERT_EQ(rtc_peer_connection_add_ice_candidate(pc, NULL), RTC_OK);
+
+    strcpy(cand.candidate, "candidate:bad");
+    ASSERT(rtc_peer_connection_add_ice_candidate(pc, &cand) != RTC_OK);
+
+    printf("    trickle candidate accepted and invalid candidate rejected\n");
+
+    rtc_peer_connection_close(pc);
+    rtc_peer_connection_destroy(pc);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Test: full offer/answer between two peers, auto-connect            */
 /* ------------------------------------------------------------------ */
 static _Atomic rtc_connection_state_t g_alice_state;
@@ -529,6 +557,7 @@ int main(void) {
     RUN_TEST(peer_create_offer);
     RUN_TEST(peer_signaling_states);
     RUN_TEST(peer_ice_candidates);
+    RUN_TEST(peer_add_ice_candidate);
     RUN_TEST(peer_two_connect);
     RUN_TEST(peer_get_stats);
     RUN_TEST(peer_add_transceiver_remove_track);

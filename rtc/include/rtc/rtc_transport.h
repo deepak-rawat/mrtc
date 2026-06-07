@@ -19,6 +19,8 @@ typedef struct rtc_listener rtc_listener_t;
 
 typedef enum {
     RTC_TRANSPORT_CANDIDATE_HOST,
+    RTC_TRANSPORT_CANDIDATE_SRFLX,
+    RTC_TRANSPORT_CANDIDATE_RELAY,
 } rtc_transport_candidate_type_t;
 
 typedef struct {

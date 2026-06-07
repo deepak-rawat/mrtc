@@ -222,6 +222,54 @@ static bool sdp_line_starts_n(const char *line, size_t line_len, const char *pre
     return line_len >= plen && strncmp(line, prefix, plen) == 0;
 }
 
+int rtc_sdp_parse_candidate_line(const char *line, rtc_ice_candidate_t *out) {
+    if (!line || !out)
+        return RTC_ERR_INVALID;
+
+    const char *p = line;
+    if (strncmp(p, "a=", 2) == 0)
+        p += 2;
+    if (strncmp(p, "candidate:", 10) != 0)
+        return RTC_ERR_SDP;
+    p += 10;
+
+    rtc_ice_candidate_t c;
+    memset(&c, 0, sizeof(c));
+    char foundation[8] = {0}, transport[8] = {0}, type_str[8] = {0};
+    char ip[64] = {0};
+    int component = 0;
+    unsigned int priority = 0, port = 0;
+
+    int parsed = sscanf(p, "%7s %d %7s %u %63s %u typ %7s", foundation, &component,
+                        transport, &priority, ip, &port, type_str);
+    if (parsed < 7)
+        return RTC_ERR_SDP;
+    if (strcmp(transport, "udp") != 0 && strcmp(transport, "UDP") != 0)
+        return RTC_ERR_SDP;
+    if (component <= 0 || port == 0 || port > 65535)
+        return RTC_ERR_SDP;
+
+    memcpy(c.foundation, foundation, sizeof(c.foundation));
+    c.component = component;
+    c.priority = priority;
+
+    if (strcmp(type_str, "host") == 0)
+        c.type = ICE_CANDIDATE_HOST;
+    else if (strcmp(type_str, "srflx") == 0)
+        c.type = ICE_CANDIDATE_SRFLX;
+    else if (strcmp(type_str, "relay") == 0)
+        c.type = ICE_CANDIDATE_RELAY;
+    else
+        return RTC_ERR_SDP;
+
+    int rc = rtc_addr_from_string(&c.addr, ip, (uint16_t)port);
+    if (rc != RTC_OK)
+        return rc;
+
+    *out = c;
+    return RTC_OK;
+}
+
 int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
     /* Store raw text */
     if (len >= sizeof(sdp->raw))
@@ -431,33 +479,8 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
         /* Candidate */
         if (sdp_line_starts(line, "a=candidate:")) {
             rtc_ice_candidate_t c;
-            memset(&c, 0, sizeof(c));
-            char foundation[8] = {0}, transport[8] = {0}, type_str[8] = {0};
-            char ip[64] = {0};
-            int component = 0;
-            unsigned int priority = 0, port = 0;
-
-            /* a=candidate:foundation component transport priority ip port typ type */
-            int parsed = sscanf(line, "a=candidate:%7s %d %7s %u %63s %u typ %7s", foundation,
-                                &component, transport, &priority, ip, &port, type_str);
-
-            if (parsed >= 7) {
-                memcpy(c.foundation, foundation, sizeof(c.foundation));
-                c.component = component;
-                c.priority = priority;
-
-                if (strcmp(type_str, "host") == 0)
-                    c.type = ICE_CANDIDATE_HOST;
-                else if (strcmp(type_str, "srflx") == 0)
-                    c.type = ICE_CANDIDATE_SRFLX;
-                else if (strcmp(type_str, "relay") == 0)
-                    c.type = ICE_CANDIDATE_RELAY;
-                else
-                    c.type = ICE_CANDIDATE_HOST;
-
-                rtc_addr_from_string(&c.addr, ip, (uint16_t)port);
+            if (rtc_sdp_parse_candidate_line(line, &c) == RTC_OK)
                 rtc_vec_push(&sdp->candidates, &c);
-            }
         }
 
         p = sdp_next_line(p, end);

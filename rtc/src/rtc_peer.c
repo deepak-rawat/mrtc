@@ -146,15 +146,15 @@ static int peer_runtime_fill_sdp_transport(rtc_peer_connection_t *pc, rtc_sdp_t 
     return RTC_OK;
 }
 
-static void peer_runtime_add_remote_candidate(rtc_peer_connection_t *pc,
-                                              const rtc_ice_candidate_t *candidate) {
+static int peer_runtime_add_remote_candidate(rtc_peer_connection_t *pc,
+                                             const rtc_ice_candidate_t *candidate) {
     if (!pc->runtime_transport || !candidate)
-        return;
+        return RTC_ERR_INVALID;
 
     char ip[64];
     uint16_t port = 0;
     if (rtc_addr_to_string(&candidate->addr, ip, sizeof(ip), &port) != RTC_OK)
-        return;
+        return RTC_ERR_INVALID;
 
     rtc_transport_candidate_t tc;
     memset(&tc, 0, sizeof(tc));
@@ -171,7 +171,11 @@ static void peer_runtime_add_remote_candidate(rtc_peer_connection_t *pc,
     memcpy(tc.protocol, "udp", sizeof("udp"));
     tc.port = port;
     tc.type = RTC_TRANSPORT_CANDIDATE_HOST;
-    (void)rtc_transport_add_remote_candidate(pc->runtime_transport, &tc);
+    if (candidate->type == ICE_CANDIDATE_SRFLX)
+        tc.type = RTC_TRANSPORT_CANDIDATE_SRFLX;
+    else if (candidate->type == ICE_CANDIDATE_RELAY)
+        tc.type = RTC_TRANSPORT_CANDIDATE_RELAY;
+    return rtc_transport_add_remote_candidate(pc->runtime_transport, &tc);
 }
 
 static void peer_runtime_set_remote_desc(rtc_peer_connection_t *pc, const rtc_sdp_t *sdp) {
@@ -187,7 +191,7 @@ static void peer_runtime_set_remote_desc(rtc_peer_connection_t *pc, const rtc_sd
 
     size_t ncand = rtc_sdp_candidate_count(sdp);
     for (size_t i = 0; i < ncand; i++) {
-        peer_runtime_add_remote_candidate(pc, rtc_sdp_get_candidate(sdp, i));
+        (void)peer_runtime_add_remote_candidate(pc, rtc_sdp_get_candidate(sdp, i));
     }
 
     if (pc->local_sdp.type == RTC_SDP_OFFER && sdp->setup == RTC_SETUP_ACTIVE) {
@@ -1143,10 +1147,21 @@ const rtc_desc_t *rtc_peer_connection_remote_desc(const rtc_peer_connection_t *p
 
 int rtc_peer_connection_add_ice_candidate(rtc_peer_connection_t *pc,
                                           const rtc_ice_candidate_desc_t *cand) {
-    (void)pc;
-    (void)cand;
-    /* TODO: parse candidate string and add to ICE agent */
-    return RTC_ERR_GENERIC;
+    if (!pc)
+        return RTC_ERR_INVALID;
+    if (!cand || cand->candidate[0] == '\0')
+        return RTC_OK;
+
+    rtc_ice_candidate_t candidate;
+    int rc = rtc_sdp_parse_candidate_line(cand->candidate, &candidate);
+    if (rc != RTC_OK)
+        return rc;
+
+#ifdef MRTC_ENABLE_SFU_API
+    if (pc->runtime_transport)
+        return peer_runtime_add_remote_candidate(pc, &candidate);
+#endif
+    return rtc_ice_add_remote_candidate(&pc->ice, &candidate);
 }
 
 int rtc_peer_connection_restart_ice(rtc_peer_connection_t *pc) {
