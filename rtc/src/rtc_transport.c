@@ -89,9 +89,7 @@ static rtc_transport_dtls_role_t transport_public_dtls_role(rtc_dtls_role_t role
 
 static int transport_dtls_send(const uint8_t *data, size_t len, void *user) {
     rtc_transport_t *transport = (rtc_transport_t *)user;
-    if (!transport->selected_remote_valid)
-        return RTC_ERR_INVALID;
-    return rtc_listener_send_to(transport->listener, data, len, &transport->selected_remote);
+    return rtc_transport_send_raw(transport, data, len);
 }
 
 static void transport_ice_timer(void *user);
@@ -628,6 +626,14 @@ void rtc_transport_unregister_producer(rtc_transport_t *transport, uint32_t ssrc
     rtc_mutex_unlock(&transport->producer_mutex);
 }
 
+int rtc_transport_send_raw(rtc_transport_t *transport, const uint8_t *data, size_t len) {
+    if (!transport || !data || len == 0)
+        return RTC_ERR_INVALID;
+    if (!transport->selected_remote_valid)
+        return RTC_ERR_INVALID;
+    return rtc_listener_send_to(transport->listener, data, len, &transport->selected_remote);
+}
+
 int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap) {
     if (!transport || !buf || !len)
         return RTC_ERR_INVALID;
@@ -637,7 +643,7 @@ int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len
     int rc = rtc_srtp_protect(&transport->srtp_send, buf, len, buf_cap);
     if (rc != RTC_OK)
         return rc;
-    return rtc_listener_send_to(transport->listener, buf, *len, &transport->selected_remote);
+    return rtc_transport_send_raw(transport, buf, *len);
 }
 
 int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap) {
@@ -649,5 +655,5 @@ int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *le
     int rc = rtc_srtp_protect_rtcp(&transport->srtp_send, buf, len, buf_cap);
     if (rc != RTC_OK)
         return rc;
-    return rtc_listener_send_to(transport->listener, buf, *len, &transport->selected_remote);
+    return rtc_transport_send_raw(transport, buf, *len);
 }

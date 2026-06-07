@@ -5,24 +5,15 @@
  * Packet handling (RTP/RTCP dispatch) lives in rtc_peer_packets.c.
  */
 #include "rtc_peer_internal.h"
-#ifdef MRTC_ENABLE_SFU_API
-#  include "rtc_transport_internal.h"
-#endif
+#include "rtc_transport_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
-#  include <windows.h>
-#else
-#  include <unistd.h>
-#endif
-
 /* ---- Forward declarations ---- */
 static int peer_dc_send(const uint8_t *data, size_t len, void *user);
 
-#ifdef MRTC_ENABLE_SFU_API
 static void peer_runtime_close(rtc_peer_connection_t *pc);
 static void peer_runtime_connect_timer(void *user);
 static void peer_runtime_on_rtp(const rtc_rtp_packet_t *pkt, void *user);
@@ -296,250 +287,15 @@ static void peer_runtime_on_data(const uint8_t *data, size_t len, void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
     rtc_dc_manager_recv(&pc->dc_manager, data, len);
 }
-#endif
 
 /* ---- BWE bitrate callback ---- */
-
-/* ---- DTLS send callback ---- */
-
-#ifndef MRTC_ENABLE_SFU_API
-static int peer_dtls_send(const uint8_t *data, size_t len, void *user) {
-    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
-    return rtc_packet_io_send_to_remote(&pc->transport, data, len);
-}
-#endif
-
-/* ---- Complete connection (called on transport thread after DTLS connects) ---- */
-
-void peer_complete_connection(rtc_peer_connection_t *pc) {
-    /* Export SRTP keys */
-    int rc = rtc_dtls_export_srtp_keys(&pc->dtls);
-    if (rc != RTC_OK) {
-        RTC_LOG_ERR("Peer: SRTP key export failed");
-        peer_set_connection(pc, RTC_CONNECTION_FAILED);
-        return;
-    }
-
-    /* Initialize SRTP contexts */
-    if (pc->dtls.role == RTC_DTLS_ROLE_CLIENT) {
-        rc = rtc_srtp_init(&pc->srtp_send, pc->dtls.srtp_client_key, RTC_SRTP_MASTER_KEY_LEN,
-                           pc->dtls.srtp_client_salt, RTC_SRTP_MASTER_SALT_LEN);
-        if (rc != RTC_OK) {
-            peer_set_connection(pc, RTC_CONNECTION_FAILED);
-            return;
-        }
-        rc = rtc_srtp_init(&pc->srtp_recv, pc->dtls.srtp_server_key, RTC_SRTP_MASTER_KEY_LEN,
-                           pc->dtls.srtp_server_salt, RTC_SRTP_MASTER_SALT_LEN);
-    } else {
-        rc = rtc_srtp_init(&pc->srtp_send, pc->dtls.srtp_server_key, RTC_SRTP_MASTER_KEY_LEN,
-                           pc->dtls.srtp_server_salt, RTC_SRTP_MASTER_SALT_LEN);
-        if (rc != RTC_OK) {
-            peer_set_connection(pc, RTC_CONNECTION_FAILED);
-            return;
-        }
-        rc = rtc_srtp_init(&pc->srtp_recv, pc->dtls.srtp_client_key, RTC_SRTP_MASTER_KEY_LEN,
-                           pc->dtls.srtp_client_salt, RTC_SRTP_MASTER_SALT_LEN);
-    }
-    if (rc != RTC_OK) {
-        peer_set_connection(pc, RTC_CONNECTION_FAILED);
-        return;
-    }
-
-    /* Wire up senders to SRTP + transport (+ TWCC if negotiated), then arm
-     * per-sender video resources (NACK buffer + rate controller). */
-    for (int i = 0; i < pc->transceiver_count; i++) {
-        struct rtc_rtp_sender *s = &pc->transceivers[i].sender;
-        if (!s->active)
-            continue;
-        rtc_rtp_sender_attach(s, &pc->srtp_send, &pc->transport);
-#ifdef MRTC_ENABLE_TWCC
-        if (pc->twcc_ext_id_send != 0) {
-            rtc_rtp_sender_attach_twcc(s, &pc->twcc_sender, pc->twcc_ext_id_send);
-            if (pc->twcc_local_ssrc == 0)
-                pc->twcc_local_ssrc = s->rtp_session.ssrc;
-        }
-#endif
-        rtc_rtp_sender_arm_video(s);
-    }
-
-    /* Initialize data channel manager (if not already) and notify DTLS connected */
-    if (!pc->dc_manager.send_fn) {
-        rtc_dc_manager_init(&pc->dc_manager, peer_dc_send, pc);
-    }
-    rtc_dc_manager_on_dtls_connected(&pc->dc_manager);
-
-    /* Wire up the on_data_channel callback */
-    if (pc->on_data_channel) {
-        rtc_dc_manager_on_channel(&pc->dc_manager, pc->on_data_channel, pc->on_data_channel_user);
-    }
-
-    peer_set_ice_connection(pc, RTC_ICE_CONNECTION_CONNECTED);
-    peer_set_connection(pc, RTC_CONNECTION_CONNECTED);
-    RTC_LOG_INFO("Peer: connected! Ready to send/receive media.");
-
-    /* Start periodic RTCP send timer */
-    pc->rtcp_timer_id = rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + RTCP_INTERVAL_MS,
-                                                peer_rtcp_timer, pc);
-
-    /* Start TWCC feedback timer if negotiated for inbound. */
-#ifdef MRTC_ENABLE_TWCC
-    if (pc->twcc_ext_id_recv != 0) {
-        rtc_twcc_receiver_init(&pc->twcc_receiver);
-        pc->twcc_fb_timer_id =
-            rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + 100, peer_twcc_fb_timer, pc);
-    }
-
-    /* Bind the BWE bitrate callback through a per-peer trampoline. */
-    if (pc->bwe)
-        rtc_bwe_on_bitrate_change(pc->bwe, peer_on_bwe_bitrate, pc);
-#endif
-}
-
-/* ---- DTLS retransmission timer (fires on transport thread) ---- */
-
-static void peer_dtls_retransmit_timer(void *user) {
-    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
-    if (pc->dtls.state != RTC_DTLS_STATE_CONNECTING)
-        return;
-
-    rtc_dtls_retransmit(&pc->dtls);
-
-    /* Re-schedule until handshake completes */
-    rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + 1000, peer_dtls_retransmit_timer, pc);
-}
-
-/* ---- Connect timer (fires on transport thread) ---- */
-
-#define PEER_ICE_CHECK_INTERVAL_MS 250
-
-/* Forward decl: timer that polls ICE state until connected/failed and then
- * advances to DTLS. Replaces the old synchronous select+recvfrom in
- * rtc_ice_connect that stole non-STUN packets from the transport classifier. */
-static void peer_ice_check_timer(void *user);
-
-/* Kick off DTLS handshake — extracted from the old peer_connect_timer body. */
-static void peer_start_dtls(rtc_peer_connection_t *pc) {
-    RTC_LOG_INFO("Peer: starting DTLS handshake (role=%s)...",
-                 pc->dtls.role == RTC_DTLS_ROLE_CLIENT ? "client" : "server");
-    if (pc->dtls.role == RTC_DTLS_ROLE_CLIENT) {
-        int rc = rtc_dtls_handshake(&pc->dtls);
-        if (rc != RTC_OK && pc->dtls.state == RTC_DTLS_STATE_FAILED) {
-            peer_set_connection(pc, RTC_CONNECTION_FAILED);
-            return;
-        }
-    } else {
-        /* Server: just set state to CONNECTING and wait for client's ClientHello */
-        pc->dtls.state = RTC_DTLS_STATE_CONNECTING;
-    }
-
-    /* Schedule DTLS retransmission timer (fires every 1s until handshake completes) */
-    rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + 1000, peer_dtls_retransmit_timer, pc);
-}
-
-static void peer_ice_check_timer(void *user) {
-    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
-
-    if (pc->connection_state == RTC_CONNECTION_CLOSED ||
-        pc->connection_state == RTC_CONNECTION_FAILED)
-        return;
-
-    /* Success path — ICE has flipped to CONNECTED via rtc_ice_handle_stun
-     * on the transport thread (same thread, no race). */
-    if (pc->ice.state == ICE_STATE_CONNECTED) {
-        peer_set_ice_connection(pc, RTC_ICE_CONNECTION_CONNECTED);
-        peer_start_dtls(pc);
-        return;
-    }
-
-    /* Failure path */
-    if (pc->ice.state == ICE_STATE_FAILED || rtc_ice_check_deadline_passed(&pc->ice)) {
-        pc->ice.state = ICE_STATE_FAILED;
-        RTC_LOG_ERR("Peer: ICE connectivity checks failed");
-        peer_set_ice_connection(pc, RTC_ICE_CONNECTION_FAILED);
-        peer_set_connection(pc, RTC_CONNECTION_FAILED);
-        return;
-    }
-
-    /* Still checking — send another binding request and re-arm. */
-    rtc_ice_send_check(&pc->ice);
-    rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + PEER_ICE_CHECK_INTERVAL_MS,
-                            peer_ice_check_timer, pc);
-}
-
-static void peer_connect_timer(void *user) {
-    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
-
-    peer_set_connection(pc, RTC_CONNECTION_CONNECTING);
-    peer_set_ice_connection(pc, RTC_ICE_CONNECTION_CHECKING);
-
-    /* Kick off ICE connectivity checks asynchronously. rtc_ice_connect sends
-     * the first STUN binding request and returns; binding responses arrive
-     * via the transport's recv callback (which routes to rtc_ice_handle_stun),
-     * so the transport thread can resume normal packet classification. */
-    RTC_LOG_INFO("Peer: starting ICE connectivity checks...");
-    int rc = rtc_ice_connect(&pc->ice);
-    if (rc != RTC_OK) {
-        RTC_LOG_ERR("Peer: ICE connect failed to start (rc=%d)", rc);
-        peer_set_ice_connection(pc, RTC_ICE_CONNECTION_FAILED);
-        peer_set_connection(pc, RTC_CONNECTION_FAILED);
-        return;
-    }
-
-    /* Poll ICE state every PEER_ICE_CHECK_INTERVAL_MS until CONNECTED or timeout. */
-    rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + PEER_ICE_CHECK_INTERVAL_MS,
-                            peer_ice_check_timer, pc);
-}
-
-/* ---- Helper: parse STUN server URL like "stun:host:port" or just IP ---- */
-
-static void parse_stun_url(const char *url, char *host, size_t host_len, uint16_t *port) {
-    *port = 3478;
-    const char *p = url;
-    if (strncmp(p, "stun:", 5) == 0)
-        p += 5;
-    if (strncmp(p, "//", 2) == 0)
-        p += 2;
-
-    const char *colon = strchr(p, ':');
-    if (colon) {
-        size_t len = (size_t)(colon - p);
-        if (len >= host_len)
-            len = host_len - 1;
-        memcpy(host, p, len);
-        host[len] = '\0';
-        *port = (uint16_t)atoi(colon + 1);
-    } else {
-        size_t len = strlen(p);
-        if (len >= host_len)
-            len = host_len - 1;
-        memcpy(host, p, len);
-        host[len] = '\0';
-    }
-}
 
 /* ---- Helper: fill rtc_sdp_t from transceivers + ICE + DTLS ---- */
 
 static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
-#ifdef MRTC_ENABLE_SFU_API
-    if (pc->runtime_transport && pc->runtime_listener) {
-        int rc = peer_runtime_fill_sdp_transport(pc, sdp);
-        if (rc != RTC_OK)
-            return rc;
-    } else
-#endif
-    {
-        /* ICE credentials */
-        memcpy(sdp->ice_ufrag, pc->ice.ufrag, ICE_UFRAG_LEN);
-        memcpy(sdp->ice_pwd, pc->ice.pwd, ICE_PWD_LEN);
-
-        /* DTLS fingerprint */
-        memcpy(sdp->fingerprint, pc->dtls.local_fingerprint, sizeof(sdp->fingerprint));
-
-        /* Candidates */
-        for (int i = 0; i < pc->ice.local_candidate_count; i++) {
-            rtc_sdp_add_candidate(sdp, &pc->ice.local_candidates[i]);
-        }
-    }
+    int rc = peer_runtime_fill_sdp_transport(pc, sdp);
+    if (rc != RTC_OK)
+        return rc;
 
     /* Build multi-media descriptions from transceivers */
     sdp->media_count = 0;
@@ -591,24 +347,16 @@ static void peer_try_connect(rtc_peer_connection_t *pc) {
 
     pc->connect_started = true;
 
-#ifdef MRTC_ENABLE_SFU_API
-    if (pc->runtime_transport && pc->runtime_worker) {
-        peer_set_connection(pc, RTC_CONNECTION_CONNECTING);
-        peer_set_ice_connection(pc, RTC_ICE_CONNECTION_CHECKING);
-        int rc = rtc_transport_start_ice(pc->runtime_transport);
-        if (rc != RTC_OK && rc != RTC_ERR_INVALID) {
-            peer_set_ice_connection(pc, RTC_ICE_CONNECTION_FAILED);
-            peer_set_connection(pc, RTC_CONNECTION_FAILED);
-            return;
-        }
-        pc->runtime_connect_timer =
-            rtc_worker_add_timer(pc->runtime_worker, rtc_time_ms(), peer_runtime_connect_timer, pc);
+    peer_set_connection(pc, RTC_CONNECTION_CONNECTING);
+    peer_set_ice_connection(pc, RTC_ICE_CONNECTION_CHECKING);
+    int rc = rtc_transport_start_ice(pc->runtime_transport);
+    if (rc != RTC_OK && rc != RTC_ERR_INVALID) {
+        peer_set_ice_connection(pc, RTC_ICE_CONNECTION_FAILED);
+        peer_set_connection(pc, RTC_CONNECTION_FAILED);
         return;
     }
-#endif
-
-    /* Schedule connection on transport thread (0-delay timer) */
-    rtc_packet_io_add_timer(&pc->transport, rtc_time_ms(), peer_connect_timer, pc);
+    pc->runtime_connect_timer =
+        rtc_worker_add_timer(pc->runtime_worker, rtc_time_ms(), peer_runtime_connect_timer, pc);
 }
 
 /* ---- Public API ---- */
@@ -623,48 +371,19 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
     pc->ice_connection_state = RTC_ICE_CONNECTION_NEW;
     pc->connection_state = RTC_CONNECTION_NEW;
 
-    /* Allocate DTLS app-data scratch buffer (64 KiB = max DTLS record payload). */
-    pc->app_buf_cap = 65536;
-    pc->app_buf = (uint8_t *)malloc(pc->app_buf_cap);
-    if (!pc->app_buf) {
-        free(pc);
-        return NULL;
-    }
-
-    /* Extract STUN server from config */
-    if (config && config->ice_server_count > 0 && config->ice_servers[0].url_count > 0 &&
-        config->ice_servers[0].urls[0]) {
-        parse_stun_url(config->ice_servers[0].urls[0], pc->stun_server, sizeof(pc->stun_server),
-                       &pc->stun_port);
-    }
+    (void)config;
 
     int rc = RTC_OK;
 
-#ifndef MRTC_ENABLE_SFU_API
-    /* Initialize transport (socket + thread). */
-    rc = rtc_packet_io_init(&pc->transport, peer_transport_recv, pc);
-    if (rc != RTC_OK) {
-        free(pc->app_buf);
-        free(pc);
-        return NULL;
-    }
-#else
     rc = peer_runtime_init(pc);
     if (rc != RTC_OK) {
-        free(pc->app_buf);
         free(pc);
         return NULL;
     }
-#endif
 
     /* Initialize SSRC → receiver lookup map */
     if (rtc_u32_map_init(&pc->recv_map) != RTC_OK) {
-#ifdef MRTC_ENABLE_SFU_API
         peer_runtime_close(pc);
-#else
-        rtc_packet_io_close(&pc->transport);
-#endif
-        free(pc->app_buf);
         free(pc);
         return NULL;
     }
@@ -672,41 +391,10 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
     /* Initialize SSRC → sender lookup map */
     if (rtc_u32_map_init(&pc->send_map) != RTC_OK) {
         rtc_u32_map_free(&pc->recv_map);
-#ifdef MRTC_ENABLE_SFU_API
         peer_runtime_close(pc);
-#else
-        rtc_packet_io_close(&pc->transport);
-#endif
-        free(pc->app_buf);
         free(pc);
         return NULL;
     }
-
-#ifndef MRTC_ENABLE_SFU_API
-    /* Initialize ICE agent (borrows transport) */
-    rc = rtc_ice_init(&pc->ice, &pc->transport, pc->stun_server[0] ? pc->stun_server : NULL,
-                      pc->stun_port);
-    if (rc != RTC_OK) {
-        rtc_u32_map_free(&pc->recv_map);
-        rtc_u32_map_free(&pc->send_map);
-        rtc_packet_io_close(&pc->transport);
-        free(pc->app_buf);
-        free(pc);
-        return NULL;
-    }
-
-    /* Generate DTLS certificate (needed for fingerprint in SDP) */
-    rc = rtc_dtls_init(&pc->dtls, RTC_DTLS_ROLE_CLIENT, peer_dtls_send, pc);
-    if (rc != RTC_OK) {
-        rtc_ice_close(&pc->ice);
-        rtc_u32_map_free(&pc->recv_map);
-        rtc_u32_map_free(&pc->send_map);
-        rtc_packet_io_close(&pc->transport);
-        free(pc->app_buf);
-        free(pc);
-        return NULL;
-    }
-#endif
 
     RTC_LOG_INFO("Peer connection created");
     return pc;
@@ -718,22 +406,9 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc) {
     if (pc->connection_state == RTC_CONNECTION_CLOSED)
         return;
 
-#ifdef MRTC_ENABLE_SFU_API
     peer_runtime_close(pc);
-#else
-    /* Close the transport FIRST. This joins the I/O thread, after which no
-     * recv callback or timer can fire. Everything below this point is
-     * therefore safe to tear down without racing the transport thread. */
-    rtc_packet_io_close(&pc->transport);
-#endif
 
     rtc_dc_manager_close(&pc->dc_manager);
-#ifndef MRTC_ENABLE_SFU_API
-    rtc_srtp_close(&pc->srtp_send);
-    rtc_srtp_close(&pc->srtp_recv);
-    rtc_dtls_close(&pc->dtls);
-    rtc_ice_close(&pc->ice);
-#endif
     rtc_u32_map_free(&pc->recv_map);
     rtc_u32_map_free(&pc->send_map);
     rtc_sdp_close(&pc->local_sdp);
@@ -772,7 +447,6 @@ void rtc_peer_connection_destroy(rtc_peer_connection_t *pc) {
         RTC_LOG_WARN("rtc_peer_connection_destroy called without prior close");
         rtc_peer_connection_close(pc);
     }
-    free(pc->app_buf);
     free(pc);
 }
 
@@ -868,14 +542,6 @@ int rtc_peer_connection_create_offer(rtc_peer_connection_t *pc, rtc_desc_t *desc
     memset(desc, 0, sizeof(*desc));
     desc->type = RTC_SDP_OFFER;
 
-    int rc = RTC_OK;
-#ifndef MRTC_ENABLE_SFU_API
-    /* Gather ICE candidates (synchronous) */
-    rc = rtc_ice_gather(&pc->ice);
-    if (rc != RTC_OK)
-        return rc;
-#endif
-
     /* Build internal SDP */
     rtc_sdp_t sdp;
     memset(&sdp, 0, sizeof(sdp));
@@ -883,7 +549,7 @@ int rtc_peer_connection_create_offer(rtc_peer_connection_t *pc, rtc_desc_t *desc
     sdp.setup = RTC_SETUP_ACTPASS;
     peer_build_sdp(pc, &sdp);
 
-    rc = rtc_sdp_generate(&sdp);
+    int rc = rtc_sdp_generate(&sdp);
     if (rc != RTC_OK)
         return rc;
 
@@ -903,18 +569,6 @@ int rtc_peer_connection_create_answer(rtc_peer_connection_t *pc, rtc_desc_t *des
         return RTC_ERR_INVALID;
     memset(desc, 0, sizeof(*desc));
     desc->type = RTC_SDP_ANSWER;
-
-#ifndef MRTC_ENABLE_SFU_API
-    /* Gather if not already done */
-    if (pc->ice.local_candidate_count == 0) {
-        int rc = rtc_ice_gather(&pc->ice);
-        if (rc != RTC_OK)
-            return rc;
-    }
-
-    /* Answerer is ICE-controlled */
-    pc->ice.controlling = false;
-#endif
 
     /* Build internal SDP */
     rtc_sdp_t sdp;
@@ -940,8 +594,8 @@ int rtc_peer_connection_set_local_desc(rtc_peer_connection_t *pc, const rtc_desc
     if (!pc || !desc)
         return RTC_ERR_INVALID;
     /* Renegotiation is not supported: once the connection has started, the
-     * transport thread owns pc->ice / pc->dtls / pc->transceivers, and any
-     * further mutation from the app thread would race. */
+     * runtime owns transport state and transceivers, and any further mutation
+     * from the app thread would race. */
     if (pc->connect_started)
         return RTC_ERR_INVALID;
 
@@ -1036,31 +690,7 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
     rtc_sdp_close(&pc->remote_sdp);
     pc->remote_sdp = sdp;
 
-#ifdef MRTC_ENABLE_SFU_API
     peer_runtime_set_remote_desc(pc, &pc->remote_sdp);
-#else
-    /* Set remote ICE credentials */
-    rc = rtc_ice_set_remote_credentials(&pc->ice, pc->remote_sdp.ice_ufrag, pc->remote_sdp.ice_pwd);
-    if (rc != RTC_OK)
-        return rc;
-
-    /* Add remote candidates */
-    size_t ncand = rtc_sdp_candidate_count(&pc->remote_sdp);
-    for (size_t i = 0; i < ncand; i++) {
-        const rtc_ice_candidate_t *c = rtc_sdp_get_candidate(&pc->remote_sdp, i);
-        rc = rtc_ice_add_remote_candidate(&pc->ice, c);
-        if (rc != RTC_OK)
-            return rc;
-    }
-
-    /* DTLS role negotiation */
-    if (pc->local_sdp.type == RTC_SDP_OFFER && pc->remote_sdp.setup == RTC_SETUP_ACTIVE) {
-        rc = rtc_dtls_set_role(&pc->dtls, RTC_DTLS_ROLE_SERVER);
-        if (rc != RTC_OK)
-            return rc;
-        RTC_LOG_INFO("Peer: DTLS role → server (remote chose active)");
-    }
-#endif
 
     /* Update signaling state */
     if (desc->type == RTC_SDP_OFFER) {
@@ -1082,9 +712,9 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
 
     /* Eager SSRC → receiver map population from remote SDP. Walk parsed
      * m= sections; for each that carried a=ssrc, find the matching
-     * transceiver by mid_index and register its receiver under that SSRC.
-     * Lazy first-packet population in peer_transport_recv remains as a
-     * defensive fallback for peers that omit a=ssrc lines. */
+    * transceiver by mid_index and register its receiver under that SSRC.
+    * Lazy first-packet population in peer_handle_plain_rtp remains as a
+    * defensive fallback for peers that omit a=ssrc lines. */
     for (int i = 0; i < pc->remote_sdp.media_count; i++) {
         const rtc_sdp_media_t *m = &pc->remote_sdp.media[i];
         if (m->ssrc == 0)
@@ -1157,11 +787,7 @@ int rtc_peer_connection_add_ice_candidate(rtc_peer_connection_t *pc,
     if (rc != RTC_OK)
         return rc;
 
-#ifdef MRTC_ENABLE_SFU_API
-    if (pc->runtime_transport)
-        return peer_runtime_add_remote_candidate(pc, &candidate);
-#endif
-    return rtc_ice_add_remote_candidate(&pc->ice, &candidate);
+    return peer_runtime_add_remote_candidate(pc, &candidate);
 }
 
 int rtc_peer_connection_restart_ice(rtc_peer_connection_t *pc) {
@@ -1169,14 +795,9 @@ int rtc_peer_connection_restart_ice(rtc_peer_connection_t *pc) {
         return RTC_ERR_INVALID;
     if (pc->connect_started)
         return RTC_ERR_INVALID;
-#ifdef MRTC_ENABLE_SFU_API
     if (!pc->runtime_transport)
         return RTC_ERR_INVALID;
     return rtc_transport_restart_ice(pc->runtime_transport);
-#else
-    int rc = rtc_ice_restart_credentials(&pc->ice);
-    return rc;
-#endif
 }
 
 /* ---- Data channels ---- */
@@ -1184,26 +805,9 @@ int rtc_peer_connection_restart_ice(rtc_peer_connection_t *pc) {
 /* Send callback for data channel manager (sends via DTLS) */
 static int peer_dc_send(const uint8_t *data, size_t len, void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
-#ifdef MRTC_ENABLE_SFU_API
     if (pc->runtime_transport && pc->runtime_connected)
         return rtc_transport_send_data(pc->runtime_transport, data, len);
-#endif
-    if (pc->dtls.state != RTC_DTLS_STATE_CONNECTED)
-        return RTC_ERR_INVALID;
-
-    /* Write data into SSL for DTLS encryption, then flush output BIO */
-    int written = SSL_write(pc->dtls.ssl, data, (int)len);
-    if (written <= 0)
-        return RTC_ERR_SSL;
-
-    /* Flush the output BIO */
-    uint8_t buf[2048];
-    int pending;
-    while ((pending = BIO_read(pc->dtls.wbio, buf, sizeof(buf))) > 0) {
-        rtc_packet_io_send_to_remote(&pc->transport, buf, (size_t)pending);
-    }
-
-    return RTC_OK;
+    return RTC_ERR_INVALID;
 }
 
 rtc_data_channel_t *rtc_peer_connection_create_data_channel(rtc_peer_connection_t *pc,
@@ -1312,11 +916,9 @@ rtc_connection_state_t rtc_peer_connection_connection_state(const rtc_peer_conne
 /* ---- Identity / capability getters ---- */
 
 const char *rtc_peer_connection_local_fingerprint(const rtc_peer_connection_t *pc) {
-#ifdef MRTC_ENABLE_SFU_API
     if (pc && pc->runtime_fingerprint[0] != '\0')
         return pc->runtime_fingerprint;
-#endif
-    return pc ? pc->dtls.local_fingerprint : "";
+    return "";
 }
 
 const char *rtc_peer_connection_remote_fingerprint(const rtc_peer_connection_t *pc) {

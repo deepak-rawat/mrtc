@@ -8,9 +8,8 @@
  */
 #include "rtc_peer_internal.h"
 #include "rtc_rtp_ext.h"
-#ifdef MRTC_ENABLE_SFU_API
-#  include "rtc_transport_internal.h"
-#endif
+#include "rtc_srtp.h"
+#include "rtc_transport_internal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -23,13 +22,6 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
         return RTC_ERR_INVALID;
     if (!sender->transport)
         return RTC_ERR_INVALID;
-#ifndef MRTC_ENABLE_SFU_API
-    if (!sender->srtp)
-        return RTC_ERR_INVALID;
-#else
-    if (!sender->use_logical_transport && !sender->srtp)
-        return RTC_ERR_INVALID;
-#endif
     /* setParameters({active:false}) suspends transmission. Return OK so
      * callers can keep feeding frames without treating it as an error. */
     if (!sender->send_active)
@@ -61,22 +53,9 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
     rtc_rtcp_stats_on_rtp_send(&sender->rtcp_stats, pkt.header.timestamp, len);
 
     size_t pkt_len = pkt.buf_len;
-#ifdef MRTC_ENABLE_SFU_API
-    if (sender->use_logical_transport) {
-        rc = rtc_transport_send_rtp((rtc_transport_t *)sender->transport, pkt.buf, &pkt_len,
-                                    sizeof(pkt.buf));
-        if (rc != RTC_OK)
-            return rc;
-    } else
-#endif
-    {
-        /* SRTP protect. The sender's SRTP context is also touched by the
-         * transport thread (RTCP SR/RR + TWCC feedback timers), so this call
-         * relies on the per-context mutex inside rtc_srtp_protect. */
-        rc = rtc_srtp_protect(sender->srtp, pkt.buf, &pkt_len, sizeof(pkt.buf));
-        if (rc != RTC_OK)
-            return rc;
-    }
+    rc = rtc_transport_send_rtp(sender->transport, pkt.buf, &pkt_len, sizeof(pkt.buf));
+    if (rc != RTC_OK)
+        return rc;
 
     /* Record send-time + wire size in TWCC sender ring */
 #ifdef MRTC_ENABLE_TWCC
@@ -102,13 +81,7 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
 #endif
     }
 
-#ifdef MRTC_ENABLE_SFU_API
-    if (sender->use_logical_transport)
-        return RTC_OK;
-#endif
-    /* Send via transport (sendto is thread-safe on UDP sockets) */
-    rtc_packet_io_t *t = (rtc_packet_io_t *)sender->transport;
-    return rtc_packet_io_send_to_remote(t, pkt.buf, pkt_len);
+    return RTC_OK;
 }
 
 const rtc_codec_t *rtc_rtp_sender_get_codec(const rtc_rtp_sender_t *sender) {
@@ -195,14 +168,13 @@ void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_s
     if (!sender->nack_buf || !sender->transport)
         goto notify;
 
-    rtc_packet_io_t *t = (rtc_packet_io_t *)sender->transport;
     for (int i = 0; i < count; i++) {
         const uint8_t *pkt;
         size_t pkt_len;
         uint16_t twcc_seq = 0;
         if (!rtc_nack_buf_retransmit(sender->nack_buf, lost_seqs[i], &pkt, &pkt_len, &twcc_seq))
             continue; /* not in buffer or per-seq retransmit cap hit */
-        rtc_packet_io_send_to_remote(t, pkt, pkt_len);
+        rtc_transport_send_raw(sender->transport, pkt, pkt_len);
 #ifdef MRTC_ENABLE_TWCC
         /* The retransmit carries the original TWCC seq. Drop it from the
          * sender ring so handle_rtcp_twcc skips this seq when feedback
@@ -327,26 +299,11 @@ void rtc_rtp_transceiver_close_resources(struct rtc_rtp_transceiver *t) {
     }
 }
 
-void rtc_rtp_sender_attach(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
-                           rtc_packet_io_t *transport) {
-    if (!s || !s->active)
-        return;
-    s->srtp = srtp_send;
-    s->transport = transport;
-#ifdef MRTC_ENABLE_SFU_API
-    s->use_logical_transport = false;
-#endif
-}
-
-#ifdef MRTC_ENABLE_SFU_API
 void rtc_rtp_sender_attach_logical(struct rtc_rtp_sender *s, rtc_transport_t *transport) {
     if (!s || !s->active)
         return;
-    s->srtp = NULL;
     s->transport = transport;
-    s->use_logical_transport = true;
 }
-#endif
 
 void rtc_rtp_sender_attach_twcc(struct rtc_rtp_sender *s, void *twcc_sender, uint8_t ext_id) {
 #ifdef MRTC_ENABLE_TWCC
@@ -383,43 +340,6 @@ void rtc_rtp_receiver_activate(struct rtc_rtp_receiver *r) {
 /* SR / RR build + SRTCP protect + send. The scratch buffer is sized to hold
  * the largest RTCP packet plus the 4-byte SRTCP index trailer plus the auth
  * tag (see rtc_srtp_protect_rtcp). */
-void rtc_rtp_sender_emit_sr(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
-                            rtc_packet_io_t *transport) {
-    if (!s || !s->active || s->rtcp_stats.packets_sent == 0)
-        return;
-    rtc_rtcp_packet_t pkt;
-    if (rtc_rtcp_build_sr(&pkt, &s->rtcp_stats) != RTC_OK)
-        return;
-    uint8_t buf[RTCP_MAX_PACKET + 4 + SRTP_AUTH_TAG_LEN];
-    if (pkt.buf_len > sizeof(buf))
-        return;
-    memcpy(buf, pkt.buf, pkt.buf_len);
-    size_t len = pkt.buf_len;
-    if (rtc_srtp_protect_rtcp(srtp_send, buf, &len, sizeof(buf)) != RTC_OK)
-        return;
-    rtc_packet_io_send_to_remote(transport, buf, len);
-    s->rtcp_stats.last_report_time = rtc_time_ms();
-}
-
-void rtc_rtp_receiver_emit_rr(struct rtc_rtp_receiver *r, rtc_srtp_ctx_t *srtp_send,
-                              rtc_packet_io_t *transport) {
-    if (!r || !r->active || r->rtcp_stats.packets_received == 0)
-        return;
-    rtc_rtcp_packet_t pkt;
-    if (rtc_rtcp_build_rr(&pkt, &r->rtcp_stats) != RTC_OK)
-        return;
-    uint8_t buf[RTCP_MAX_PACKET + 4 + SRTP_AUTH_TAG_LEN];
-    if (pkt.buf_len > sizeof(buf))
-        return;
-    memcpy(buf, pkt.buf, pkt.buf_len);
-    size_t len = pkt.buf_len;
-    if (rtc_srtp_protect_rtcp(srtp_send, buf, &len, sizeof(buf)) != RTC_OK)
-        return;
-    rtc_packet_io_send_to_remote(transport, buf, len);
-    r->rtcp_stats.last_report_time = rtc_time_ms();
-}
-
-#ifdef MRTC_ENABLE_SFU_API
 void rtc_rtp_sender_emit_sr_logical(struct rtc_rtp_sender *s, rtc_transport_t *transport) {
     if (!s || !s->active || !transport || s->rtcp_stats.packets_sent == 0)
         return;
@@ -451,7 +371,6 @@ void rtc_rtp_receiver_emit_rr_logical(struct rtc_rtp_receiver *r, rtc_transport_
         return;
     r->rtcp_stats.last_report_time = rtc_time_ms();
 }
-#endif
 
 void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc_sdp_media_t *m) {
     memset(m, 0, sizeof(*m));

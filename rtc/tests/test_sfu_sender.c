@@ -4,6 +4,7 @@
 #include <rtc/rtc.h>
 
 #include "rtc_peer_internal.h"
+#include "rtc_dtls.h"
 #include "rtc_srtp.h"
 #include "rtc_stun.h"
 #include "test_harness.h"

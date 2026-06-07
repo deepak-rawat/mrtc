@@ -21,6 +21,11 @@ option(MRTC_ENABLE_SFU_API "Build SFU routing/listener API" ON)
 option(MRTC_ENABLE_TWCC "Transport-wide CC + GCC bandwidth estimator" ON)
 option(MRTC_ENABLE_RATE_CONTROL "RR-based AIMD sender rate control" ON)
 
+set(MRTC_ENABLE_RUNTIME_TRANSPORT OFF)
+if(MRTC_ENABLE_CLIENT_API OR MRTC_ENABLE_SFU_API)
+    set(MRTC_ENABLE_RUNTIME_TRANSPORT ON)
+endif()
+
 # Compiler warning flags applied to all targets in this project
 function(mrtc_set_warnings target)
     if(MSVC)

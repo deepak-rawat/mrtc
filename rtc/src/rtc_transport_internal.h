@@ -24,6 +24,7 @@ int rtc_transport_send_data(rtc_transport_t *transport, const uint8_t *data, siz
 int rtc_transport_register_producer(rtc_transport_t *transport, rtc_producer_t *producer,
                                     uint32_t ssrc);
 void rtc_transport_unregister_producer(rtc_transport_t *transport, uint32_t ssrc);
+int rtc_transport_send_raw(rtc_transport_t *transport, const uint8_t *data, size_t len);
 int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap);
 int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap);
 

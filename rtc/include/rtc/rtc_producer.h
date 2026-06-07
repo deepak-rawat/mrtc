@@ -4,8 +4,8 @@
 #ifndef RTC_PRODUCER_H
 #define RTC_PRODUCER_H
 
-#ifndef MRTC_ENABLE_SFU_API
-#  error "rtc_producer.h requires MRTC_ENABLE_SFU_API"
+#if !defined(MRTC_ENABLE_SFU_API) && !defined(MRTC_ENABLE_RUNTIME_TRANSPORT)
+#  error "rtc_producer.h requires MRTC_ENABLE_SFU_API or MRTC_ENABLE_RUNTIME_TRANSPORT"
 #endif
 
 #include "rtc_rtp_params.h"

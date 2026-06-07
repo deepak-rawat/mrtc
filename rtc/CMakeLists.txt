@@ -27,7 +27,7 @@ set(RTC_CLIENT_SOURCES
     src/rtc_peer_packets.c
 )
 
-set(RTC_SFU_SOURCES
+set(RTC_RUNTIME_SOURCES
     src/rtc_worker.c
     src/rtc_listener.c
     src/rtc_router.c
@@ -42,8 +42,8 @@ if(MRTC_ENABLE_CLIENT_API)
     list(APPEND LIB_SOURCES ${RTC_CLIENT_SOURCES})
 endif()
 
-if(MRTC_ENABLE_SFU_API)
-    list(APPEND LIB_SOURCES ${RTC_SFU_SOURCES})
+if(MRTC_ENABLE_RUNTIME_TRANSPORT)
+    list(APPEND LIB_SOURCES ${RTC_RUNTIME_SOURCES})
 endif()
 
 # Conditional sources
@@ -71,6 +71,9 @@ if(MRTC_ENABLE_CLIENT_API)
 endif()
 if(MRTC_ENABLE_SFU_API)
     target_compile_definitions(mrtc PUBLIC MRTC_ENABLE_SFU_API)
+endif()
+if(MRTC_ENABLE_RUNTIME_TRANSPORT)
+    target_compile_definitions(mrtc PRIVATE MRTC_ENABLE_RUNTIME_TRANSPORT)
 endif()
 
 # Tests (need access to internal headers for component-level testing)

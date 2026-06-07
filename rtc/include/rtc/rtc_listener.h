@@ -4,8 +4,8 @@
 #ifndef RTC_LISTENER_H
 #define RTC_LISTENER_H
 
-#ifndef MRTC_ENABLE_SFU_API
-#  error "rtc_listener.h requires MRTC_ENABLE_SFU_API"
+#if !defined(MRTC_ENABLE_SFU_API) && !defined(MRTC_ENABLE_RUNTIME_TRANSPORT)
+#  error "rtc_listener.h requires MRTC_ENABLE_SFU_API or MRTC_ENABLE_RUNTIME_TRANSPORT"
 #endif
 
 #include "rtc_transport.h"

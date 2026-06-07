@@ -15,20 +15,13 @@
 #include "rtc_rtp.h"
 #include "rtc_rtp_ext.h"
 #include "rtc_rtcp.h"
-#include "rtc_packet_io.h"
-#include "rtc_ice.h"
-#include "rtc_dtls.h"
-#include "rtc_srtp.h"
 #include "rtc_sdp.h"
 #include "rtc_nack_buf.h"
-
-#ifdef MRTC_ENABLE_SFU_API
-#  include "rtc/rtc_listener.h"
-#  include "rtc/rtc_router.h"
-#  include "rtc/rtc_transport.h"
-#  include "rtc/rtc_worker.h"
-#  include "rtc_worker_internal.h"
-#endif
+#include "rtc/rtc_listener.h"
+#include "rtc/rtc_router.h"
+#include "rtc/rtc_transport.h"
+#include "rtc/rtc_worker.h"
+#include "rtc_worker_internal.h"
 
 #ifdef MRTC_ENABLE_RATE_CONTROL
 #  include "rtc_rate_control.h"
@@ -50,11 +43,7 @@ struct rtc_rtp_sender {
     rtc_codec_t codec;
     rtc_kind_t kind;
     rtc_rtp_session_t rtp_session;
-    rtc_srtp_ctx_t *srtp;
-    void *transport;
-#ifdef MRTC_ENABLE_SFU_API
-    bool use_logical_transport;
-#endif
+    rtc_transport_t *transport;
     rtc_rtcp_stats_t rtcp_stats;
 #ifdef MRTC_ENABLE_RATE_CONTROL
     rtc_rate_controller_t *rate_ctrl;
@@ -104,12 +93,7 @@ struct rtc_rtp_transceiver {
 /* ---- Peer connection internal struct ---- */
 
 struct rtc_peer_connection {
-    /* Transport (owns socket and I/O thread) */
-    rtc_packet_io_t transport;
-
-#ifdef MRTC_ENABLE_SFU_API
-    /* Private logical runtime used by the peer facade when the SFU transport
-     * layer is available. */
+    /* Private logical runtime used by the peer facade. */
     rtc_worker_t *runtime_worker;
     rtc_listener_t *runtime_listener;
     rtc_router_t *runtime_router;
@@ -121,13 +105,6 @@ struct rtc_peer_connection {
 #  endif
     char runtime_fingerprint[RTC_DTLS_FINGERPRINT_MAX];
     bool runtime_connected;
-#endif
-
-    /* Protocol components (touched only on transport thread after connect) */
-    rtc_ice_agent_t ice;
-    rtc_dtls_transport_t dtls;
-    rtc_srtp_ctx_t srtp_send; /* after init: main thread only */
-    rtc_srtp_ctx_t srtp_recv; /* transport thread only */
 
     /* Data channel manager */
     rtc_dc_manager_t dc_manager;
@@ -166,15 +143,8 @@ struct rtc_peer_connection {
     rtc_on_data_channel_fn on_data_channel;
     void *on_data_channel_user;
 
-    /* Config */
-    char stun_server[64];
-    uint16_t stun_port;
-
     /* Connection started flag */
     bool connect_started;
-
-    /* RTCP send timer */
-    rtc_timer_id_t rtcp_timer_id;
 
 #ifdef MRTC_ENABLE_RATE_CONTROL
     /* Shared rate controller fallback (created on connection, fed by RTCP RR) */
@@ -187,10 +157,6 @@ struct rtc_peer_connection {
     /* Fast SSRC → sender lookup */
     rtc_u32_map_t send_map;
 
-    /* DTLS application-data receive buffer */
-    uint8_t *app_buf;
-    size_t app_buf_cap;
-
 #ifdef MRTC_ENABLE_TWCC
     /* Transport-Wide Congestion Control */
     rtc_twcc_sender_t twcc_sender;
@@ -199,7 +165,6 @@ struct rtc_peer_connection {
     uint8_t twcc_ext_id_recv;
     uint32_t twcc_local_ssrc;
     uint32_t twcc_remote_ssrc;
-    rtc_timer_id_t twcc_fb_timer_id;
     bool twcc_have_packets;
 
     /* Bandwidth estimator (consumes TWCC feedback + RR loss) */
@@ -256,14 +221,8 @@ void rtc_rtp_transceiver_init_slot(struct rtc_rtp_transceiver *t, int mid_index,
 /* Free per-sender resources allocated by rtc_rtp_sender_arm_video. Idempotent. */
 void rtc_rtp_transceiver_close_resources(struct rtc_rtp_transceiver *t);
 
-/* Wire a sender to its SRTP send context + transport so it can send. */
-void rtc_rtp_sender_attach(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
-                           rtc_packet_io_t *transport);
-
-#ifdef MRTC_ENABLE_SFU_API
 /* Wire a sender to a logical transport. The logical transport owns SRTP. */
 void rtc_rtp_sender_attach_logical(struct rtc_rtp_sender *s, rtc_transport_t *transport);
-#endif
 
 /* Bind transport-cc tagging on a sender (no-op when MRTC_ENABLE_TWCC is off). */
 void rtc_rtp_sender_attach_twcc(struct rtc_rtp_sender *s, void *twcc_sender, uint8_t ext_id);
@@ -275,32 +234,17 @@ void rtc_rtp_sender_arm_video(struct rtc_rtp_sender *s);
 void rtc_rtp_receiver_activate(struct rtc_rtp_receiver *r);
 
 /* Build SR / RR for a single sender or receiver, SRTCP-protect, send. */
-void rtc_rtp_sender_emit_sr(struct rtc_rtp_sender *s, rtc_srtp_ctx_t *srtp_send,
-                            rtc_packet_io_t *transport);
-void rtc_rtp_receiver_emit_rr(struct rtc_rtp_receiver *r, rtc_srtp_ctx_t *srtp_send,
-                              rtc_packet_io_t *transport);
-
-#ifdef MRTC_ENABLE_SFU_API
 void rtc_rtp_sender_emit_sr_logical(struct rtc_rtp_sender *s, rtc_transport_t *transport);
 void rtc_rtp_receiver_emit_rr_logical(struct rtc_rtp_receiver *r, rtc_transport_t *transport);
-#endif
 
 /* Serialize a single transceiver into an SDP m= section. */
 void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc_sdp_media_t *m);
 
-/* ---- Cross-TU function used by rtc_peer_packets.c, defined in rtc_peer.c ---- */
-
-void peer_complete_connection(rtc_peer_connection_t *pc);
-
 /* ---- Entry points defined in rtc_peer_packets.c ---- */
-
-/* Transport recv callback (registered with rtc_packet_io_init). */
-void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t len,
-                         const rtc_addr_t *from, void *user);
 void peer_handle_plain_rtp(rtc_peer_connection_t *pc, const rtc_rtp_packet_t *pkt);
 void peer_handle_plain_rtcp(rtc_peer_connection_t *pc, const uint8_t *buf, size_t pkt_len);
 
-/* RTCP send timer + interval (scheduled from peer_complete_connection). */
+/* RTCP send timer + interval. */
 #define RTCP_INTERVAL_MS 5000
 void peer_rtcp_timer(void *user);
 

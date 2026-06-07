@@ -1,44 +1,19 @@
 /*
  * rtc_peer_packets.c - Peer Connection: transport-thread packet I/O.
  *
- * Owns everything that fires on the transport thread:
- *   - peer_transport_recv: classify and dispatch STUN / DTLS / RTP / RTCP.
- *   - peer_rtcp_timer:     periodic SR / RR emission.
- *   - peer_twcc_fb_timer:  periodic transport-cc feedback emission.
+ * Owns peer media/control callbacks that run from the logical runtime:
+ *   - peer_handle_plain_rtp: parsed inbound RTP dispatch.
+ *   - peer_handle_plain_rtcp: plaintext inbound RTCP dispatch.
+ *   - peer_rtcp_timer: periodic SR / RR emission.
+ *   - peer_twcc_fb_timer: periodic transport-cc feedback emission.
  *   - peer_on_bwe_bitrate: trampoline from BWE → user callback.
  * Feature-gated sections: TWCC arrival recording, BWE feedback, rate control.
  */
 #include "rtc_peer_internal.h"
-#ifdef MRTC_ENABLE_SFU_API
-#  include "rtc_transport_internal.h"
-#endif
+#include "rtc_srtp.h"
+#include "rtc_transport_internal.h"
 
 #include <string.h>
-
-/* Scratch buffer size for inbound RTP/RTCP unprotect. Large enough for any
- * SRTP/SRTCP packet that fits in a single UDP datagram. */
-#define PEER_RECV_BUF_SIZE 2048
-
-/* ---- DTLS receive path ---- */
-
-static void handle_dtls(rtc_peer_connection_t *pc, const uint8_t *data, size_t len) {
-    /* Only process DTLS after connection has started (both desc set) */
-    if (!pc->connect_started)
-        return;
-    rtc_dtls_recv(&pc->dtls, data, len);
-    /* Check if DTLS just completed the handshake */
-    if (pc->dtls.state == RTC_DTLS_STATE_CONNECTED &&
-        pc->connection_state == RTC_CONNECTION_CONNECTING) {
-        peer_complete_connection(pc);
-    }
-    /* Check for DTLS application data (data channel messages) */
-    if (pc->dtls.state == RTC_DTLS_STATE_CONNECTED) {
-        int app_len;
-        while ((app_len = SSL_read(pc->dtls.ssl, pc->app_buf, (int)pc->app_buf_cap)) > 0) {
-            rtc_dc_manager_recv(&pc->dc_manager, pc->app_buf, (size_t)app_len);
-        }
-    }
-}
 
 /* ---- RTP receive path ---- */
 
@@ -99,28 +74,6 @@ void peer_handle_plain_rtp(rtc_peer_connection_t *pc, const rtc_rtp_packet_t *pk
 #ifdef MRTC_ENABLE_TWCC
     record_twcc_arrival(pc, pkt);
 #endif
-}
-
-static void handle_rtp(rtc_peer_connection_t *pc, const uint8_t *data, size_t len) {
-    if (pc->connection_state != RTC_CONNECTION_CONNECTED || len <= 12)
-        return;
-
-    uint8_t buf[PEER_RECV_BUF_SIZE];
-    if (len > sizeof(buf))
-        return;
-    memcpy(buf, data, len);
-
-    /* SRTP unprotect (recv ctx only touched on transport thread) */
-    size_t pkt_len = len;
-    if (rtc_srtp_unprotect(&pc->srtp_recv, buf, &pkt_len) != RTC_OK) {
-        RTC_LOG_WARN("Peer: SRTP unprotect failed");
-        return;
-    }
-
-    rtc_rtp_packet_t pkt;
-    if (rtc_rtp_parse(&pkt, buf, pkt_len) != RTC_OK)
-        return;
-    peer_handle_plain_rtp(pc, &pkt);
 }
 
 /* ---- RTCP receive path ---- */
@@ -269,83 +222,26 @@ void peer_handle_plain_rtcp(rtc_peer_connection_t *pc, const uint8_t *buf, size_
     }
 }
 
-static void handle_rtcp(rtc_peer_connection_t *pc, const uint8_t *data, size_t len) {
-    if (pc->connection_state != RTC_CONNECTION_CONNECTED || len <= 8)
-        return;
-
-    uint8_t buf[PEER_RECV_BUF_SIZE];
-    if (len > sizeof(buf))
-        return;
-    memcpy(buf, data, len);
-
-    /* SRTCP unprotect */
-    size_t pkt_len = len;
-    if (rtc_srtp_unprotect_rtcp(&pc->srtp_recv, buf, &pkt_len) != RTC_OK) {
-        RTC_LOG_WARN("Peer: SRTCP unprotect failed");
-        return;
-    }
-    peer_handle_plain_rtcp(pc, buf, pkt_len);
-}
-
-/* ---- Transport recv callback (fires on transport thread) ---- */
-
-void peer_transport_recv(rtc_pkt_type_t type, const uint8_t *data, size_t len,
-                         const rtc_addr_t *from, void *user) {
-    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
-
-    switch (type) {
-        case RTC_PKT_STUN:
-            rtc_ice_handle_stun(&pc->ice, data, len, from);
-            break;
-        case RTC_PKT_DTLS:
-            handle_dtls(pc, data, len);
-            break;
-        case RTC_PKT_RTP:
-            handle_rtp(pc, data, len);
-            break;
-        case RTC_PKT_RTCP:
-            handle_rtcp(pc, data, len);
-            break;
-        default:
-            break;
-    }
-}
-
 /* ---- RTCP periodic send timer (fires on transport thread every 5 seconds) ---- */
 
 void peer_rtcp_timer(void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
-#ifdef MRTC_ENABLE_SFU_API
-    if (pc->runtime_transport && pc->runtime_connected)
-        pc->runtime_rtcp_timer = RTC_WORKER_TIMER_INVALID;
-#endif
+    pc->runtime_rtcp_timer = RTC_WORKER_TIMER_INVALID;
     if (pc->connection_state != RTC_CONNECTION_CONNECTED)
         return;
 
     /* Build and send RTCP for each active transceiver */
     for (int i = 0; i < pc->transceiver_count; i++) {
         struct rtc_rtp_transceiver *t = &pc->transceivers[i];
-#ifdef MRTC_ENABLE_SFU_API
-        if (pc->runtime_transport && pc->runtime_connected) {
-            rtc_rtp_sender_emit_sr_logical(&t->sender, pc->runtime_transport);
-            rtc_rtp_receiver_emit_rr_logical(&t->receiver, pc->runtime_transport);
-            continue;
-        }
-#endif
-        rtc_rtp_sender_emit_sr(&t->sender, &pc->srtp_send, &pc->transport);
-        rtc_rtp_receiver_emit_rr(&t->receiver, &pc->srtp_send, &pc->transport);
+        rtc_rtp_sender_emit_sr_logical(&t->sender, pc->runtime_transport);
+        rtc_rtp_receiver_emit_rr_logical(&t->receiver, pc->runtime_transport);
     }
 
     /* Re-arm timer */
-#ifdef MRTC_ENABLE_SFU_API
-    if (pc->runtime_transport && pc->runtime_connected) {
+    if (pc->runtime_connected) {
         pc->runtime_rtcp_timer = rtc_worker_add_timer(
             pc->runtime_worker, rtc_time_ms() + RTCP_INTERVAL_MS, peer_rtcp_timer, pc);
-        return;
     }
-#endif
-    pc->rtcp_timer_id = rtc_packet_io_add_timer(&pc->transport, rtc_time_ms() + RTCP_INTERVAL_MS,
-                                                peer_rtcp_timer, pc);
 }
 
 /* ---- TWCC feedback timer (fires every 100ms on transport thread) ---- */
@@ -354,20 +250,12 @@ void peer_rtcp_timer(void *user) {
 
 void peer_twcc_fb_timer(void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
-#  ifdef MRTC_ENABLE_SFU_API
-    if (pc->runtime_transport && pc->runtime_connected)
-        pc->runtime_twcc_fb_timer = RTC_WORKER_TIMER_INVALID;
-#  endif
+    pc->runtime_twcc_fb_timer = RTC_WORKER_TIMER_INVALID;
     if (pc->connection_state != RTC_CONNECTION_CONNECTED) {
-#  ifdef MRTC_ENABLE_SFU_API
         if (pc->runtime_transport && pc->runtime_connected) {
             pc->runtime_twcc_fb_timer = rtc_worker_add_timer(
                 pc->runtime_worker, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
-            return;
         }
-#  endif
-        pc->twcc_fb_timer_id = rtc_packet_io_add_timer(
-            &pc->transport, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
         return;
     }
 
@@ -381,30 +269,19 @@ void peer_twcc_fb_timer(void *user) {
             if (fb_len <= sizeof(buf)) {
                 memcpy(buf, fb, fb_len);
                 size_t out_len = fb_len;
-#  ifdef MRTC_ENABLE_SFU_API
                 if (pc->runtime_transport && pc->runtime_connected) {
                     (void)rtc_transport_send_rtcp(pc->runtime_transport, buf, &out_len,
                                                   sizeof(buf));
-                } else
-#  endif
-                {
-                    if (rtc_srtp_protect_rtcp(&pc->srtp_send, buf, &out_len, sizeof(buf)) == RTC_OK)
-                        rtc_packet_io_send_to_remote(&pc->transport, buf, out_len);
                 }
             }
         }
         pc->twcc_have_packets = false;
     }
 
-#  ifdef MRTC_ENABLE_SFU_API
     if (pc->runtime_transport && pc->runtime_connected) {
         pc->runtime_twcc_fb_timer = rtc_worker_add_timer(
             pc->runtime_worker, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
-        return;
     }
-#  endif
-    pc->twcc_fb_timer_id = rtc_packet_io_add_timer(
-        &pc->transport, rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
 }
 
 /* ---- BWE bitrate-change trampoline (fires on transport thread) ---- */
