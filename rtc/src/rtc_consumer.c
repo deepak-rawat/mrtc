@@ -49,9 +49,20 @@ rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
     consumer->transport = transport;
     consumer->producer = opts->producer;
     consumer->kind = producer_stats.kind;
+    if (rtc_producer_get_rtp_parameters(opts->producer, &consumer->rtp) != RTC_OK) {
+        free(consumer);
+        return NULL;
+    }
     rtc_random_bytes((uint8_t *)&consumer->rtp.ssrc, sizeof(consumer->rtp.ssrc));
     if (consumer->rtp.ssrc == 0)
         consumer->rtp.ssrc = 1;
+    if (consumer->rtp.mid[0] == '\0') {
+        size_t len = strlen(consumer->id);
+        if (len >= sizeof(consumer->rtp.mid))
+            len = sizeof(consumer->rtp.mid) - 1;
+        memcpy(consumer->rtp.mid, consumer->id, len);
+        consumer->rtp.mid[len] = '\0';
+    }
     rtc_random_bytes((uint8_t *)&consumer->seq, sizeof(consumer->seq));
     consumer->app_data = opts->app_data;
     atomic_store_explicit(&consumer->paused, opts->paused, memory_order_release);
@@ -125,8 +136,7 @@ void rtc_consumer_on_producer_rtp(rtc_consumer_t *consumer, const rtc_rtp_packet
     rtc_rtp_packet_t out_pkt;
     uint16_t seq = consumer->seq++;
     int rc = rtc_rtp_build(&out_pkt, pkt->header.payload_type, seq, pkt->header.timestamp,
-                           consumer->rtp.ssrc, pkt->header.marker, pkt->payload,
-                           pkt->payload_len);
+                           consumer->rtp.ssrc, pkt->header.marker, pkt->payload, pkt->payload_len);
     if (rc != RTC_OK)
         return;
 

@@ -30,6 +30,7 @@ typedef struct {
 rtc_producer_t *rtc_transport_produce(rtc_transport_t *transport,
 									  const rtc_producer_options_t *opts);
 const char *rtc_producer_id(const rtc_producer_t *producer);
+int rtc_producer_get_rtp_parameters(rtc_producer_t *producer, rtc_rtp_parameters_t *out);
 void rtc_producer_close(rtc_producer_t *producer);
 void rtc_producer_destroy(rtc_producer_t *producer);
 int rtc_producer_get_stats(rtc_producer_t *producer, rtc_producer_stats_t *out);

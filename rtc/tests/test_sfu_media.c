@@ -24,9 +24,9 @@ static bool make_env(test_env_t *env) {
     if (!env->router)
         return false;
     env->transport = rtc_router_create_transport(env->router, &(rtc_transport_config_t){
-                                                                .listener = env->listener,
-                                                                .ice_mode = RTC_ICE_MODE_LITE,
-                                                            });
+                                                                  .listener = env->listener,
+                                                                  .ice_mode = RTC_ICE_MODE_LITE,
+                                                              });
     return env->transport != NULL;
 }
 
@@ -82,9 +82,9 @@ TEST(consumer_create_pause_resume) {
     ASSERT(producer != NULL);
 
     rtc_consumer_t *consumer = rtc_transport_consume(env.transport, &(rtc_consumer_options_t){
-                                                                    .producer = producer,
-                                                                    .paused = true,
-                                                                });
+                                                                        .producer = producer,
+                                                                        .paused = true,
+                                                                    });
     ASSERT(consumer != NULL);
     ASSERT(rtc_consumer_id(consumer)[0] != '\0');
 
@@ -93,6 +93,15 @@ TEST(consumer_create_pause_resume) {
     ASSERT(!stats.closed);
     ASSERT(stats.paused);
     ASSERT_EQ(stats.kind, RTC_MEDIA_KIND_VIDEO);
+
+    rtc_rtp_parameters_t rtp;
+    ASSERT_EQ(rtc_consumer_get_rtp_parameters(consumer, &rtp), RTC_OK);
+    ASSERT_EQ(rtp.codec_count, 1);
+    ASSERT_EQ(rtp.codecs[0].payload_type, 96);
+    ASSERT_STR_EQ(rtp.codecs[0].mime_type, "video/VP8");
+    ASSERT(rtp.ssrc != 0);
+    ASSERT(rtp.ssrc != opts.rtp.ssrc);
+    ASSERT(rtp.mid[0] != '\0');
 
     rtc_consumer_resume(consumer);
     ASSERT_EQ(rtc_consumer_get_stats(consumer, &stats), RTC_OK);

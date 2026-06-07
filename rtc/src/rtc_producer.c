@@ -80,6 +80,13 @@ const char *rtc_producer_id(const rtc_producer_t *producer) {
     return producer ? producer->id : "";
 }
 
+int rtc_producer_get_rtp_parameters(rtc_producer_t *producer, rtc_rtp_parameters_t *out) {
+    if (!producer || !out)
+        return RTC_ERR_INVALID;
+    *out = producer->rtp;
+    return RTC_OK;
+}
+
 void rtc_producer_close(rtc_producer_t *producer) {
     if (!producer)
         return;
