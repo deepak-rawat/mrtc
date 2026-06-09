@@ -5,7 +5,7 @@ add_library(mrtc_conference STATIC
 )
 target_include_directories(mrtc_conference PUBLIC include)
 target_link_libraries(mrtc_conference PUBLIC
-    mrtc
+    mrtc_client
     mrtc_media
     mrtc_signaling
 )

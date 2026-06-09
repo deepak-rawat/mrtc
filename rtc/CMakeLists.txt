@@ -1,4 +1,8 @@
-# mrtc - core RTC transport library
+# rtc/ - core RTC runtime library (libmrtc)
+#
+# Runtime + protocol primitives. Always built. The optional WebRTC-style
+# peer-connection facade lives in ../client/ as libmrtc_client.
+
 set(RTC_CORE_SOURCES
     src/rtc_utils.c
     src/rtc_poller.c
@@ -20,14 +24,6 @@ set(RTC_PROTOCOL_SOURCES
     src/rtc_turn.c
 )
 
-set(RTC_CLIENT_SOURCES
-    src/rtc_client_runtime.c
-    src/rtc_track.c
-    src/rtc_data_channel.c
-    src/rtc_peer.c
-    src/rtc_peer_packets.c
-)
-
 set(RTC_RUNTIME_SOURCES
     src/rtc_worker.c
     src/rtc_listener.c
@@ -39,55 +35,38 @@ set(RTC_RUNTIME_SOURCES
 
 set(LIB_SOURCES ${RTC_CORE_SOURCES} ${RTC_PROTOCOL_SOURCES} ${RTC_RUNTIME_SOURCES})
 
-if(MRTC_ENABLE_CLIENT_API)
-    list(APPEND LIB_SOURCES ${RTC_CLIENT_SOURCES})
-endif()
-
-# Conditional sources
 if(MRTC_ENABLE_TWCC)
     list(APPEND LIB_SOURCES src/rtc_twcc_sender.c src/rtc_twcc_receiver.c src/rtc_bwe.c)
 endif()
 
 add_library(mrtc STATIC ${LIB_SOURCES})
 target_include_directories(mrtc
-    PUBLIC  include              # Public: rtc_peer.h, rtc_track.h, etc.
+    PUBLIC  include              # Public: rtc_worker.h, rtc_listener.h, etc.
     PRIVATE src include/rtc      # Private: rtc_ice.h, rtc_dtls.h, etc.
 )
 target_link_libraries(mrtc PUBLIC mrtc_common OpenSSL::SSL OpenSSL::Crypto ${PLATFORM_LIBS})
 mrtc_set_warnings(mrtc)
 
-# Feature compile definitions
 if(MRTC_ENABLE_TWCC)
     target_compile_definitions(mrtc PUBLIC MRTC_ENABLE_TWCC)
 endif()
 if(MRTC_ENABLE_RATE_CONTROL)
     target_compile_definitions(mrtc PUBLIC MRTC_ENABLE_RATE_CONTROL)
 endif()
-if(MRTC_ENABLE_CLIENT_API)
-    target_compile_definitions(mrtc PUBLIC MRTC_ENABLE_CLIENT_API)
-endif()
-if(MRTC_ENABLE_SFU_API)
-    target_compile_definitions(mrtc PUBLIC MRTC_ENABLE_SFU_API)
-endif()
+
 # Tests (need access to internal headers for component-level testing)
 if(MRTC_BUILD_TESTS)
-    set(TEST_NAMES test_stun test_rtp test_srtp test_dtls test_ice test_sdp test_packet_io
-                   test_sdp_video test_rtcp test_turn test_rate_control test_rtcp_feedback
-                   test_nack_buf test_rtp_ext test_poller test_timer_sched)
-    if(MRTC_ENABLE_CLIENT_API)
-        list(APPEND TEST_NAMES test_peer test_data_channel)
-    endif()
-    if(MRTC_ENABLE_SFU_API)
-        list(APPEND TEST_NAMES test_worker test_listener test_sfu_transport test_sfu_media
-             test_sfu_timers test_sfu_ice)
-        if(MRTC_ENABLE_CLIENT_API)
-            list(APPEND TEST_NAMES test_sfu_sender)
-        endif()
-    endif()
+    set(RUNTIME_TEST_NAMES
+        test_stun test_rtp test_srtp test_dtls test_ice test_sdp test_packet_io
+        test_sdp_video test_rtcp test_turn test_rate_control test_rtcp_feedback
+        test_nack_buf test_rtp_ext test_poller test_timer_sched
+        test_worker test_listener test_sfu_transport test_sfu_media
+        test_sfu_timers test_sfu_ice
+    )
     if(MRTC_ENABLE_TWCC)
-        list(APPEND TEST_NAMES test_twcc test_bwe)
+        list(APPEND RUNTIME_TEST_NAMES test_twcc test_bwe)
     endif()
-    foreach(test_name ${TEST_NAMES})
+    foreach(test_name ${RUNTIME_TEST_NAMES})
         add_executable(${test_name} tests/${test_name}.c)
         target_include_directories(${test_name} PRIVATE
             ${PROJECT_SOURCE_DIR}/tests

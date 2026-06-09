@@ -2,6 +2,12 @@
  * test_sfu_transport.c - Logical SFU transport skeleton tests.
  */
 #include <rtc/rtc.h>
+#include <rtc/rtc_worker.h>
+#include <rtc/rtc_listener.h>
+#include <rtc/rtc_router.h>
+#include <rtc/rtc_transport.h>
+#include <rtc/rtc_producer.h>
+#include <rtc/rtc_consumer.h>
 
 #include "rtc_dtls.h"
 #include "rtc_rtp.h"

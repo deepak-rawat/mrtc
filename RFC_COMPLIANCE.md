@@ -545,7 +545,7 @@ Files: `rtc/src/rtc_ice.c`, `rtc/src/rtc_ice.h`
 
 **"JavaScript Session Establishment Protocol"**
 
-Files: `rtc/src/rtc_peer.c`, `rtc/include/rtc/rtc_peer.h`
+Files: `client/src/rtc_peer.c`, `client/include/rtc/rtc_peer.h`
 
 ### Implemented
 
@@ -578,7 +578,7 @@ Files: `rtc/src/rtc_peer.c`, `rtc/include/rtc/rtc_peer.h`
 
 **"Media Transport and Use of RTP in WebRTC"**
 
-Files: `rtc/src/rtc_peer.c`, `rtc/src/rtc_rtp.c`
+Files: `client/src/rtc_peer.c`, `rtc/src/rtc_rtp.c`
 
 ### Implemented
 
@@ -701,7 +701,7 @@ successors, ordered by priority.
   - Support reduced-size RTCP (RFC 5506) — send FB without compound SR/RR+SDES
   - Add NACK retransmit buffer (512 packets) in sender
   - Wire PLI → `video_encoder_request_keyframe()`
-- **Files:** `rtc/src/rtc_rtcp.c`, `rtc/src/rtc_rtcp.h`, `rtc/src/rtc_peer.c`, `rtc/src/rtc_sdp.c`
+- **Files:** `rtc/src/rtc_rtcp.c`, `rtc/src/rtc_rtcp.h`, `client/src/rtc_peer.c`, `rtc/src/rtc_sdp.c`
 - **Effort:** Large
 
 #### B2 — RTCP Compound Packets & SDES CNAME (RFC 3550 §6.1 + RFC 7022)
@@ -710,7 +710,7 @@ successors, ordered by priority.
   - Generate compound RTCP (SR/RR + SDES CNAME) instead of bare SR/RR
   - Generate CNAME per RFC 7022 (random, persistent per session)
   - Implement bandwidth-adaptive RTCP interval (replace fixed 5s timer)
-- **Files:** `rtc/src/rtc_rtcp.c`, `rtc/src/rtc_peer.c`
+- **Files:** `rtc/src/rtc_rtcp.c`, `client/src/rtc_peer.c`
 - **Effort:** Medium
 
 #### B3 — RTP/RTCP Mux Compliance (RFC 5761)
@@ -727,7 +727,7 @@ successors, ordered by priority.
   - Emit local candidates incrementally as gathering discovers them
   - Add `a=end-of-candidates` signaling
   - Handle dynamic checklist updates as remote candidates arrive
-- **Files:** `rtc/src/rtc_ice.c`, `rtc/src/rtc_peer.c`, `rtc/src/rtc_sdp.c`
+- **Files:** `rtc/src/rtc_ice.c`, `client/src/rtc_peer.c`, `rtc/src/rtc_sdp.c`
 - **Effort:** Large
 
 #### C2 — ICE Controlled Role (RFC 8445 §7.3)
@@ -737,7 +737,7 @@ successors, ordered by priority.
   - Implement role determination from SDP offer/answer (offerer=controlling, answerer=controlled)
   - Handle role conflict (tie-breaker comparison, 487 error)
   - Implement regular nomination (controlled side waits for USE-CANDIDATE)
-- **Files:** `rtc/src/rtc_ice.c`, `rtc/src/rtc_peer.c`
+- **Files:** `rtc/src/rtc_ice.c`, `client/src/rtc_peer.c`
 - **Effort:** Medium
 
 ### Phase D: Bandwidth Estimation (aligns with ROADMAP Phase 3)
@@ -757,7 +757,7 @@ successors, ordered by priority.
   - Sender: attach per-packet transport-wide sequence numbers via RTP header extension
   - Receiver: track arrival times, build RTCP Transport Feedback packets
   - Sender: compare send/recv deltas for delay-based estimation
-- **Files:** `rtc/src/rtc_rtcp.c`, `rtc/src/rtc_peer.c`, new `rtc/src/rtc_bwe.c`
+- **Files:** `rtc/src/rtc_rtcp.c`, `client/src/rtc_peer.c`, new `rtc/src/rtc_bwe.c`
 - **Effort:** Large
 
 #### D3 — GCC (Google Congestion Control)

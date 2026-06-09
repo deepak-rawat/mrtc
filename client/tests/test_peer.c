@@ -9,7 +9,7 @@
  *   5. ICE candidates fired via on_ice_candidate callback
  *   6. Full offer/answer exchange between two peers
  */
-#include <rtc/rtc.h>
+#include <rtc/rtc_client.h>
 #include <rtc/rtc_listener.h>
 #include <rtc/rtc_router.h>
 #include <rtc/rtc_transport.h>
@@ -249,8 +249,8 @@ static bool sdp_get_first_candidate_port(const char *sdp, uint16_t *out_port) {
     int component = 0;
     unsigned int priority = 0;
     unsigned int port = 0;
-    int parsed = sscanf(p, "a=candidate:%31s %d %7s %u %63s %u typ %15s", foundation,
-                        &component, transport, &priority, ip, &port, type);
+    int parsed = sscanf(p, "a=candidate:%31s %d %7s %u %63s %u typ %15s", foundation, &component,
+                        transport, &priority, ip, &port, type);
     if (parsed != 7 || port == 0 || port > 65535)
         return false;
     *out_port = (uint16_t)port;
@@ -322,9 +322,9 @@ static bool make_remote_env(peer_remote_env_t *env) {
     if (!env->router)
         return false;
     env->transport = rtc_router_create_transport(env->router, &(rtc_transport_config_t){
-                                                                 .listener = env->listener,
-                                                                 .ice_mode = RTC_ICE_MODE_LITE,
-                                                             });
+                                                                  .listener = env->listener,
+                                                                  .ice_mode = RTC_ICE_MODE_LITE,
+                                                              });
     return env->transport != NULL;
 }
 
@@ -722,7 +722,7 @@ int main(void) {
     printf("  Peer Connection Tests (New API)\n");
     printf("========================================\n\n");
 
-    rtc_init();
+    rtc_client_init();
     rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(peer_create_destroy);
@@ -739,6 +739,6 @@ int main(void) {
     RUN_TEST(peer_identity_getters);
     RUN_TEST(peer_restart_ice);
 
-    rtc_cleanup();
+    rtc_client_cleanup();
     TEST_SUMMARY();
 }

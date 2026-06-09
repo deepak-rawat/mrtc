@@ -16,10 +16,6 @@
 #ifndef RTC_PEER_H
 #define RTC_PEER_H
 
-#ifndef MRTC_ENABLE_CLIENT_API
-#  error "rtc_peer.h requires MRTC_ENABLE_CLIENT_API"
-#endif
-
 #include "rtc_common.h"
 #include "rtc_track.h"
 #include "rtc_data_channel.h"

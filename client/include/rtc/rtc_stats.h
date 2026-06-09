@@ -11,9 +11,7 @@
 #define RTC_STATS_H
 
 #include "rtc_common.h"
-
-#ifdef MRTC_ENABLE_CLIENT_API
-#  include "rtc_track.h"
+#include "rtc_track.h"
 
 /* Per-transceiver stats (one entry per active m-line). */
 typedef struct {
@@ -44,6 +42,5 @@ typedef struct rtc_peer_connection rtc_peer_connection_t;
 /* Fill `report` with a snapshot of the peer connection's current stats.
  * Returns RTC_OK on success. The report is overwritten on each call. */
 int rtc_peer_connection_get_stats(const rtc_peer_connection_t *pc, rtc_stats_report_t *report);
-#endif /* MRTC_ENABLE_CLIENT_API */
 
 #endif /* RTC_STATS_H */

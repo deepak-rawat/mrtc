@@ -22,7 +22,7 @@
 #include <media/test_pattern.h>
 #include <media/test_tone.h>
 #include <signaling/signaling_client.h>
-#include <rtc/rtc.h>
+#include <rtc/rtc_client.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -72,7 +72,7 @@ int main(int argc, char *argv[]) {
     printf("================================================\n\n");
 
     /* Init mrtc */
-    rtc_init();
+    rtc_client_init();
 
     /* Log to timestamped file + stderr */
     char log_path[128];
@@ -278,7 +278,7 @@ int main(int argc, char *argv[]) {
     ui_sdl3_close(&ui);
     SDL_Quit();
     rtc_log_close();
-    rtc_cleanup();
+    rtc_client_cleanup();
 
     printf("  Bye!\n");
     return 0;

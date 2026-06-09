@@ -11,7 +11,7 @@
  *   7. Multiple channels
  *   8. Reject send before open
  */
-#include <rtc/rtc.h>
+#include <rtc/rtc_client.h>
 #include "rtc_data_channel_internal.h"
 #include "test_harness.h"
 
@@ -413,7 +413,7 @@ int main(void) {
     printf("  Data Channel Tests\n");
     printf("========================================\n\n");
 
-    rtc_init();
+    rtc_client_init();
     rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(dc_create);
@@ -426,6 +426,6 @@ int main(void) {
     RUN_TEST(dc_large_channel_id);
     RUN_TEST(dc_buffered_amount);
 
-    rtc_cleanup();
+    rtc_client_cleanup();
     TEST_SUMMARY();
 }

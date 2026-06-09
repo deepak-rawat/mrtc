@@ -35,11 +35,12 @@ payloads. The `media` library is a separate layer providing codecs, packetizers,
 and pipeline orchestration — it depends on `rtc` and uses its typed
 `rtc_rtp_sender_t*` interface directly (no callback indirection).
 
-The runtime transport core is now always built into `libmrtc`. Both the client
-peer-connection facade and the SFU public API use the same worker, shared UDP
-listener, logical transport, router, producer, and consumer implementation. The
-`MRTC_ENABLE_SFU_API` CMake option controls whether SFU public headers are
-exposed through the umbrella API, not whether the runtime core exists.
+The runtime transport core is now always built into `libmrtc`. The optional
+`libmrtc_client` (built when `MRTC_ENABLE_CLIENT_API=ON`) layers the WebRTC-
+style peer-connection facade, tracks, data channels, and stats on top.
+SFU / custom-transport consumers link `libmrtc` directly and create the
+worker, listener, router, logical transport, producer, and consumer
+primitives themselves — they do not need `libmrtc_client`.
 
 All public API functions use the `rtc_` prefix.
 
@@ -50,11 +51,17 @@ All public API functions use the `rtc_` prefix.
 ├── common/                 # Platform abstractions (libmrtc_common)
 │   ├── include/rtc/        #   rtc_common.h — sockets, threads, errors, logging
 │   └── src/
-├── rtc/                    # Core transport library (libmrtc)
-│   ├── include/rtc/        #   rtc_peer.h, rtc_track.h, rtc_sfu.h — public API surface
+├── rtc/                    # Runtime transport core (libmrtc) — always built
+│   ├── include/rtc/        #   rtc_worker.h/listener.h/transport.h/router.h
+│   │                       #   rtc_producer.h/consumer.h/rtp_params.h, rtc.h
 │   ├── src/                #   private helpers (rtc_stun.h, rtc_turn.h), ICE, DTLS,
-│   │                       #   SRTP, rate control, NACK buffer, TWCC, BWE
-│   └── tests/              #   18 test executables
+│   │                       #   SRTP, RTP, RTCP, SDP, rate control, NACK, TWCC, BWE
+│   └── tests/              #   runtime + protocol test executables
+├── client/                 # WebRTC-style peer-connection facade (libmrtc_client)
+│   ├── include/rtc/        #   rtc_peer.h, rtc_track.h, rtc_data_channel.h,
+│   │                       #   rtc_stats.h, rtc_client.h (umbrella)
+│   ├── src/                #   peer, track, data channel, shared client runtime
+│   └── tests/              #   test_peer, test_data_channel, test_rtp_sender_loopback
 ├── media/                  # Media library (libmrtc_media)
 │   ├── include/media/      #   media_pipeline.h, video_codec.h, audio_codec.h, video_stats.h
 │   ├── src/                #   vp8_packetizer.h (private), jitter_buffer, video_debug/dump
@@ -81,7 +88,8 @@ Each component has its own `ARCHITECTURE.md` with detailed design, API, and usag
 | Component | File | Description |
 |---|---|---|
 | Common | [common/ARCHITECTURE.md](common/ARCHITECTURE.md) | Platform abstractions, types, logging |
-| RTC | [rtc/ARCHITECTURE.md](rtc/ARCHITECTURE.md) | Core WebRTC protocol stack |
+| RTC | [rtc/ARCHITECTURE.md](rtc/ARCHITECTURE.md) | Core RTC runtime + protocol primitives |
+| Client | [client/ARCHITECTURE.md](client/ARCHITECTURE.md) | WebRTC-style peer connection facade |
 | Media | [media/ARCHITECTURE.md](media/ARCHITECTURE.md) | Codecs, packetizer, media pipeline |
 | Signaling | [signaling/ARCHITECTURE.md](signaling/ARCHITECTURE.md) | WebSocket client + server |
 | Conference | [conference/ARCHITECTURE.md](conference/ARCHITECTURE.md) | Multi-peer orchestration |
@@ -99,19 +107,20 @@ Each component has its own `ARCHITECTURE.md` with detailed design, API, and usag
 ## Library Dependencies
 
 ```
-app/conf_sdl ──→ mrtc_conference ──→ mrtc ──→ mrtc_common
-                       │                         │
-                       ├──→ mrtc_media ──→ mrtc ──┘
+app/conf_sdl ──→ mrtc_conference ──→ mrtc_client ──→ mrtc ──→ mrtc_common
+                       │                                       │
+                       ├──→ mrtc_media ──→ mrtc_client ──────┘
                        │
                        └──→ mrtc_signaling ──→ mrtc_common
 
-app/chat ──→ mrtc ──→ mrtc_common
+app/chat ──→ mrtc_client ──→ mrtc ──→ mrtc_common
        └──→ mrtc_signaling
 ```
 
 External dependencies:
 - `mrtc_common` → OpenSSL (crypto)
 - `mrtc` → OpenSSL (SSL + crypto)
+- `mrtc_client` → (transitively via `mrtc`)
 - `mrtc_media` → libvpx, libopus
 - `mrtc_signaling` → libwebsockets, cJSON
 - `app/conf_sdl` → SDL3

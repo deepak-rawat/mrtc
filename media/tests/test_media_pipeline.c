@@ -7,7 +7,7 @@
 #include "media/media_pipeline.h"
 #include "media/video_codec.h"
 #include "media/audio_codec.h"
-#include <rtc/rtc.h>
+#include <rtc/rtc_client.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -334,7 +334,7 @@ int main(void) {
     printf("  Media Pipeline Tests\n");
     printf("========================================\n\n");
 
-    rtc_init();
+    rtc_client_init();
     rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(pipeline_create_destroy);
@@ -347,7 +347,7 @@ int main(void) {
     RUN_TEST(pipeline_send_peer_fanout);
     RUN_TEST(pipeline_remove_send_peer);
 
-    rtc_cleanup();
+    rtc_client_cleanup();
     TEST_SUMMARY();
     return _test_fail_count > 0 ? 1 : 0;
 }

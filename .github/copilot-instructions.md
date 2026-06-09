@@ -15,7 +15,8 @@ cd build && make          # Linux
 See [ARCHITECTURE.md](../ARCHITECTURE.md) for the layer diagram, project structure,
 and library dependency graph. Per-component design docs:
 - `common/ARCHITECTURE.md` — platform abstractions
-- `rtc/ARCHITECTURE.md` — core WebRTC protocol stack
+- `rtc/ARCHITECTURE.md` — core RTC runtime + protocol primitives
+- `client/ARCHITECTURE.md` — WebRTC-style peer connection facade
 - `media/ARCHITECTURE.md` — codecs, jitter buffer, media pipeline
 - `signaling/ARCHITECTURE.md` — WebSocket signaling client + server
 - `conference/ARCHITECTURE.md` — multi-peer conferencing

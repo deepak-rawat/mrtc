@@ -47,8 +47,8 @@ int rtc_timer_sched_next_timeout_ms(rtc_timer_sched_t *sched, uint64_t now_ms,
                                     int default_timeout_ms);
 
 void rtc_timer_sched_fire_due(rtc_timer_sched_t *sched, uint64_t now_ms);
-bool rtc_timer_sched_pop_due(rtc_timer_sched_t *sched, uint64_t now_ms,
-                             rtc_timer_sched_fn *fn, void **user);
+bool rtc_timer_sched_pop_due(rtc_timer_sched_t *sched, uint64_t now_ms, rtc_timer_sched_fn *fn,
+                             void **user);
 int rtc_timer_sched_pending_count(rtc_timer_sched_t *sched);
 
 #endif /* RTC_TIMER_SCHED_H */

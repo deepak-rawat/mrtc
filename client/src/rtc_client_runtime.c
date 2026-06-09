@@ -3,7 +3,8 @@
  */
 #include "rtc_client_runtime.h"
 
-#include "rtc/rtc_common.h"
+#include "rtc/rtc.h"
+#include "rtc/rtc_client.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -134,4 +135,23 @@ rtc_listener_t *rtc_client_runtime_listener(rtc_client_runtime_t *runtime) {
 
 rtc_router_t *rtc_client_runtime_router(rtc_client_runtime_t *runtime) {
     return runtime ? runtime->router : NULL;
+}
+
+/* ---------- Public client lifecycle ---------- */
+
+int rtc_client_init(void) {
+    int rc = rtc_init();
+    if (rc != RTC_OK)
+        return rc;
+    rc = rtc_client_runtime_global_init();
+    if (rc != RTC_OK) {
+        rtc_cleanup();
+        return rc;
+    }
+    return RTC_OK;
+}
+
+void rtc_client_cleanup(void) {
+    rtc_client_runtime_global_cleanup();
+    rtc_cleanup();
 }

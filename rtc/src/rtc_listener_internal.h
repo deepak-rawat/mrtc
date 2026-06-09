@@ -16,8 +16,7 @@ int rtc_listener_register_ufrag(rtc_listener_t *listener, const char *ufrag,
                                 rtc_listener_packet_fn fn, void *user);
 void rtc_listener_unregister_ufrag(rtc_listener_t *listener, const char *ufrag);
 
-int rtc_listener_register_stun_txn(rtc_listener_t *listener,
-                                   const uint8_t txn_id[STUN_TXN_ID_SIZE],
+int rtc_listener_register_stun_txn(rtc_listener_t *listener, const uint8_t txn_id[STUN_TXN_ID_SIZE],
                                    rtc_listener_packet_fn fn, void *user);
 void rtc_listener_unregister_stun_txn(rtc_listener_t *listener,
                                       const uint8_t txn_id[STUN_TXN_ID_SIZE]);

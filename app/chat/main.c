@@ -31,7 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <rtc/rtc.h>
+#include <rtc/rtc_client.h>
 #include <signaling/signaling_client.h>
 #include <signaling/signaling_msg.h>
 
@@ -401,7 +401,7 @@ int main(int argc, char *argv[]) {
     printf("================================================\n\n");
 
     /* Initialize mrtc */
-    rtc_init();
+    rtc_client_init();
 
     /* Create signaling client */
     signaling_config_t sig_cfg;
@@ -488,7 +488,7 @@ int main(int argc, char *argv[]) {
     }
 
     signaling_destroy(g_signaling);
-    rtc_cleanup();
+    rtc_client_cleanup();
 
     printf("  Bye!\n");
     return 0;

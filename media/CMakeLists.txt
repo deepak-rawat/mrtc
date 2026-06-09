@@ -24,7 +24,7 @@ target_include_directories(mrtc_media
     PUBLIC  include          # Public: media_pipeline.h, video_codec.h, etc.
     PRIVATE src              # Private: vp8_packetizer.h, jitter_buffer.h, etc.
 )
-target_link_libraries(mrtc_media PUBLIC mrtc PkgConfig::VPX PkgConfig::OPUS m)
+target_link_libraries(mrtc_media PUBLIC mrtc_client PkgConfig::VPX PkgConfig::OPUS m)
 mrtc_set_warnings(mrtc_media)
 
 # Tests (need access to internal headers for component-level testing)

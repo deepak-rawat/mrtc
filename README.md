@@ -62,15 +62,18 @@ Build options:
 
 | Option | Default | Notes |
 |---|---:|---|
-| `MRTC_ENABLE_CLIENT_API` | `ON` | Builds peer connection, tracks, and data-channel APIs |
-| `MRTC_ENABLE_SFU_API` | `ON` | Exposes SFU public headers and SFU-focused tests |
+| `MRTC_ENABLE_CLIENT_API` | `ON` | Builds the `libmrtc_client` peer-connection facade on top of `libmrtc` |
 | `MRTC_ENABLE_TWCC` | `ON` | Builds transport-wide CC and GCC bandwidth estimator |
 | `MRTC_ENABLE_RATE_CONTROL` | `ON` | Builds RR-based AIMD sender rate control |
 
-The runtime transport core is always part of `libmrtc`. Client peer connections
-and SFU APIs both use the same worker/listener/router/logical-transport stack;
-`MRTC_ENABLE_SFU_API` controls public SFU API exposure, not whether the runtime
-implementation is compiled.
+The `rtc/` component produces two static libraries:
+
+- `libmrtc` — always built. Runtime transport core (worker, listener,
+  router, transport, producer, consumer) plus the protocol primitives.
+  Sufficient on its own for SFU / custom-transport consumers.
+- `libmrtc_client` — built when `MRTC_ENABLE_CLIENT_API=ON`. The
+  WebRTC-style `RTCPeerConnection` facade (tracks, data channels,
+  stats). Links `libmrtc` publicly.
 
 ## Running
 

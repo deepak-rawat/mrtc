@@ -6,14 +6,10 @@
  * and delivers reliable, ordered messages over the DTLS transport.
  *
  * The wire format and the manager that owns channels are internal to
- * the library (see rtc/src/rtc_data_channel_internal.h).
+ * the library (see client/src/rtc_data_channel_internal.h).
  */
 #ifndef RTC_DATA_CHANNEL_H
 #define RTC_DATA_CHANNEL_H
-
-#ifndef MRTC_ENABLE_CLIENT_API
-#  error "rtc_data_channel.h requires MRTC_ENABLE_CLIENT_API"
-#endif
 
 #include "rtc_common.h"
 

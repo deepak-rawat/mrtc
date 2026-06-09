@@ -5,7 +5,7 @@
  * Internally uses rtc (peer connection), media (codecs + pipeline), and signaling.
  */
 #include "conference/conference.h"
-#include <rtc/rtc.h>
+#include <rtc/rtc_client.h>
 #include <rtc/rtc_str_map.h>
 #include <media/media_pipeline.h>
 #include <signaling/signaling_client.h>

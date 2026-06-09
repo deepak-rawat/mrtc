@@ -2,6 +2,10 @@
  * test_sfu_timers.c - SFU runtime timer integration tests.
  */
 #include <rtc/rtc.h>
+#include <rtc/rtc_worker.h>
+#include <rtc/rtc_listener.h>
+#include <rtc/rtc_router.h>
+#include <rtc/rtc_transport.h>
 
 #include "rtc_dtls.h"
 #include "rtc_stun.h"

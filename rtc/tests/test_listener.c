@@ -2,6 +2,8 @@
  * test_listener.c - RTC listener lifecycle tests.
  */
 #include <rtc/rtc.h>
+#include <rtc/rtc_listener.h>
+#include <rtc/rtc_worker.h>
 
 #include "rtc_listener_internal.h"
 #include "rtc_stun.h"
@@ -101,8 +103,8 @@ static int send_to_listener(rtc_listener_t *listener, const uint8_t *data, size_
     int rc = listener_loopback_addr(listener, &dest);
     if (rc != RTC_OK)
         return rc;
-    int sent = sendto(sender, (const char *)data, (int)len, 0,
-                      (const struct sockaddr *)&dest.addr, dest.len);
+    int sent = sendto(sender, (const char *)data, (int)len, 0, (const struct sockaddr *)&dest.addr,
+                      dest.len);
     return sent == (int)len ? RTC_OK : RTC_ERR_SOCKET;
 }
 

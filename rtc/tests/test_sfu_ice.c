@@ -2,6 +2,10 @@
  * test_sfu_ice.c - Logical transport ICE tests.
  */
 #include <rtc/rtc.h>
+#include <rtc/rtc_worker.h>
+#include <rtc/rtc_listener.h>
+#include <rtc/rtc_router.h>
+#include <rtc/rtc_transport.h>
 
 #include "test_harness.h"
 
@@ -32,9 +36,9 @@ static bool make_env(ice_env_t *env, rtc_ice_mode_t mode) {
     if (!env->router)
         return false;
     env->transport = rtc_router_create_transport(env->router, &(rtc_transport_config_t){
-                                                                 .listener = env->listener,
-                                                                 .ice_mode = mode,
-                                                             });
+                                                                  .listener = env->listener,
+                                                                  .ice_mode = mode,
+                                                              });
     return env->transport != NULL;
 }
 

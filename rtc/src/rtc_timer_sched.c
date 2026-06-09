@@ -206,8 +206,8 @@ void rtc_timer_sched_fire_due(rtc_timer_sched_t *sched, uint64_t now_ms) {
     }
 }
 
-bool rtc_timer_sched_pop_due(rtc_timer_sched_t *sched, uint64_t now_ms,
-                             rtc_timer_sched_fn *fn, void **user) {
+bool rtc_timer_sched_pop_due(rtc_timer_sched_t *sched, uint64_t now_ms, rtc_timer_sched_fn *fn,
+                             void **user) {
     if (!sched || !fn || !user)
         return false;
     for (;;) {
