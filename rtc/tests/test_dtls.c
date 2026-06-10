@@ -45,9 +45,6 @@ static int server_send_fn(const uint8_t *data, size_t len, void *user) {
     return RTC_OK;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: init client transport                                        */
-/* ------------------------------------------------------------------ */
 TEST(dtls_init_client) {
     rtc_dtls_transport_t dtls;
     int rc = rtc_dtls_init(&dtls, RTC_DTLS_ROLE_CLIENT, NULL, NULL);
@@ -69,9 +66,6 @@ TEST(dtls_init_client) {
     rtc_dtls_close(&dtls);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: init server transport                                        */
-/* ------------------------------------------------------------------ */
 TEST(dtls_init_server) {
     rtc_dtls_transport_t dtls;
     int rc = rtc_dtls_init(&dtls, RTC_DTLS_ROLE_SERVER, NULL, NULL);
@@ -85,9 +79,6 @@ TEST(dtls_init_server) {
     rtc_dtls_close(&dtls);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: each init generates a unique certificate                     */
-/* ------------------------------------------------------------------ */
 TEST(dtls_unique_certs) {
     rtc_dtls_transport_t a, b;
     rtc_dtls_init(&a, RTC_DTLS_ROLE_CLIENT, NULL, NULL);
@@ -100,9 +91,6 @@ TEST(dtls_unique_certs) {
     rtc_dtls_close(&b);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: role changes preserve the advertised certificate             */
-/* ------------------------------------------------------------------ */
 TEST(dtls_role_change_keeps_fingerprint) {
     rtc_dtls_transport_t dtls;
     int rc = rtc_dtls_init(&dtls, RTC_DTLS_ROLE_CLIENT, client_send_fn, NULL);
@@ -121,9 +109,6 @@ TEST(dtls_role_change_keeps_fingerprint) {
     rtc_dtls_close(&dtls);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: full DTLS handshake via memory pipe                          */
-/* ------------------------------------------------------------------ */
 TEST(dtls_handshake) {
     memset(&pipe_to_server, 0, sizeof(pipe_to_server));
     memset(&pipe_to_client, 0, sizeof(pipe_to_client));
@@ -178,9 +163,6 @@ TEST(dtls_handshake) {
     rtc_dtls_close(&server);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: SRTP key export after handshake                              */
-/* ------------------------------------------------------------------ */
 TEST(dtls_srtp_key_export) {
     memset(&pipe_to_server, 0, sizeof(pipe_to_server));
     memset(&pipe_to_client, 0, sizeof(pipe_to_client));
@@ -234,9 +216,6 @@ TEST(dtls_srtp_key_export) {
     rtc_dtls_close(&server);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: full DTLS + SRTP e2e (handshake → encrypt → decrypt)         */
-/* ------------------------------------------------------------------ */
 TEST(dtls_srtp_e2e) {
     memset(&pipe_to_server, 0, sizeof(pipe_to_server));
     memset(&pipe_to_client, 0, sizeof(pipe_to_client));
@@ -298,7 +277,6 @@ TEST(dtls_srtp_e2e) {
     rtc_dtls_close(&server);
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  DTLS Component Tests\n");

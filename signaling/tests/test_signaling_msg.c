@@ -7,7 +7,6 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* ------------------------------------------------------------------ */
 TEST(json_build_join) {
     char *json = sig_msg_build_join("test-meeting");
     ASSERT(json != NULL);
@@ -17,7 +16,6 @@ TEST(json_build_join) {
     free(json);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(json_build_leave) {
     char *json = sig_msg_build_leave();
     ASSERT(json != NULL);
@@ -26,7 +24,6 @@ TEST(json_build_leave) {
     free(json);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(json_build_offer) {
     char *json = sig_msg_build_offer("abc123", "v=0\r\no=mrtc ...");
     ASSERT(json != NULL);
@@ -37,7 +34,6 @@ TEST(json_build_offer) {
     free(json);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(json_build_joined) {
     const char *peers[] = {"peer1", "peer2"};
     char *json = sig_msg_build_joined("myid", peers, 2);
@@ -50,7 +46,6 @@ TEST(json_build_joined) {
     free(json);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(json_build_joined_empty) {
     char *json = sig_msg_build_joined("myid", NULL, 0);
     ASSERT(json != NULL);
@@ -59,7 +54,6 @@ TEST(json_build_joined_empty) {
     free(json);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(json_parse_joined) {
     const char *peers[] = {"p1", "p2", "p3"};
     char *json = sig_msg_build_joined("me123", peers, 3);
@@ -78,7 +72,6 @@ TEST(json_parse_joined) {
     free(json);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(json_parse_offer) {
     char *json = sig_msg_build_relay_offer("sender42", "v=0\r\ntest sdp");
     ASSERT(json != NULL);
@@ -93,7 +86,6 @@ TEST(json_parse_offer) {
     free(json);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(json_parse_candidate) {
     char *json = sig_msg_build_candidate("target1", "candidate:H0 1 udp 2130706431 ...");
     ASSERT(json != NULL);
@@ -108,7 +100,6 @@ TEST(json_parse_candidate) {
     free(json);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(json_parse_error) {
     char *json = sig_msg_build_error("meeting full");
     ASSERT(json != NULL);
@@ -122,7 +113,6 @@ TEST(json_parse_error) {
     free(json);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(json_parse_malformed) {
     sig_msg_t msg;
     /* Not valid JSON */
@@ -134,7 +124,6 @@ TEST(json_parse_malformed) {
     printf("    malformed messages correctly rejected\n");
 }
 
-/* ------------------------------------------------------------------ */
 TEST(json_roundtrip_all_types) {
     sig_msg_t msg;
     char *json;
@@ -177,7 +166,6 @@ TEST(json_roundtrip_all_types) {
     printf("    all message types round-trip OK\n");
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Signaling Message Tests\n");

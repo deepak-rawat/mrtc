@@ -144,8 +144,6 @@ TEST(poller_wait_reports_ready_fd) {
     printf("    wait reported ready fd correctly\n");
 }
 
-/* ---- Wake tests ---- */
-
 struct wake_thread_arg {
     rtc_poller_t *p;
     _Atomic int returned;

@@ -45,9 +45,6 @@
 #  define SLEEP_MS(ms) usleep((ms) * 1000)
 #endif
 
-/* ------------------------------------------------------------------ */
-/*  Per-peer state                                                     */
-/* ------------------------------------------------------------------ */
 #define MAX_PEERS 8
 
 typedef struct {
@@ -64,9 +61,6 @@ static char g_my_id[SIG_MAX_PEER_ID];
 static const char *g_stun_ip = "stun.l.google.com";
 static bool g_running = true;
 
-/* ------------------------------------------------------------------ */
-/*  Peer state management                                              */
-/* ------------------------------------------------------------------ */
 static peer_state_t *find_peer(const char *peer_id) {
     for (int i = 0; i < g_peer_count; i++) {
         if (g_peers[i].active && strcmp(g_peers[i].peer_id, peer_id) == 0)
@@ -100,9 +94,6 @@ static void remove_peer(const char *peer_id) {
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Data channel callbacks                                             */
-/* ------------------------------------------------------------------ */
 static void on_dc_open(void *user) {
     peer_state_t *ps = (peer_state_t *)user;
     ps->dc_open = true;
@@ -129,9 +120,6 @@ static void setup_dc_callbacks(peer_state_t *ps) {
     rtc_data_channel_on_message(ps->dc, on_dc_message, ps);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Peer connection callbacks                                          */
-/* ------------------------------------------------------------------ */
 static void on_connection_state(rtc_connection_state_t state, void *user) {
     peer_state_t *ps = (peer_state_t *)user;
     if (state == RTC_CONNECTION_CONNECTED)
@@ -153,9 +141,6 @@ static void on_data_channel(rtc_data_channel_t *channel, void *user) {
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Create a peer connection for a remote peer                         */
-/* ------------------------------------------------------------------ */
 static signaling_client_t *g_signaling; /* forward ref */
 
 static rtc_peer_connection_t *create_pc(peer_state_t *ps) {
@@ -176,9 +161,6 @@ static rtc_peer_connection_t *create_pc(peer_state_t *ps) {
     return pc;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Create offer and send to peer via signaling                        */
-/* ------------------------------------------------------------------ */
 static int offer_to_peer(peer_state_t *ps) {
     rtc_peer_connection_t *pc = create_pc(ps);
     if (!pc)
@@ -212,9 +194,6 @@ static int offer_to_peer(peer_state_t *ps) {
     return RTC_OK;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Handle incoming offer: create answer and send back                 */
-/* ------------------------------------------------------------------ */
 static int handle_offer(const char *from, const char *sdp) {
     peer_state_t *ps = find_peer(from);
     if (!ps) {
@@ -258,9 +237,6 @@ static int handle_offer(const char *from, const char *sdp) {
     return RTC_OK;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Handle incoming answer                                             */
-/* ------------------------------------------------------------------ */
 static int handle_answer(const char *from, const char *sdp) {
     peer_state_t *ps = find_peer(from);
     if (!ps || !ps->pc)
@@ -278,9 +254,6 @@ static int handle_answer(const char *from, const char *sdp) {
     return rtc_peer_connection_set_remote_desc(ps->pc, &answer_desc);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Signaling callbacks                                                */
-/* ------------------------------------------------------------------ */
 static void on_joined(const char *my_id, const char **peer_ids, int peer_count, void *user) {
     (void)user;
     snprintf(g_my_id, sizeof(g_my_id), "%s", my_id);
@@ -330,9 +303,6 @@ static void on_error(const char *message, void *user) {
     fflush(stdout);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Send a chat message to all connected peers                         */
-/* ------------------------------------------------------------------ */
 static void send_to_all(const char *text, size_t len) {
     for (int i = 0; i < g_peer_count; i++) {
         if (g_peers[i].active && g_peers[i].dc_open && g_peers[i].dc) {
@@ -341,9 +311,6 @@ static void send_to_all(const char *text, size_t len) {
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Non-blocking stdin check                                           */
-/* ------------------------------------------------------------------ */
 static bool stdin_has_data(void) {
 #ifdef _WIN32
     return _kbhit() != 0;
@@ -356,9 +323,6 @@ static bool stdin_has_data(void) {
 #endif
 }
 
-/* ------------------------------------------------------------------ */
-/*  Usage                                                              */
-/* ------------------------------------------------------------------ */
 static void print_usage(const char *prog) {
     printf("Usage: %s --meeting <name> [--server <url>] [--stun <ip>]\n\n", prog);
     printf("  --meeting <name>   Meeting to join (required)\n");
@@ -366,9 +330,6 @@ static void print_usage(const char *prog) {
     printf("  --stun <ip>        STUN server IP (default: stun.l.google.com)\n");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Main                                                               */
-/* ------------------------------------------------------------------ */
 int main(int argc, char *argv[]) {
     const char *meeting = NULL;
     const char *server_url = "ws://127.0.0.1:8080";

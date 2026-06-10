@@ -97,9 +97,9 @@ struct rtc_peer_connection {
     rtc_transport_t *runtime_transport;
     rtc_worker_timer_t runtime_connect_timer;
     rtc_worker_timer_t runtime_rtcp_timer;
-#  ifdef MRTC_ENABLE_TWCC
+#ifdef MRTC_ENABLE_TWCC
     rtc_worker_timer_t runtime_twcc_fb_timer;
-#  endif
+#endif
     char runtime_fingerprint[RTC_DTLS_FINGERPRINT_MAX];
     bool runtime_connected;
 
@@ -197,7 +197,6 @@ static inline void peer_set_connection(rtc_peer_connection_t *pc, rtc_connection
     if (pc->on_connection_state)
         pc->on_connection_state(s, pc->on_connection_state_user);
 }
-
 
 void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_seqs, int count);
 void rtc_rtp_sender_handle_pli(rtc_rtp_sender_t *sender);

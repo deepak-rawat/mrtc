@@ -16,7 +16,6 @@ static void fill_sine(int16_t *buf, int samples, int channels, int freq, int rat
     }
 }
 
-/* ------------------------------------------------------------------ */
 TEST(opus_encode_decode) {
     audio_encoder_t enc;
     audio_decoder_t dec;
@@ -56,7 +55,6 @@ TEST(opus_encode_decode) {
     audio_decoder_destroy(&dec);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(opus_stereo) {
     audio_encoder_t enc;
     audio_decoder_t dec;
@@ -86,7 +84,6 @@ TEST(opus_stereo) {
     audio_decoder_destroy(&dec);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(opus_packet_loss) {
     audio_encoder_t enc;
     audio_decoder_t dec;
@@ -120,7 +117,6 @@ TEST(opus_packet_loss) {
     audio_decoder_destroy(&dec);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(opus_multiple_frames) {
     audio_encoder_t enc;
     audio_decoder_t dec;
@@ -150,14 +146,12 @@ TEST(opus_multiple_frames) {
     audio_decoder_destroy(&dec);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(opus_invalid_codec) {
     audio_encoder_t enc;
     ASSERT(audio_encoder_create(&enc, "BOGUS", 48000, 1, 32000) != RTC_OK);
     printf("    invalid codec correctly rejected\n");
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Audio Codec Tests (Opus)\n");

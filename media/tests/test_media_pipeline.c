@@ -11,7 +11,6 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* ---- Capture rendered output ---- */
 static int g_video_frame_count = 0;
 static char g_last_peer[64] = {0};
 static char g_last_label[64] = {0};
@@ -49,7 +48,6 @@ static void fill_test_frame(video_frame_t *f, int seed) {
         }
 }
 
-/* ---- Helper: create a peer connection with a video+audio sender ---- */
 static rtc_peer_connection_t *create_test_pc(rtc_rtp_sender_t **video_out,
                                              rtc_rtp_sender_t **audio_out) {
     rtc_config_t config;
@@ -76,7 +74,6 @@ static rtc_peer_connection_t *create_test_pc(rtc_rtp_sender_t **video_out,
     return pc;
 }
 
-/* ------------------------------------------------------------------ */
 TEST(pipeline_create_destroy) {
     media_renderer_t renderer = {.on_video_frame = mock_on_video};
     media_pipeline_config_t cfg = {
@@ -91,7 +88,6 @@ TEST(pipeline_create_destroy) {
     printf("    create/destroy OK\n");
 }
 
-/* ------------------------------------------------------------------ */
 TEST(pipeline_add_send_stream) {
     media_pipeline_config_t cfg = {.default_video_codec = "VP8"};
     media_pipeline_t *p = media_pipeline_create(&cfg);
@@ -115,7 +111,6 @@ TEST(pipeline_add_send_stream) {
     media_pipeline_destroy(p);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(pipeline_video_send) {
     media_pipeline_config_t cfg = {.default_video_codec = "VP8"};
     media_pipeline_t *p = media_pipeline_create(&cfg);
@@ -147,7 +142,6 @@ TEST(pipeline_video_send) {
     rtc_peer_connection_destroy(pc);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(pipeline_multi_video_send) {
     media_pipeline_config_t cfg = {.default_video_codec = "VP8"};
     media_pipeline_t *p = media_pipeline_create(&cfg);
@@ -180,7 +174,6 @@ TEST(pipeline_multi_video_send) {
     rtc_peer_connection_destroy(pc);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(pipeline_audio_send) {
     media_pipeline_config_t cfg = {.default_audio_codec = "opus"};
     media_pipeline_t *p = media_pipeline_create(&cfg);
@@ -205,7 +198,6 @@ TEST(pipeline_audio_send) {
     rtc_peer_connection_destroy(pc);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(pipeline_recv_stream_routing) {
     media_renderer_t renderer = {.on_video_frame = mock_on_video};
     media_pipeline_config_t cfg = {.default_video_codec = "VP8", .renderer = &renderer};
@@ -231,7 +223,6 @@ TEST(pipeline_recv_stream_routing) {
     media_pipeline_destroy(p);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(pipeline_remove_peer) {
     media_pipeline_config_t cfg = {.default_video_codec = "VP8"};
     media_pipeline_t *p = media_pipeline_create(&cfg);
@@ -253,7 +244,6 @@ TEST(pipeline_remove_peer) {
     media_pipeline_destroy(p);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(pipeline_send_peer_fanout) {
     media_pipeline_config_t cfg = {.default_video_codec = "VP8"};
     media_pipeline_t *p = media_pipeline_create(&cfg);
@@ -298,7 +288,6 @@ TEST(pipeline_send_peer_fanout) {
     rtc_peer_connection_destroy(pc_b);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(pipeline_remove_send_peer) {
     media_pipeline_config_t cfg = {.default_video_codec = "VP8"};
     media_pipeline_t *p = media_pipeline_create(&cfg);
@@ -328,7 +317,6 @@ TEST(pipeline_remove_send_peer) {
     rtc_peer_connection_destroy(pc_b);
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Media Pipeline Tests\n");

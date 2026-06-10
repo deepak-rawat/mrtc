@@ -22,9 +22,6 @@
 #  define SLEEP_MS(ms) usleep((ms) * 1000)
 #endif
 
-/* ------------------------------------------------------------------ */
-/*  Shared test state for callbacks                                    */
-/* ------------------------------------------------------------------ */
 static _Atomic int g_recv_count;
 static _Atomic rtc_pkt_type_t g_recv_type;
 static _Atomic size_t g_recv_len;
@@ -107,9 +104,6 @@ static void get_loopback_addr(rtc_packet_io_t *t, rtc_addr_t *out) {
     out->len = sizeof(struct sockaddr_in);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: init and close lifecycle                                     */
-/* ------------------------------------------------------------------ */
 TEST(transport_init_close) {
     rtc_packet_io_t t;
     int rc = rtc_packet_io_init(&t, NULL, NULL);
@@ -135,9 +129,6 @@ TEST(transport_init_close) {
     printf("    init -> close lifecycle OK\n");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: send packet to transport, verify callback fires              */
-/* ------------------------------------------------------------------ */
 TEST(transport_recv_packet) {
     rtc_packet_io_t t;
     g_recv_count = 0;
@@ -168,9 +159,6 @@ TEST(transport_recv_packet) {
     rtc_packet_io_close(&t);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: packet classification for different types                    */
-/* ------------------------------------------------------------------ */
 TEST(transport_classify_types) {
     rtc_packet_io_t t;
     int rc = rtc_packet_io_init(&t, test_recv_callback, NULL);
@@ -208,9 +196,6 @@ TEST(transport_classify_types) {
     rtc_packet_io_close(&t);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: timer fires after deadline                                   */
-/* ------------------------------------------------------------------ */
 TEST(transport_timer_fires) {
     rtc_packet_io_t t;
     int rc = rtc_packet_io_init(&t, NULL, NULL);
@@ -230,9 +215,6 @@ TEST(transport_timer_fires) {
     rtc_packet_io_close(&t);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: cancelled timer doesn't fire                                 */
-/* ------------------------------------------------------------------ */
 TEST(transport_timer_cancel) {
     rtc_packet_io_t t;
     int rc = rtc_packet_io_init(&t, NULL, NULL);
@@ -254,9 +236,6 @@ TEST(transport_timer_cancel) {
     rtc_packet_io_close(&t);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: send to remote via transport_send_to_remote                  */
-/* ------------------------------------------------------------------ */
 TEST(transport_send_to_remote) {
     rtc_packet_io_t sender, receiver;
     g_recv_count = 0;
@@ -290,9 +269,6 @@ TEST(transport_send_to_remote) {
     rtc_packet_io_close(&receiver);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: RTCP classified separately from RTP                          */
-/* ------------------------------------------------------------------ */
 TEST(transport_classify_rtcp) {
     rtc_packet_io_t t;
     int rc = rtc_packet_io_init(&t, test_recv_callback, NULL);
@@ -350,9 +326,7 @@ TEST(transport_classify_rtcp) {
     rtc_packet_io_close(&t);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Phase 2: dual-stack v6 socket + v4-mapped unmap                    */
-/* ------------------------------------------------------------------ */
+/* Phase 2: dual-stack v6 socket + v4-mapped unmap. */
 
 /* Capture the family of the most recent `from` so we can assert
  * v4-mapped addresses get unmapped to AF_INET before delivery. */
@@ -490,9 +464,7 @@ TEST(transport_v6_sender_seen_as_v6) {
  * back out the same interface the request arrived on. Cannot be
  * exercised on a single-interface CI runner. */
 
-/* ------------------------------------------------------------------ */
-/*  Phase 3: production hardening (stats, EAGAIN, socket-leak)         */
-/* ------------------------------------------------------------------ */
+/* Phase 3: production hardening (stats, EAGAIN, socket-leak). */
 
 TEST(transport_socket_leak_regression) {
     /* Open/close many transports in sequence. If init or close leaks a
@@ -577,10 +549,8 @@ TEST(transport_send_after_close_returns_error) {
     printf("    send-after-close cleanly returned RTC_ERR_SOCKET\n");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Phase 4: high-rate recv burst exercises the drain path             */
-/*           (recvmmsg batch on Linux, per-packet elsewhere)           */
-/* ------------------------------------------------------------------ */
+/* Phase 4: high-rate recv burst exercises the drain path
+ * (recvmmsg batch on Linux, per-packet elsewhere). */
 
 TEST(transport_recv_burst) {
     /* Send a burst of packets back-to-back from a separate sender
@@ -630,7 +600,6 @@ TEST(transport_recv_burst) {
  * a way to distinguish the batch vs. per-packet path at the API level.
  * The current test exercises whichever path is compiled in. */
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Transport Layer Tests\n");

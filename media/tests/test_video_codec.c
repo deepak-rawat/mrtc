@@ -34,7 +34,6 @@ static double compute_psnr(const uint8_t *a, int stride_a, const uint8_t *b, int
     return 10.0 * log10(255.0 * 255.0 / mse);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(vp8_encode_decode) {
     video_encoder_t enc;
     video_decoder_t dec;
@@ -71,7 +70,6 @@ TEST(vp8_encode_decode) {
     video_decoder_destroy(&dec);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(vp8_keyframe_request) {
     video_encoder_t enc;
     video_decoder_t dec;
@@ -109,7 +107,6 @@ TEST(vp8_keyframe_request) {
     video_decoder_destroy(&dec);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(vp8_bitrate_change) {
     video_encoder_t enc;
     int w = 320, h = 240;
@@ -145,7 +142,6 @@ TEST(vp8_bitrate_change) {
     video_encoder_destroy(&enc);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(vp8_multiple_frames) {
     video_encoder_t enc;
     video_decoder_t dec;
@@ -174,14 +170,12 @@ TEST(vp8_multiple_frames) {
     video_decoder_destroy(&dec);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(vp8_invalid_codec) {
     video_encoder_t enc;
     ASSERT(video_encoder_create(&enc, "BOGUS", 320, 240, 500, 30) != RTC_OK);
     printf("    invalid codec correctly rejected\n");
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Video Codec Tests (VP8)\n");

@@ -249,8 +249,8 @@ int rtc_stun_parse(rtc_stun_msg_t *msg, const uint8_t *data, size_t len) {
 }
 
 int rtc_stun_build_binding_response(const uint8_t *req_buf, size_t req_len,
-                                    const rtc_addr_t *mapped_addr, uint8_t *out,
-                                    size_t out_cap, size_t *out_len) {
+                                    const rtc_addr_t *mapped_addr, uint8_t *out, size_t out_cap,
+                                    size_t *out_len) {
     if (!req_buf || req_len < STUN_HEADER_SIZE || !mapped_addr || !out || !out_len)
         return RTC_ERR_INVALID;
     if (out_cap < 128)

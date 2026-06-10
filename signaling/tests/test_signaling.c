@@ -8,7 +8,6 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* ---- Mock send infrastructure ---- */
 #define MAX_SENT 64
 static struct {
     char *msgs[MAX_SENT];
@@ -47,7 +46,6 @@ static char *find_msg_to(meeting_peer_t *peer, const char *type_str) {
     return NULL;
 }
 
-/* ------------------------------------------------------------------ */
 TEST(meeting_create_destroy) {
     meeting_manager_t mgr;
     meeting_manager_init(&mgr, mock_send, NULL);
@@ -62,7 +60,6 @@ TEST(meeting_create_destroy) {
     clear_sent();
 }
 
-/* ------------------------------------------------------------------ */
 TEST(meeting_join_leave) {
     meeting_manager_t mgr;
     meeting_manager_init(&mgr, mock_send, NULL);
@@ -112,7 +109,6 @@ TEST(meeting_join_leave) {
     printf("    join/leave with 3 peers OK\n");
 }
 
-/* ------------------------------------------------------------------ */
 TEST(meeting_full) {
     meeting_manager_t mgr;
     meeting_manager_init(&mgr, mock_send, NULL);
@@ -139,7 +135,6 @@ TEST(meeting_full) {
     clear_sent();
 }
 
-/* ------------------------------------------------------------------ */
 TEST(meeting_relay_message) {
     meeting_manager_t mgr;
     meeting_manager_init(&mgr, mock_send, NULL);
@@ -170,7 +165,6 @@ TEST(meeting_relay_message) {
     clear_sent();
 }
 
-/* ------------------------------------------------------------------ */
 TEST(meeting_broadcast_join_leave) {
     meeting_manager_t mgr;
     meeting_manager_init(&mgr, mock_send, NULL);
@@ -203,7 +197,6 @@ TEST(meeting_broadcast_join_leave) {
     printf("    broadcast join/leave OK\n");
 }
 
-/* ------------------------------------------------------------------ */
 TEST(meeting_disconnect_cleanup) {
     meeting_manager_t mgr;
     meeting_manager_init(&mgr, mock_send, NULL);
@@ -225,7 +218,6 @@ TEST(meeting_disconnect_cleanup) {
     printf("    disconnect cleanup OK\n");
 }
 
-/* ------------------------------------------------------------------ */
 TEST(meeting_separate_rooms) {
     meeting_manager_t mgr;
     meeting_manager_init(&mgr, mock_send, NULL);
@@ -246,7 +238,6 @@ TEST(meeting_separate_rooms) {
     clear_sent();
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Signaling Meeting Tests\n");

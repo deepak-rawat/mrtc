@@ -26,9 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* ------------------------------------------------------------------ */
-/*  Address-family normalization (dual-stack helpers)                  */
-/* ------------------------------------------------------------------ */
+/* Address-family normalization (dual-stack helpers). */
 
 /* Convert an AF_INET6 IPv4-mapped address (::ffff:a.b.c.d) to plain
  * AF_INET in place. No-op for genuine IPv6 or already-AF_INET. */
@@ -86,9 +84,7 @@ static void addr_map_v4(rtc_addr_t *a) {
     a->len = sizeof(struct sockaddr_in6);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Packet classification per RFC 7983                                 */
-/* ------------------------------------------------------------------ */
+/* Packet classification (RFC 7983). */
 static rtc_pkt_type_t transport_classify(const uint8_t *data, size_t len) {
     if (len == 0)
         return RTC_PKT_UNKNOWN;
@@ -109,9 +105,6 @@ static rtc_pkt_type_t transport_classify(const uint8_t *data, size_t len) {
     return RTC_PKT_UNKNOWN;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Timer subsystem                                                    */
-/* ------------------------------------------------------------------ */
 /* Packet I/O still owns timers for the legacy peer path, but storage is
  * dynamic via rtc_timer_sched_t so old peer timers no longer have a fixed
  * 16-slot ceiling. */
@@ -128,10 +121,6 @@ static void timer_fire_expired(rtc_packet_io_t *t) {
         fn(user);
     }
 }
-
-/* ------------------------------------------------------------------ */
-/*  Transport thread                                                   */
-/* ------------------------------------------------------------------ */
 
 /* recvmsg + PKTINFO is only available on POSIX in this revision. Windows
  * uses WSARecvMsg which requires GUID-indirected function pointer lookup
@@ -405,10 +394,6 @@ static void *transport_thread_fn(void *arg) {
 
     return NULL;
 }
-
-/* ------------------------------------------------------------------ */
-/*  Public API                                                         */
-/* ------------------------------------------------------------------ */
 
 static int packet_io_fill_bind_addr(struct sockaddr_in6 *bind_addr,
                                     const rtc_packet_io_config_t *cfg) {

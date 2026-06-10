@@ -13,9 +13,6 @@
 #include "rtc_sdp.h"
 #include "test_harness.h"
 
-/* ------------------------------------------------------------------ */
-/*  Test: generate video offer SDP                                     */
-/* ------------------------------------------------------------------ */
 TEST(sdp_generate_video) {
     rtc_sdp_t sdp;
     memset(&sdp, 0, sizeof(sdp));
@@ -47,9 +44,6 @@ TEST(sdp_generate_video) {
     printf("    generated video SDP: %zu bytes\n", sdp.raw_len);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: parse video SDP text                                         */
-/* ------------------------------------------------------------------ */
 TEST(sdp_parse_video) {
     const char *sdp_text = "v=0\r\n"
                            "o=mrtc 1234567 1 IN IP4 0.0.0.0\r\n"
@@ -88,9 +82,6 @@ TEST(sdp_parse_video) {
     printf("    parsed video SDP: codec=%s/%d\n", sdp.codec_name, sdp.clockrate);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: generate multi-media SDP (audio + video + data)              */
-/* ------------------------------------------------------------------ */
 TEST(sdp_generate_multi_media) {
     rtc_sdp_t sdp;
     memset(&sdp, 0, sizeof(sdp));
@@ -154,9 +145,6 @@ TEST(sdp_generate_multi_media) {
     printf("    %.80s...\n", sdp.raw);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: parse multi-media SDP                                        */
-/* ------------------------------------------------------------------ */
 TEST(sdp_parse_multi_media) {
     const char *sdp_text = "v=0\r\n"
                            "o=mrtc 9999 1 IN IP4 0.0.0.0\r\n"
@@ -223,9 +211,6 @@ TEST(sdp_parse_multi_media) {
     printf("    parsed %d media lines: audio, video, application\n", sdp.media_count);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: multi-media round-trip                                       */
-/* ------------------------------------------------------------------ */
 TEST(sdp_multi_media_roundtrip) {
     rtc_sdp_t orig;
     memset(&orig, 0, sizeof(orig));
@@ -296,9 +281,6 @@ TEST(sdp_multi_media_roundtrip) {
     rtc_sdp_close(&parsed);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: H264 video codec                                             */
-/* ------------------------------------------------------------------ */
 TEST(sdp_video_h264) {
     rtc_sdp_t sdp;
     memset(&sdp, 0, sizeof(sdp));
@@ -333,7 +315,6 @@ TEST(sdp_video_h264) {
     printf("    H264 codec round-trip OK\n");
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  SDP Video / Multi-Media Tests\n");

@@ -7,7 +7,6 @@
 #include "rtc/rtc_common.h"
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
 TEST(turn_allocate_request) {
     rtc_stun_msg_t msg;
     int rc = rtc_stun_build_request(&msg, STUN_METHOD_ALLOCATE, NULL, NULL);
@@ -32,7 +31,6 @@ TEST(turn_allocate_request) {
     printf("    Allocate request: %zu bytes, transport=UDP\n", msg.buf_len);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(turn_channel_bind_request) {
     rtc_stun_msg_t msg;
     int rc = rtc_stun_build_request(&msg, STUN_METHOD_CHANNEL_BIND, NULL, NULL);
@@ -65,7 +63,6 @@ TEST(turn_channel_bind_request) {
     printf("    ChannelBind request: channel=0x%04x\n", channel);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(turn_channel_data_frame) {
     uint8_t buf[256];
     const uint8_t payload[] = "Hello via TURN!";
@@ -88,7 +85,6 @@ TEST(turn_channel_data_frame) {
     printf("    ChannelData frame: channel=0x%04x, %zu bytes\n", channel, data_len);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(turn_channel_data_invalid) {
     uint16_t channel;
     const uint8_t *data;
@@ -111,7 +107,6 @@ TEST(turn_channel_data_invalid) {
     printf("    invalid ChannelData correctly rejected\n");
 }
 
-/* ------------------------------------------------------------------ */
 TEST(turn_long_term_credential) {
     uint8_t key[16];
     int rc = rtc_stun_long_term_key("user", "mrtc", "pass", key);
@@ -137,7 +132,6 @@ TEST(turn_long_term_credential) {
     printf("    long-term key: %02x%02x%02x%02x...\n", key[0], key[1], key[2], key[3]);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(turn_create_perm_request) {
     rtc_stun_msg_t msg;
     int rc = rtc_stun_build_request(&msg, STUN_METHOD_CREATE_PERM, NULL, NULL);
@@ -160,7 +154,6 @@ TEST(turn_create_perm_request) {
     printf("    CreatePermission request: peer address present\n");
 }
 
-/* ------------------------------------------------------------------ */
 TEST(turn_refresh_zero) {
     rtc_stun_msg_t msg;
     int rc = rtc_stun_build_request(&msg, STUN_METHOD_REFRESH, NULL, NULL);
@@ -181,7 +174,6 @@ TEST(turn_refresh_zero) {
     printf("    Refresh(lifetime=0) request built/parsed OK\n");
 }
 
-/* ------------------------------------------------------------------ */
 TEST(turn_find_attr_missing) {
     rtc_stun_msg_t msg;
     rtc_stun_build_request(&msg, STUN_METHOD_ALLOCATE, NULL, NULL);
@@ -196,7 +188,6 @@ TEST(turn_find_attr_missing) {
     printf("    missing attribute correctly returns NULL\n");
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  TURN Unit Tests\n");

@@ -22,9 +22,6 @@
 #  define SLEEP_MS(ms) usleep((ms) * 1000)
 #endif
 
-/* ------------------------------------------------------------------ */
-/*  Test: init creates credentials                                     */
-/* ------------------------------------------------------------------ */
 TEST(ice_init) {
     rtc_packet_io_t transport;
     int rc = rtc_packet_io_init(&transport, NULL, NULL);
@@ -46,9 +43,6 @@ TEST(ice_init) {
     rtc_packet_io_close(&transport);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: gather finds at least one host candidate                     */
-/* ------------------------------------------------------------------ */
 TEST(ice_gather_host) {
     rtc_packet_io_t transport;
     rtc_packet_io_init(&transport, NULL, NULL);
@@ -74,9 +68,6 @@ TEST(ice_gather_host) {
     rtc_packet_io_close(&transport);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: set remote credentials                                       */
-/* ------------------------------------------------------------------ */
 TEST(ice_remote_credentials) {
     rtc_packet_io_t transport;
     rtc_packet_io_init(&transport, NULL, NULL);
@@ -107,9 +98,6 @@ TEST(ice_remote_credentials) {
     rtc_packet_io_close(&transport);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Shared callback state for transport-based ICE tests                */
-/* ------------------------------------------------------------------ */
 static _Atomic int g_stun_recv_count;
 static uint8_t g_stun_recv_buf[2048];
 static _Atomic size_t g_stun_recv_len;
@@ -206,9 +194,6 @@ static bool wait_for_data(int target, int timeout_ms) {
     return true;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: two agents connect to each other on localhost                */
-/* ------------------------------------------------------------------ */
 TEST(ice_two_agents_connect) {
     rtc_packet_io_t transport_a, transport_b;
     rtc_ice_agent_t alice, bob;
@@ -300,9 +285,6 @@ TEST(ice_two_agents_connect) {
     rtc_ice_close(&bob);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: data transfer via transport after manual connection setup    */
-/* ------------------------------------------------------------------ */
 TEST(ice_data_transfer) {
     rtc_packet_io_t transport_a, transport_b;
     rtc_ice_agent_t alice, bob;
@@ -357,7 +339,6 @@ TEST(ice_data_transfer) {
     rtc_ice_close(&bob);
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  ICE Component Tests\n");

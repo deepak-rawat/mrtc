@@ -5,7 +5,6 @@
 #include "jitter_buffer.h"
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
 TEST(jb_in_order) {
     jitter_buffer_config_t cfg = {.target_delay_ms = 0, .max_delay_ms = 500};
     jitter_buffer_t *jb = jitter_buffer_create(&cfg);
@@ -29,7 +28,6 @@ TEST(jb_in_order) {
     jitter_buffer_destroy(jb);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(jb_reorder) {
     jitter_buffer_config_t cfg = {.target_delay_ms = 0, .max_delay_ms = 500};
     jitter_buffer_t *jb = jitter_buffer_create(&cfg);
@@ -52,7 +50,6 @@ TEST(jb_reorder) {
     jitter_buffer_destroy(jb);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(jb_empty_pop) {
     jitter_buffer_config_t cfg = {.target_delay_ms = 0, .max_delay_ms = 500};
     jitter_buffer_t *jb = jitter_buffer_create(&cfg);
@@ -64,7 +61,6 @@ TEST(jb_empty_pop) {
     jitter_buffer_destroy(jb);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(jb_duplicate_drop) {
     jitter_buffer_config_t cfg = {.target_delay_ms = 0, .max_delay_ms = 500};
     jitter_buffer_t *jb = jitter_buffer_create(&cfg);
@@ -84,7 +80,6 @@ TEST(jb_duplicate_drop) {
     jitter_buffer_destroy(jb);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(jb_adaptive_delay) {
     jitter_buffer_config_t cfg = {.target_delay_ms = 20, .max_delay_ms = 500};
     jitter_buffer_t *jb = jitter_buffer_create(&cfg);
@@ -107,7 +102,6 @@ TEST(jb_adaptive_delay) {
     jitter_buffer_destroy(jb);
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Jitter Buffer Tests\n");

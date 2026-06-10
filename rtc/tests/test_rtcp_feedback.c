@@ -10,10 +10,6 @@
 
 #include <string.h>
 
-/* ================================================================== */
-/*  NACK Tests                                                         */
-/* ================================================================== */
-
 TEST(nack_build_single) {
     uint8_t buf[256];
     size_t len;
@@ -111,10 +107,6 @@ TEST(nack_parse_invalid) {
     printf("    NACK parse invalid: correctly rejected\n");
 }
 
-/* ================================================================== */
-/*  PLI Tests                                                          */
-/* ================================================================== */
-
 TEST(pli_build) {
     uint8_t buf[64];
     size_t len;
@@ -150,10 +142,6 @@ TEST(pli_parse_short) {
     ASSERT(rtc_rtcp_parse_pli(&parsed, short_buf, sizeof(short_buf)) != RTC_OK);
     printf("    PLI short buffer: correctly rejected\n");
 }
-
-/* ================================================================== */
-/*  FIR Tests                                                          */
-/* ================================================================== */
 
 TEST(fir_build) {
     uint8_t buf[64];
@@ -191,10 +179,6 @@ TEST(fir_parse_short) {
     printf("    FIR short buffer: correctly rejected\n");
 }
 
-/* ================================================================== */
-/*  Detection / Utility Tests                                          */
-/* ================================================================== */
-
 TEST(is_rtcp_extended) {
     /* PT 205 (RTPFB) should be recognized as RTCP */
     uint8_t rtpfb[4] = {0x80 | 1, 205, 0, 2};
@@ -223,7 +207,6 @@ TEST(get_pt_fmt) {
     printf("    get_pt_fmt: pt=%d fmt=%d\n", pt, fmt);
 }
 
-/* ================================================================== */
 int main(void) {
     printf("========================================\n");
     printf("  RTCP Feedback Tests\n");

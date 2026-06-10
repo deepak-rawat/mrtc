@@ -13,9 +13,6 @@
 #include "rtc_sdp.h"
 #include "test_harness.h"
 
-/* ------------------------------------------------------------------ */
-/*  Test: generate audio offer SDP                                     */
-/* ------------------------------------------------------------------ */
 TEST(sdp_generate_audio_offer) {
     rtc_sdp_t sdp;
     memset(&sdp, 0, sizeof(sdp));
@@ -63,9 +60,6 @@ TEST(sdp_generate_audio_offer) {
     rtc_sdp_close(&sdp);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: generate data channel SDP                                    */
-/* ------------------------------------------------------------------ */
 TEST(sdp_generate_data_channel) {
     rtc_sdp_t sdp;
     memset(&sdp, 0, sizeof(sdp));
@@ -89,9 +83,6 @@ TEST(sdp_generate_data_channel) {
     rtc_sdp_close(&sdp);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: parse SDP text                                               */
-/* ------------------------------------------------------------------ */
 TEST(sdp_parse) {
     const char *sdp_text = "v=0\r\n"
                            "o=mrtc 1234567 1 IN IP4 0.0.0.0\r\n"
@@ -149,9 +140,6 @@ TEST(sdp_parse) {
     rtc_sdp_close(&sdp);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: generate → parse round-trip                                  */
-/* ------------------------------------------------------------------ */
 TEST(sdp_roundtrip) {
     rtc_sdp_t orig;
     memset(&orig, 0, sizeof(orig));
@@ -240,9 +228,6 @@ TEST(sdp_roundtrip) {
     rtc_sdp_close(&parsed);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: SDP with maximum candidates                                  */
-/* ------------------------------------------------------------------ */
 TEST(sdp_many_candidates) {
     rtc_sdp_t sdp;
     memset(&sdp, 0, sizeof(sdp));
@@ -287,7 +272,6 @@ TEST(sdp_many_candidates) {
     rtc_sdp_close(&parsed);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(sdp_extmap_roundtrip) {
     rtc_sdp_t sdp;
     memset(&sdp, 0, sizeof(sdp));
@@ -334,7 +318,6 @@ TEST(sdp_extmap_roundtrip) {
     rtc_sdp_close(&parsed);
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  SDP Component Tests\n");

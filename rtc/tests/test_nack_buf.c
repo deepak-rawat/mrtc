@@ -6,7 +6,6 @@
 
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
 TEST(create_destroy) {
     rtc_nack_buf_t *buf = rtc_nack_buf_create(NACK_BUF_DEFAULT_SIZE);
     ASSERT(buf != NULL);
@@ -19,7 +18,6 @@ TEST(create_destroy) {
     printf("    create/destroy OK\n");
 }
 
-/* ------------------------------------------------------------------ */
 TEST(store_and_get) {
     rtc_nack_buf_t *buf = rtc_nack_buf_create(64);
     ASSERT(buf != NULL);
@@ -37,7 +35,6 @@ TEST(store_and_get) {
     rtc_nack_buf_destroy(buf);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(store_multiple) {
     rtc_nack_buf_t *buf = rtc_nack_buf_create(64);
     ASSERT(buf != NULL);
@@ -61,7 +58,6 @@ TEST(store_multiple) {
     rtc_nack_buf_destroy(buf);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(get_missing) {
     rtc_nack_buf_t *buf = rtc_nack_buf_create(64);
     ASSERT(buf != NULL);
@@ -74,7 +70,6 @@ TEST(get_missing) {
     rtc_nack_buf_destroy(buf);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(wraparound) {
     int cap = 64; /* power of 2 */
     rtc_nack_buf_t *buf = rtc_nack_buf_create(cap);
@@ -110,7 +105,6 @@ TEST(wraparound) {
     rtc_nack_buf_destroy(buf);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(wraparound_seq_wrap) {
     rtc_nack_buf_t *buf = rtc_nack_buf_create(64);
     ASSERT(buf != NULL);
@@ -134,7 +128,6 @@ TEST(wraparound_seq_wrap) {
     rtc_nack_buf_destroy(buf);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(max_packet_size) {
     rtc_nack_buf_t *buf = rtc_nack_buf_create(4);
     ASSERT(buf != NULL);
@@ -154,7 +147,6 @@ TEST(max_packet_size) {
     rtc_nack_buf_destroy(buf);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(zero_length_rejected) {
     rtc_nack_buf_t *buf = rtc_nack_buf_create(4);
     ASSERT(buf != NULL);
@@ -170,7 +162,6 @@ TEST(zero_length_rejected) {
     rtc_nack_buf_destroy(buf);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(sequential_overwrite) {
     rtc_nack_buf_t *buf = rtc_nack_buf_create(4);
     ASSERT(buf != NULL);
@@ -190,7 +181,6 @@ TEST(sequential_overwrite) {
     rtc_nack_buf_destroy(buf);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(retransmit_caps_count) {
     rtc_nack_buf_t *buf = rtc_nack_buf_create(64);
     ASSERT(buf != NULL);
@@ -222,7 +212,6 @@ TEST(retransmit_caps_count) {
     rtc_nack_buf_destroy(buf);
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  NACK Buffer Tests\n");

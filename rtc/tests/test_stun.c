@@ -12,9 +12,6 @@
 #include "rtc_stun.h"
 #include "test_harness.h"
 
-/* ------------------------------------------------------------------ */
-/*  Test: build a minimal binding request                              */
-/* ------------------------------------------------------------------ */
 TEST(stun_build_minimal) {
     rtc_stun_msg_t msg;
     int rc = rtc_stun_build_binding_request(&msg, NULL, NULL, 0, false, 0, false);
@@ -33,9 +30,6 @@ TEST(stun_build_minimal) {
     printf("    buf_len=%zu\n", msg.buf_len);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: build a binding request with ICE attributes                  */
-/* ------------------------------------------------------------------ */
 TEST(stun_build_ice_attrs) {
     rtc_stun_msg_t msg;
     int rc = rtc_stun_build_binding_request(&msg, "remoteufrag:localufrag", /* username */
@@ -52,9 +46,6 @@ TEST(stun_build_ice_attrs) {
     printf("    buf_len=%zu (with ICE attrs + integrity + fingerprint)\n", msg.buf_len);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: build → parse round-trip                                     */
-/* ------------------------------------------------------------------ */
 TEST(stun_build_parse_roundtrip) {
     rtc_stun_msg_t orig;
     int rc = rtc_stun_build_binding_request(&orig, NULL, NULL, 0, false, 0, false);
@@ -70,9 +61,6 @@ TEST(stun_build_parse_roundtrip) {
     printf("    round-trip OK, txn_id preserved\n");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: integrity verification                                       */
-/* ------------------------------------------------------------------ */
 TEST(stun_integrity_verify) {
     const char *password = "testpassword123";
     rtc_stun_msg_t msg;
@@ -90,9 +78,6 @@ TEST(stun_integrity_verify) {
     printf("    integrity verification: correct=pass, wrong=fail\n");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: integrity with binary key containing NUL bytes (TURN regression) */
-/* ------------------------------------------------------------------ */
 TEST(stun_integrity_binary_key_with_nul) {
     /* Simulate a 16-byte MD5 long-term key whose first byte is NUL.
      * The old strlen()-based API truncated such keys to zero bytes, allowing
@@ -128,9 +113,6 @@ TEST(stun_integrity_binary_key_with_nul) {
     printf("    binary key with embedded NUL verified correctly\n");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: live STUN binding (needs network)                            */
-/* ------------------------------------------------------------------ */
 TEST(stun_live_binding) {
     rtc_socket_t sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     ASSERT(sock != RTC_INVALID_SOCKET);
@@ -159,7 +141,6 @@ TEST(stun_live_binding) {
     rtc_close_socket(sock);
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  STUN Component Tests\n");

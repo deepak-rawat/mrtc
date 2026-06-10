@@ -21,9 +21,6 @@ static const uint8_t test_key[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0
 static const uint8_t test_salt[14] = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
                                       0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D};
 
-/* ------------------------------------------------------------------ */
-/*  Test: init SRTP context                                            */
-/* ------------------------------------------------------------------ */
 TEST(srtp_init) {
     rtc_srtp_ctx_t ctx;
     int rc = rtc_srtp_init(&ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
@@ -46,9 +43,6 @@ TEST(srtp_init) {
     rtc_srtp_close(&ctx);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: protect encrypts payload and appends auth tag                */
-/* ------------------------------------------------------------------ */
 TEST(srtp_protect_encrypts) {
     rtc_srtp_ctx_t ctx;
     rtc_srtp_init(&ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
@@ -92,9 +86,6 @@ TEST(srtp_protect_encrypts) {
     rtc_srtp_close(&ctx);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: protect → unprotect round-trip                               */
-/* ------------------------------------------------------------------ */
 TEST(srtp_roundtrip) {
     rtc_srtp_ctx_t send_ctx, recv_ctx;
     rtc_srtp_init(&send_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
@@ -133,9 +124,6 @@ TEST(srtp_roundtrip) {
     rtc_srtp_close(&recv_ctx);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: unprotect with wrong key fails                               */
-/* ------------------------------------------------------------------ */
 TEST(srtp_wrong_key_fails) {
     rtc_srtp_ctx_t send_ctx, bad_ctx;
     rtc_srtp_init(&send_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
@@ -165,9 +153,6 @@ TEST(srtp_wrong_key_fails) {
     rtc_srtp_close(&bad_ctx);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: multiple packets with incrementing sequence numbers          */
-/* ------------------------------------------------------------------ */
 TEST(srtp_multiple_packets) {
     rtc_srtp_ctx_t send_ctx, recv_ctx;
     rtc_srtp_init(&send_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
@@ -202,9 +187,6 @@ TEST(srtp_multiple_packets) {
     rtc_srtp_close(&recv_ctx);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: SRTCP protect → unprotect round-trip                         */
-/* ------------------------------------------------------------------ */
 TEST(srtcp_roundtrip) {
     rtc_srtp_ctx_t send_ctx, recv_ctx;
     rtc_srtp_init(&send_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
@@ -252,9 +234,6 @@ TEST(srtcp_roundtrip) {
     rtc_srtp_close(&recv_ctx);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: SRTCP unprotect with wrong key fails                         */
-/* ------------------------------------------------------------------ */
 TEST(srtcp_wrong_key_fails) {
     rtc_srtp_ctx_t send_ctx, bad_ctx;
     rtc_srtp_init(&send_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
@@ -287,9 +266,6 @@ TEST(srtcp_wrong_key_fails) {
     rtc_srtp_close(&bad_ctx);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: replay protection rejects duplicate SRTP packets             */
-/* ------------------------------------------------------------------ */
 TEST(srtp_replay_rejected) {
     rtc_srtp_ctx_t send_ctx, recv_ctx;
     rtc_srtp_init(&send_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
@@ -325,9 +301,6 @@ TEST(srtp_replay_rejected) {
     rtc_srtp_close(&recv_ctx);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: replay protection rejects duplicate SRTCP packets            */
-/* ------------------------------------------------------------------ */
 TEST(srtcp_replay_rejected) {
     rtc_srtp_ctx_t send_ctx, recv_ctx;
     rtc_srtp_init(&send_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
@@ -364,7 +337,6 @@ TEST(srtcp_replay_rejected) {
     rtc_srtp_close(&recv_ctx);
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  SRTP Component Tests\n");

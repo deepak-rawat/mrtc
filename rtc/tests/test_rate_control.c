@@ -5,7 +5,6 @@
 #include "rtc_rate_control.h"
 #include <rtc/rtc_common.h>
 
-/* ------------------------------------------------------------------ */
 TEST(rc_no_loss_increase) {
     rtc_rate_control_config_t cfg = {
         .target_bitrate_kbps = 500, .min_bitrate_kbps = 100, .max_bitrate_kbps = 2500};
@@ -26,7 +25,6 @@ TEST(rc_no_loss_increase) {
     rtc_rate_control_destroy(rc);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(rc_high_loss_decrease) {
     rtc_rate_control_config_t cfg = {
         .target_bitrate_kbps = 1000, .min_bitrate_kbps = 100, .max_bitrate_kbps = 2500};
@@ -45,7 +43,6 @@ TEST(rc_high_loss_decrease) {
     rtc_rate_control_destroy(rc);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(rc_clamp_min_max) {
     rtc_rate_control_config_t cfg = {
         .target_bitrate_kbps = 200, .min_bitrate_kbps = 100, .max_bitrate_kbps = 500};
@@ -69,7 +66,6 @@ TEST(rc_clamp_min_max) {
     rtc_rate_control_destroy(rc);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(rc_keyframe_on_spike) {
     rtc_rate_control_config_t cfg = {
         .target_bitrate_kbps = 500, .min_bitrate_kbps = 100, .max_bitrate_kbps = 2500};
@@ -88,7 +84,6 @@ TEST(rc_keyframe_on_spike) {
     rtc_rate_control_destroy(rc);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(rc_high_rtt_penalty) {
     rtc_rate_control_config_t cfg = {
         .target_bitrate_kbps = 1000, .min_bitrate_kbps = 100, .max_bitrate_kbps = 2500};
@@ -106,7 +101,6 @@ TEST(rc_high_rtt_penalty) {
     rtc_rate_control_destroy(rc);
 }
 
-/* ------------------------------------------------------------------ */
 TEST(rc_per_sender_independent) {
     rtc_rate_control_config_t cfg = {
         .target_bitrate_kbps = 1000, .min_bitrate_kbps = 100, .max_bitrate_kbps = 5000};
@@ -131,7 +125,6 @@ TEST(rc_per_sender_independent) {
     rtc_rate_control_destroy(rc_b);
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Rate Control Tests\n");

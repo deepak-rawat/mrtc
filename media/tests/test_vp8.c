@@ -14,9 +14,6 @@
 #include "vp8_packetizer.h"
 #include "test_harness.h"
 
-/* ------------------------------------------------------------------ */
-/*  Test: packetize a small frame (single payload)                     */
-/* ------------------------------------------------------------------ */
 TEST(vp8_packetize_small) {
     /* Small "VP8 frame" — fits in one payload */
     uint8_t frame[100];
@@ -41,9 +38,6 @@ TEST(vp8_packetize_small) {
     printf("    small frame: %d payload(s), len=%zu bytes\n", count, payloads[0].len);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: packetize a large frame (multiple payloads)                  */
-/* ------------------------------------------------------------------ */
 TEST(vp8_packetize_large) {
     /* Large frame — exceeds VP8_MAX_FRAG_SIZE */
     size_t frame_size = VP8_MAX_FRAG_SIZE * 3 + 100;
@@ -73,9 +67,6 @@ TEST(vp8_packetize_large) {
     free(frame);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: depacketize single-payload frame                             */
-/* ------------------------------------------------------------------ */
 TEST(vp8_depacketize_single) {
     rtc_vp8_depacketizer_t depac;
     rtc_vp8_depacketizer_init(&depac);
@@ -102,9 +93,6 @@ TEST(vp8_depacketize_single) {
     printf("    depacketized single-payload: %zu bytes, keyframe=%d\n", frame_len, is_keyframe);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: round-trip small frame                                       */
-/* ------------------------------------------------------------------ */
 TEST(vp8_roundtrip_small) {
     uint8_t frame[200];
     for (int i = 0; i < (int)sizeof(frame); i++)
@@ -135,9 +123,6 @@ TEST(vp8_roundtrip_small) {
     printf("    small frame round-trip: %zu bytes preserved\n", frame_len);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: round-trip large frame                                       */
-/* ------------------------------------------------------------------ */
 TEST(vp8_roundtrip_large) {
     /* Create a frame larger than one payload */
     size_t frame_size = VP8_MAX_FRAG_SIZE * 2 + 500;
@@ -181,9 +166,6 @@ TEST(vp8_roundtrip_large) {
     free(frame);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: depacketizer rejects orphan fragments                        */
-/* ------------------------------------------------------------------ */
 TEST(vp8_depacketize_no_start) {
     rtc_vp8_depacketizer_t depac;
     rtc_vp8_depacketizer_init(&depac);
@@ -204,9 +186,6 @@ TEST(vp8_depacketize_no_start) {
     printf("    correctly rejected orphan fragment\n");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: multiple frames in sequence                                  */
-/* ------------------------------------------------------------------ */
 TEST(vp8_multiple_frames) {
     rtc_vp8_depacketizer_t depac;
     rtc_vp8_depacketizer_init(&depac);
@@ -249,11 +228,8 @@ TEST(vp8_multiple_frames) {
     printf("    %d frames packetized and depacketized in sequence\n", frames_decoded);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: depacketize with 15-bit (M-bit) PictureID                    */
-/*  RFC 7741 §4.2: if first PictureID byte's high bit is set, the ID  */
-/*  spans 2 bytes rather than 1.                                       */
-/* ------------------------------------------------------------------ */
+/* RFC 7741 §4.2: if the first PictureID byte's high bit is set, the ID
+ * spans 2 bytes rather than 1. */
 TEST(vp8_depacketize_long_picid) {
     rtc_vp8_depacketizer_t depac;
     rtc_vp8_depacketizer_init(&depac);
@@ -285,7 +261,6 @@ TEST(vp8_depacketize_long_picid) {
     printf("    depacketized 2-byte PictureID (M-bit): %zu bytes\n", frame_len);
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  VP8 RTP Packetization Tests\n");

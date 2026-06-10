@@ -13,9 +13,6 @@
 #include "rtc_rtp.h"
 #include "test_harness.h"
 
-/* ------------------------------------------------------------------ */
-/*  Test: build a packet and verify header fields in the buffer        */
-/* ------------------------------------------------------------------ */
 TEST(rtp_build_basic) {
     uint8_t payload[] = "Hello RTP";
     rtc_rtp_packet_t pkt;
@@ -50,9 +47,6 @@ TEST(rtp_build_basic) {
            ssrc);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: parse a serialized packet back                               */
-/* ------------------------------------------------------------------ */
 TEST(rtp_parse) {
     uint8_t payload[] = {0x01, 0x02, 0x03, 0x04, 0x05};
     rtc_rtp_packet_t built;
@@ -76,9 +70,6 @@ TEST(rtp_parse) {
            parsed.header.ssrc, parsed.header.marker, parsed.payload_len);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: build → parse round-trip preserves all fields                */
-/* ------------------------------------------------------------------ */
 TEST(rtp_roundtrip) {
     uint8_t payload[200];
     memset(payload, 0xAB, sizeof(payload));
@@ -102,9 +93,6 @@ TEST(rtp_roundtrip) {
     printf("    round-trip: 200-byte payload preserved\n");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: RTP session tracks sequence and timestamp                    */
-/* ------------------------------------------------------------------ */
 TEST(rtp_session_tracking) {
     rtc_rtp_session_t sess;
     int rc = rtc_rtp_session_init(&sess, 111, 48000);
@@ -139,9 +127,6 @@ TEST(rtp_session_tracking) {
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: reject too-short data                                        */
-/* ------------------------------------------------------------------ */
 TEST(rtp_parse_too_short) {
     uint8_t short_data[4] = {0x80, 0x60, 0x00, 0x01};
     rtc_rtp_packet_t pkt;
@@ -150,7 +135,6 @@ TEST(rtp_parse_too_short) {
     printf("    correctly rejected %zu-byte packet\n", sizeof(short_data));
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  RTP Component Tests\n");

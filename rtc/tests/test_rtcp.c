@@ -14,9 +14,6 @@
 #include "rtc_rtcp.h"
 #include "test_harness.h"
 
-/* ------------------------------------------------------------------ */
-/*  Test: build Sender Report                                          */
-/* ------------------------------------------------------------------ */
 TEST(rtcp_build_sr) {
     rtc_rtcp_stats_t stats;
     rtc_rtcp_stats_init(&stats, 0xDEADBEEF);
@@ -44,9 +41,6 @@ TEST(rtcp_build_sr) {
            pkt.sr.sender_oct_count);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: build Receiver Report                                        */
-/* ------------------------------------------------------------------ */
 TEST(rtcp_build_rr) {
     rtc_rtcp_stats_t stats;
     rtc_rtcp_stats_init(&stats, 0x11111111);
@@ -75,9 +69,6 @@ TEST(rtcp_build_rr) {
            pkt.reports[0].ssrc);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: SR build → parse round-trip                                  */
-/* ------------------------------------------------------------------ */
 TEST(rtcp_sr_roundtrip) {
     rtc_rtcp_stats_t stats;
     rtc_rtcp_stats_init(&stats, 0xAAAABBBB);
@@ -111,9 +102,6 @@ TEST(rtcp_sr_roundtrip) {
            parsed.sr.sender_oct_count, parsed.report_count);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: RR build → parse round-trip                                  */
-/* ------------------------------------------------------------------ */
 TEST(rtcp_rr_roundtrip) {
     rtc_rtcp_stats_t stats;
     rtc_rtcp_stats_init(&stats, 0x55556666);
@@ -141,9 +129,6 @@ TEST(rtcp_rr_roundtrip) {
            parsed.reports[0].cumulative_lost);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: packet loss tracking                                         */
-/* ------------------------------------------------------------------ */
 TEST(rtcp_stats_loss) {
     rtc_rtcp_stats_t stats;
     rtc_rtcp_stats_init(&stats, 0x12345678);
@@ -164,10 +149,7 @@ TEST(rtcp_stats_loss) {
            stats.packets_expected, stats.packets_lost);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: stats track loss correctly when seq doesn't start at 0       */
-/*  (RFC 3550 §5.1: real streams pick a random initial seq.)           */
-/* ------------------------------------------------------------------ */
+/* RFC 3550 §5.1: real streams pick a random initial seq. */
 TEST(rtcp_stats_loss_nonzero_start) {
     rtc_rtcp_stats_t stats;
     rtc_rtcp_stats_init(&stats, 0x12345678);
@@ -191,9 +173,6 @@ TEST(rtcp_stats_loss_nonzero_start) {
            stats.packets_lost);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: RTCP detection                                               */
-/* ------------------------------------------------------------------ */
 TEST(rtcp_is_rtcp) {
     /* Build a valid SR and check detection */
     rtc_rtcp_stats_t stats;
@@ -217,9 +196,6 @@ TEST(rtcp_is_rtcp) {
     printf("    RTCP detection: correct for SR, RTP, and short data\n");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: reject invalid RTCP packets                                  */
-/* ------------------------------------------------------------------ */
 TEST(rtcp_parse_invalid) {
     rtc_rtcp_packet_t pkt;
 
@@ -239,9 +215,6 @@ TEST(rtcp_parse_invalid) {
     printf("    correctly rejected invalid RTCP packets\n");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: SR with no report blocks                                     */
-/* ------------------------------------------------------------------ */
 TEST(rtcp_sr_no_reports) {
     rtc_rtcp_stats_t stats;
     rtc_rtcp_stats_init(&stats, 0x99998888);
@@ -267,7 +240,6 @@ TEST(rtcp_sr_no_reports) {
     printf("    SR with no report blocks: pkts=%u\n", parsed.sr.sender_pkt_count);
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  RTCP Component Tests\n");
