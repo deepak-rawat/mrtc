@@ -24,10 +24,24 @@ and library dependency graph. Per-component design docs:
 
 ## Key Conventions
 
+### Comments
+Keep comments minimal. Add them only where they are really needed — to explain
+*why* something non-obvious is done, document protocol/RFC references, or warn
+about subtle edge cases. Do **not** write comments that merely restate what the
+code already expresses; the code should speak for itself. Prefer clear names and
+straightforward control flow over explanatory comments.
+
 ### API Patterns
 - All public functions use `rtc_` prefix followed by module name (e.g., `rtc_stun_`, `rtc_ice_`, `rtc_peer_`)
 - Functions return `rtc_err_t` (0 = `RTC_OK`, negative = error)
-- Components follow init/close lifecycle: `rtc_xxx_init()` / `rtc_xxx_close()`
+- Lifecycle depends on ownership:
+  - Heap-allocated runtime/public objects (worker, listener, router, transport,
+    producer, consumer, peer connection) use a three-call lifecycle:
+    `rtc_xxx_create()` (returns pointer, `NULL` on error) → `rtc_xxx_close()`
+    (stop activity) → `rtc_xxx_destroy()` (free; call after `close()`)
+  - Caller-allocated protocol primitives (ICE, DTLS, SRTP, RTP, TURN, poller)
+    use `rtc_xxx_init(rtc_xxx_t *)` / `rtc_xxx_close()`
+  - Global library setup: `rtc_init()` / `rtc_client_init()`
 - Output parameters are passed as pointers (first param for "method-like" functions)
 
 ### Error Handling
@@ -56,7 +70,7 @@ RTC_LOG_DBG("Debug: %s", msg);
 
 ### Constants & Naming
 - Protocol constants use `#define` with module prefix (e.g., `STUN_MAGIC_COOKIE`, `STUN_HEADER_SIZE`)
-- Config structs: `rtc_xxx_config_t` passed to init functions
+- Config structs: `rtc_xxx_config_t` passed to `init`/`create` functions
 - State structs: `rtc_xxx_t` (e.g., `rtc_ice_agent_t`, `rtc_dtls_transport_t`)
 - Callbacks: `rtc_on_xxx_fn` typedefs with user data pointer
 
