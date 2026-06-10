@@ -69,8 +69,9 @@ Build options:
 The `rtc/` component produces two static libraries:
 
 - `libmrtc` — always built. Runtime transport core (worker, listener,
-  router, transport, producer, consumer) plus the protocol primitives.
-  Sufficient on its own for SFU / custom-transport consumers.
+  transport) plus the protocol primitives.
+- `libmrtc_routing` — built when `MRTC_ENABLE_ROUTING_API=ON`. Server-side
+  routing primitives (router, producer, consumer) on top of `libmrtc`.
 - `libmrtc_client` — built when `MRTC_ENABLE_CLIENT_API=ON`. The
   WebRTC-style `RTCPeerConnection` facade (tracks, data channels,
   stats). Links `libmrtc` publicly.
@@ -99,7 +100,7 @@ ctest --output-on-failure
 # Or individually
 ./rtc/test_stun
 ./rtc/test_peer
-./rtc/test_sfu_transport
+./routing/test_routing_transport
 ./media/test_media_pipeline
 ./signaling/test_signaling
 ```

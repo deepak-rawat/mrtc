@@ -5,7 +5,6 @@
 
 #include "rtc_consumer_internal.h"
 #include "rtc_producer_internal.h"
-#include "rtc_transport_internal.h"
 
 #include <stdatomic.h>
 #include <stdio.h>

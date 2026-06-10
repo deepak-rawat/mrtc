@@ -6,7 +6,7 @@
 
 #include "rtc/rtc_consumer.h"
 
-#include "rtc_rtp.h"
+#include "rtc/rtc_rtp.h"
 
 void rtc_consumer_on_producer_rtp(rtc_consumer_t *consumer, const rtc_rtp_packet_t *pkt);
 

@@ -6,6 +6,7 @@
 
 #include "rtc_common.h"
 #include "rtc_rtp.h"
+#include "rtc_worker.h"
 
 #define RTC_ICE_UFRAG_MAX                   8
 #define RTC_ICE_PWD_MAX                     24
@@ -83,6 +84,7 @@ typedef struct {
     uint64_t dtls_packets_received;
 } rtc_transport_stats_t;
 
+rtc_transport_t *rtc_transport_create(rtc_worker_t *worker, const rtc_transport_config_t *cfg);
 int rtc_transport_get_ice_parameters(rtc_transport_t *transport, rtc_ice_parameters_t *out);
 int rtc_transport_restart_ice(rtc_transport_t *transport);
 int rtc_transport_set_remote_ice_parameters(rtc_transport_t *transport,

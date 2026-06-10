@@ -4,8 +4,8 @@
 #ifndef RTC_PRODUCER_H
 #define RTC_PRODUCER_H
 
-#include "rtc_rtp_params.h"
-#include "rtc_transport.h"
+#include "rtc/rtc_rtp_params.h"
+#include "rtc/rtc_transport.h"
 
 typedef struct rtc_producer rtc_producer_t;
 

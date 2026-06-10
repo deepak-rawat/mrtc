@@ -1,14 +1,13 @@
 # Core RTC Runtime Library (libmrtc)
 
 `libmrtc` is the runtime transport core plus the protocol primitives:
-worker, shared UDP listener, logical transport, routing graph,
-producers / consumers, STUN / ICE, DTLS, SRTP, RTP / RTCP, SDP, NACK
-buffer, TWCC, BWE. It is always built and is the only library an SFU /
-custom-transport consumer needs.
+worker, shared UDP listener, logical transport, STUN / ICE, DTLS, SRTP,
+RTP / RTCP, SDP, NACK buffer, TWCC, BWE. It is always built and is the
+common base for both client peer connections and server-side routing.
 
-The WebRTC-style peer-connection facade (peer, track, data channel,
-stats) lives in a separate library, [`libmrtc_client`](../client/ARCHITECTURE.md),
-on top of this one.
+The WebRTC-style peer-connection facade lives in
+[`libmrtc_client`](../client/ARCHITECTURE.md). Server-side router / producer /
+consumer primitives live in [`libmrtc_routing`](../routing/ARCHITECTURE.md).
 
 Follows the **Pion model**: codec-agnostic at the RTP payload level.
 Senders take already-encoded payloads. Receivers deliver raw RTP
@@ -17,9 +16,10 @@ on top.
 
 ## Usage Example (driving the runtime directly)
 
-This is what an SFU or custom transport does — direct use of the runtime
-primitives, no peer-connection facade. Client applications should use
-the higher-level [`libmrtc_client`](../client/ARCHITECTURE.md) instead.
+This is direct use of the runtime primitives, no peer-connection facade and no
+routing graph. Client applications should use the higher-level
+[`libmrtc_client`](../client/ARCHITECTURE.md); server routing should use
+[`libmrtc_routing`](../routing/ARCHITECTURE.md).
 
 ```c
 rtc_init();
@@ -27,10 +27,8 @@ rtc_init();
 // ── Process-wide runtime: one worker, one shared UDP listener ──
 rtc_worker_t   *worker   = rtc_worker_create(NULL);
 rtc_listener_t *listener = rtc_listener_create(worker, NULL);
-rtc_router_t   *router   = rtc_router_create(worker, NULL);
-
 // ── One logical transport per remote endpoint ──
-rtc_transport_t *transport = rtc_router_create_transport(router,
+rtc_transport_t *transport = rtc_transport_create(worker,
     &(rtc_transport_config_t){
         .listener = listener,
         .ice_mode = RTC_ICE_MODE_LITE,
@@ -47,15 +45,8 @@ rtc_transport_set_remote_ice_parameters(transport, &remote_ice);
 rtc_transport_add_remote_candidate(transport, &remote_candidate);
 rtc_transport_start_dtls(transport);
 
-// ── SFU media graph: producer = inbound, consumer = outbound ──
-rtc_producer_t *producer = rtc_transport_produce(transport,
-    &(rtc_producer_options_t){ .kind = RTC_MEDIA_KIND_VIDEO, .rtp = … });
-rtc_consumer_t *consumer = rtc_transport_consume(other_transport,
-    &(rtc_consumer_options_t){ .producer = producer });
-
 // ── Tear down ──
 rtc_transport_destroy(transport);
-rtc_router_destroy(router);
 rtc_listener_destroy(listener);
 rtc_worker_destroy(worker);
 rtc_cleanup();
@@ -65,7 +56,7 @@ rtc_cleanup();
 
 ```
 ┌────────────────────────────────────┐
-│ Runtime Transport Core             │  worker, listener, router, transport, producer, consumer
+│ Runtime Transport Core             │  worker, listener, transport
 ├────────────────────────────────────┤
 │  SDP │ RTP │ SRTP                  │  rtc_sdp, rtc_rtp, rtc_srtp
 ├────────────────────────────────────┤
@@ -86,39 +77,36 @@ unconditionally:
 
 - `rtc_common.h` — error codes, log macros, platform abstractions
 - `rtc.h` — library lifecycle (`rtc_init`/`rtc_cleanup`)
-- `rtc_worker.h`, `rtc_listener.h`, `rtc_router.h`, `rtc_transport.h` —
-  runtime transport / SFU primitives
-- `rtc_producer.h`, `rtc_consumer.h`, `rtc_rtp_params.h` — SFU media
-  graph types
+- `rtc_worker.h`, `rtc_listener.h`, `rtc_transport.h` — runtime transport primitives
+- `rtc_rtp.h`, `rtc_rtcp.h`, `rtc_sdp.h`, `rtc_rtp_ext.h`, `rtc_rtp_params.h` —
+  protocol helpers and signaling parameter types
+- `rtc_nack_buf.h`, `rtc_rate_control.h`, `rtc_twcc_*.h`, `rtc_bwe.h` — RTP control
+  primitives shared by client and routing layers
 
 Internal / private helpers (`rtc_ice.h`, `rtc_dtls.h`, `rtc_srtp.h`,
-`rtc_rtp.h`, `rtc_rtcp.h`, `rtc_sdp.h`, `rtc_stun.h`, `rtc_turn.h`,
-`rtc_rate_control.h`, `rtc_nack_buf.h`, `rtc_twcc_*.h`, `rtc_bwe.h`,
+`rtc_stun.h`, `rtc_turn.h`,
 `rtc_packet_io.h`, `rtc_poller.h`, `rtc_timer_sched.h`) live in `src/`.
 
 ## Module Details
 
 ### Runtime Transport Core
 
-The runtime core is the shared substrate used by both client and SFU
+The runtime core is the shared substrate used by both client and routing
 consumers.
 
 - **`rtc_worker_t`** — timer / scheduling shard used by logical
   transports.
 - **`rtc_listener_t`** — owns a UDP packet I/O socket and demux maps.
   One listener can serve many logical transports on the same local port.
-- **`rtc_router_t`** — media routing graph for SFU-style producer /
-  consumer forwarding.
 - **`rtc_transport_t`** — one logical ICE / DTLS / SRTP endpoint over a
   shared listener. Handles ICE-lite responses, full ICE checks, DTLS,
   SRTP / SRTCP, RTP / RTCP callbacks, and DTLS application data.
-- **`rtc_producer_t` / `rtc_consumer_t`** — inbound and outbound media
-  graph edges for SFU forwarding.
 
 The client `rtc_peer_connection_t` (in `libmrtc_client`) creates a
-private worker / listener / router / transport internally and exposes a
-spec-shaped API on top. SFU users build the same shape directly without
-needing `libmrtc_client`.
+private worker / listener / transport internally and exposes a
+spec-shaped API on top. Server-side media routing uses `libmrtc_routing`
+to add routers, producers, consumers, and SSRC dispatch on top of core
+transports.
 
 ### Packet I/O (`rtc_packet_io.h/c`)
 
@@ -371,10 +359,9 @@ peer-owned packet I/O timers.
 | `test_rate_control` | AIMD algorithm, bitrate adaptation, keyframe requests |
 | `test_worker` | Runtime worker lifecycle and timer scheduling |
 | `test_listener` | Shared UDP listener candidates, demux, stats |
-| `test_sfu_transport` | Logical transport ICE-lite, DTLS/SRTP, RTP/RTCP/data hooks |
-| `test_sfu_ice` | Full ICE transport connecting to ICE-lite transport |
-| `test_sfu_media` | Producer/consumer media graph forwarding |
-| `test_sfu_timers` | Runtime timer behavior |
+Routing tests (`test_routing_transport`, `test_routing_ice`,
+`test_routing_media`, `test_routing_timers`) live in
+[`routing/tests/`](../routing/ARCHITECTURE.md#tests).
 
 Client-facade tests (`test_peer`, `test_data_channel`,
 `test_rtp_sender_loopback`) live in

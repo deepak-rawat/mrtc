@@ -27,10 +27,7 @@ set(RTC_PROTOCOL_SOURCES
 set(RTC_RUNTIME_SOURCES
     src/rtc_worker.c
     src/rtc_listener.c
-    src/rtc_router.c
     src/rtc_transport.c
-    src/rtc_producer.c
-    src/rtc_consumer.c
 )
 
 set(LIB_SOURCES ${RTC_CORE_SOURCES} ${RTC_PROTOCOL_SOURCES} ${RTC_RUNTIME_SOURCES})
@@ -60,8 +57,7 @@ if(MRTC_BUILD_TESTS)
         test_stun test_rtp test_srtp test_dtls test_ice test_sdp test_packet_io
         test_sdp_video test_rtcp test_turn test_rate_control test_rtcp_feedback
         test_nack_buf test_rtp_ext test_poller test_timer_sched
-        test_worker test_listener test_sfu_transport test_sfu_media
-        test_sfu_timers test_sfu_ice
+        test_worker test_listener
     )
     if(MRTC_ENABLE_TWCC)
         list(APPEND RUNTIME_TEST_NAMES test_twcc test_bwe)

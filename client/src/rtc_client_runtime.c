@@ -12,7 +12,6 @@
 struct rtc_client_runtime {
     rtc_worker_t *worker;
     rtc_listener_t *listener;
-    rtc_router_t *router;
     int ref_count;
 };
 
@@ -23,8 +22,6 @@ static rtc_client_runtime_t *g_default_runtime;
 static void client_runtime_destroy(rtc_client_runtime_t *runtime) {
     if (!runtime)
         return;
-    if (runtime->router)
-        rtc_router_destroy(runtime->router);
     if (runtime->listener)
         rtc_listener_destroy(runtime->listener);
     if (runtime->worker)
@@ -43,10 +40,6 @@ static rtc_client_runtime_t *client_runtime_create(void) {
 
     runtime->listener = rtc_listener_create(runtime->worker, NULL);
     if (!runtime->listener)
-        goto fail;
-
-    runtime->router = rtc_router_create(runtime->worker, NULL);
-    if (!runtime->router)
         goto fail;
 
     return runtime;
@@ -131,10 +124,6 @@ rtc_worker_t *rtc_client_runtime_worker(rtc_client_runtime_t *runtime) {
 
 rtc_listener_t *rtc_client_runtime_listener(rtc_client_runtime_t *runtime) {
     return runtime ? runtime->listener : NULL;
-}
-
-rtc_router_t *rtc_client_runtime_router(rtc_client_runtime_t *runtime) {
-    return runtime ? runtime->router : NULL;
 }
 
 int rtc_client_init(void) {

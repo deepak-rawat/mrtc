@@ -3,7 +3,6 @@
  */
 #include <rtc/rtc_client.h>
 #include <rtc/rtc_listener.h>
-#include <rtc/rtc_router.h>
 #include <rtc/rtc_sdp.h>
 #include <rtc/rtc_transport.h>
 #include <rtc/rtc_worker.h>
@@ -23,7 +22,6 @@
 typedef struct {
     rtc_worker_t *worker;
     rtc_listener_t *listener;
-    rtc_router_t *router;
     rtc_transport_t *transport;
 } remote_env_t;
 
@@ -61,19 +59,15 @@ static bool make_remote_env(remote_env_t *env) {
     env->listener = rtc_listener_create(env->worker, NULL);
     if (!env->listener)
         return false;
-    env->router = rtc_router_create(env->worker, NULL);
-    if (!env->router)
-        return false;
-    env->transport = rtc_router_create_transport(env->router, &(rtc_transport_config_t){
-                                                                  .listener = env->listener,
-                                                                  .ice_mode = RTC_ICE_MODE_LITE,
-                                                              });
+    env->transport = rtc_transport_create(env->worker, &(rtc_transport_config_t){
+                                                           .listener = env->listener,
+                                                           .ice_mode = RTC_ICE_MODE_LITE,
+                                                       });
     return env->transport != NULL;
 }
 
 static void close_remote_env(remote_env_t *env) {
     rtc_transport_destroy(env->transport);
-    rtc_router_destroy(env->router);
     rtc_listener_destroy(env->listener);
     rtc_worker_destroy(env->worker);
 }

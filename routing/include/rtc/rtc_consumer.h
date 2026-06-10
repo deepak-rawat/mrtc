@@ -4,9 +4,9 @@
 #ifndef RTC_CONSUMER_H
 #define RTC_CONSUMER_H
 
-#include "rtc_producer.h"
-#include "rtc_rtp_params.h"
-#include "rtc_transport.h"
+#include "rtc/rtc_producer.h"
+#include "rtc/rtc_rtp_params.h"
+#include "rtc/rtc_transport.h"
 
 typedef struct rtc_consumer rtc_consumer_t;
 

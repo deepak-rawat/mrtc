@@ -6,7 +6,7 @@
 
 #include "rtc_consumer_internal.h"
 #include "rtc_producer_internal.h"
-#include "rtc_transport_internal.h"
+#include "rtc_router_internal.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -67,7 +67,7 @@ rtc_producer_t *rtc_transport_produce(rtc_transport_t *transport,
         return NULL;
     }
     producer->consumers_ready = true;
-    if (rtc_transport_register_producer(transport, producer, producer->rtp.ssrc) != RTC_OK) {
+    if (rtc_router_register_producer(transport, producer, producer->rtp.ssrc) != RTC_OK) {
         rtc_mutex_destroy(&producer->consumers_mutex);
         rtc_vec_free(&producer->consumers);
         free(producer);
@@ -94,7 +94,7 @@ void rtc_producer_close(rtc_producer_t *producer) {
     if (was_closed)
         return;
     if (producer->transport && producer->rtp.ssrc != 0)
-        rtc_transport_unregister_producer(producer->transport, producer->rtp.ssrc);
+        rtc_router_unregister_producer(producer->transport, producer->rtp.ssrc);
 }
 
 void rtc_producer_destroy(rtc_producer_t *producer) {

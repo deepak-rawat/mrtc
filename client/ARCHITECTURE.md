@@ -90,12 +90,11 @@ headers. On disk they live in `client/include/rtc/`.
 
 High-level WebRTC-style API. A peer connection is a facade over a private
 runtime stack — it acquires a shared default `rtc_worker_t` and
-`rtc_listener_t`, creates its own private `rtc_router_t`, and instantiates
-a single `rtc_transport_t` for the session.
+`rtc_listener_t`, and instantiates a single `rtc_transport_t` for the session.
 
 ```c
 struct rtc_peer_connection {
-    rtc_client_runtime_t *runtime;        // shared worker + listener + router
+    rtc_client_runtime_t *runtime;        // shared worker + listener
     rtc_transport_t *runtime_transport;   // private ICE/DTLS/SRTP endpoint
     rtc_rtp_transceiver_t transceivers[8]; // media tracks
     rtc_dc_manager_t dc_manager;          // data channels
@@ -113,7 +112,7 @@ struct rtc_peer_connection {
 media → close → destroy
 
 **Shared runtime.** All peer connections in a process share one
-`rtc_client_runtime_t` (worker + listener + router), reference-counted
+`rtc_client_runtime_t` (worker + listener), reference-counted
 and torn down by `rtc_client_cleanup()` before it calls the underlying
 `rtc_cleanup()`. This keeps the ephemeral UDP port count down (one
 socket for many peer connections) without exposing the sharing to the

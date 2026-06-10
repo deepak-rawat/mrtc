@@ -6,7 +6,7 @@
 
 #include "rtc/rtc_producer.h"
 
-#include "rtc_rtp.h"
+#include "rtc/rtc_rtp.h"
 
 typedef struct rtc_consumer rtc_consumer_t;
 

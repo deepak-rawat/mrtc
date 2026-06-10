@@ -19,7 +19,6 @@
 #include "rtc/rtc_nack_buf.h"
 #include "rtc_client_runtime.h"
 #include "rtc/rtc_listener.h"
-#include "rtc/rtc_router.h"
 #include "rtc/rtc_transport.h"
 #include "rtc/rtc_worker.h"
 

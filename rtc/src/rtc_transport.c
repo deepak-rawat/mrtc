@@ -4,10 +4,7 @@
 #include "rtc_transport_internal.h"
 
 #include "rtc_listener_internal.h"
-#include "rtc/rtc_u32_map.h"
 #include "rtc_dtls.h"
-#include "rtc_producer_internal.h"
-#include "rtc_router_internal.h"
 #include "rtc_rtp.h"
 #include "rtc_sdp.h"
 #include "rtc_srtp.h"
@@ -20,7 +17,6 @@
 #include <string.h>
 
 struct rtc_transport {
-    rtc_router_t *router;
     rtc_worker_t *worker;
     rtc_listener_t *listener;
     char ice_ufrag[ICE_UFRAG_LEN];
@@ -34,9 +30,6 @@ struct rtc_transport {
     rtc_dtls_transport_t dtls;
     rtc_srtp_ctx_t srtp_send;
     rtc_srtp_ctx_t srtp_recv;
-    rtc_u32_map_t producers_by_ssrc;
-    rtc_mutex_t producer_mutex;
-    bool producer_mutex_ready;
     rtc_transport_rtp_fn on_rtp;
     void *on_rtp_user;
     rtc_transport_rtcp_fn on_rtcp;
@@ -243,13 +236,6 @@ static void transport_handle_rtp(rtc_transport_t *transport, const uint8_t *data
     if (rtc_rtp_parse(&pkt, buf, pkt_len) != RTC_OK)
         return;
 
-    rtc_mutex_lock(&transport->producer_mutex);
-    rtc_producer_t *producer =
-        (rtc_producer_t *)rtc_u32_map_get(&transport->producers_by_ssrc, pkt.header.ssrc);
-    rtc_mutex_unlock(&transport->producer_mutex);
-
-    if (producer)
-        rtc_producer_on_rtp(producer, &pkt);
     if (transport->on_rtp)
         transport->on_rtp(&pkt, transport->on_rtp_user);
 }
@@ -345,17 +331,15 @@ static void transport_copy_ice_parameters(rtc_transport_t *transport, rtc_ice_pa
     out->mode = transport->ice_mode;
 }
 
-rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
-                                               const rtc_transport_config_t *cfg) {
-    if (!router || !cfg || !cfg->listener)
+rtc_transport_t *rtc_transport_create(rtc_worker_t *worker, const rtc_transport_config_t *cfg) {
+    if (!worker || !cfg || !cfg->listener)
         return NULL;
 
     rtc_transport_t *transport = (rtc_transport_t *)calloc(1, sizeof(*transport));
     if (!transport)
         return NULL;
 
-    transport->router = router;
-    transport->worker = rtc_router_worker(router);
+    transport->worker = worker;
     transport->listener = cfg->listener;
     transport->dtls_timer = RTC_WORKER_TIMER_INVALID;
     transport->ice_timer = RTC_WORKER_TIMER_INVALID;
@@ -379,20 +363,9 @@ rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
         return NULL;
     }
 
-    if (rtc_u32_map_init(&transport->producers_by_ssrc) != RTC_OK ||
-        rtc_mutex_init(&transport->producer_mutex) != RTC_OK) {
-        rtc_u32_map_free(&transport->producers_by_ssrc);
-        free(transport->app_buf);
-        free(transport);
-        return NULL;
-    }
-    transport->producer_mutex_ready = true;
-
     rtc_dtls_role_t dtls_role =
         transport->ice_mode == RTC_ICE_MODE_FULL ? RTC_DTLS_ROLE_CLIENT : RTC_DTLS_ROLE_SERVER;
     if (rtc_dtls_init(&transport->dtls, dtls_role, transport_dtls_send, transport) != RTC_OK) {
-        rtc_mutex_destroy(&transport->producer_mutex);
-        rtc_u32_map_free(&transport->producers_by_ssrc);
         free(transport->app_buf);
         free(transport);
         return NULL;
@@ -402,8 +375,6 @@ rtc_transport_t *rtc_transport_create_internal(rtc_router_t *router,
                                          transport_on_packet, transport);
     if (rc != RTC_OK) {
         rtc_dtls_close(&transport->dtls);
-        rtc_mutex_destroy(&transport->producer_mutex);
-        rtc_u32_map_free(&transport->producers_by_ssrc);
         free(transport->app_buf);
         free(transport);
         return NULL;
@@ -547,11 +518,6 @@ void rtc_transport_destroy(rtc_transport_t *transport) {
     if (!transport)
         return;
     rtc_transport_close(transport);
-    if (transport->producer_mutex_ready) {
-        rtc_mutex_destroy(&transport->producer_mutex);
-        transport->producer_mutex_ready = false;
-    }
-    rtc_u32_map_free(&transport->producers_by_ssrc);
     free(transport->app_buf);
     free(transport);
 }
@@ -605,24 +571,6 @@ int rtc_transport_send_data(rtc_transport_t *transport, const uint8_t *data, siz
             return rc;
     }
     return RTC_OK;
-}
-
-int rtc_transport_register_producer(rtc_transport_t *transport, rtc_producer_t *producer,
-                                    uint32_t ssrc) {
-    if (!transport || !producer || ssrc == 0)
-        return RTC_ERR_INVALID;
-    rtc_mutex_lock(&transport->producer_mutex);
-    int rc = rtc_u32_map_set(&transport->producers_by_ssrc, ssrc, producer);
-    rtc_mutex_unlock(&transport->producer_mutex);
-    return rc;
-}
-
-void rtc_transport_unregister_producer(rtc_transport_t *transport, uint32_t ssrc) {
-    if (!transport || ssrc == 0)
-        return;
-    rtc_mutex_lock(&transport->producer_mutex);
-    rtc_u32_map_remove(&transport->producers_by_ssrc, ssrc);
-    rtc_mutex_unlock(&transport->producer_mutex);
 }
 
 int rtc_transport_send_raw(rtc_transport_t *transport, const uint8_t *data, size_t len) {

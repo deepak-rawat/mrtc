@@ -26,26 +26,22 @@ static rtc_listener_t *peer_runtime_listener(rtc_peer_connection_t *pc) {
     return rtc_client_runtime_listener(pc->runtime);
 }
 
-static rtc_router_t *peer_runtime_router(rtc_peer_connection_t *pc) {
-    return rtc_client_runtime_router(pc->runtime);
-}
-
 static int peer_runtime_init(rtc_peer_connection_t *pc) {
     pc->runtime = rtc_client_runtime_acquire();
     if (!pc->runtime)
         return RTC_ERR_NOMEM;
 
     rtc_listener_t *listener = peer_runtime_listener(pc);
-    rtc_router_t *router = peer_runtime_router(pc);
-    if (!listener || !router) {
+    rtc_worker_t *worker = peer_runtime_worker(pc);
+    if (!listener || !worker) {
         peer_runtime_close(pc);
         return RTC_ERR_GENERIC;
     }
 
-    pc->runtime_transport = rtc_router_create_transport(router, &(rtc_transport_config_t){
-                                                                    .listener = listener,
-                                                                    .ice_mode = RTC_ICE_MODE_FULL,
-                                                                });
+    pc->runtime_transport = rtc_transport_create(worker, &(rtc_transport_config_t){
+                                                             .listener = listener,
+                                                             .ice_mode = RTC_ICE_MODE_FULL,
+                                                         });
     if (!pc->runtime_transport) {
         peer_runtime_close(pc);
         return RTC_ERR_GENERIC;

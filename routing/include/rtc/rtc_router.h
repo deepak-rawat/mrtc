@@ -4,9 +4,9 @@
 #ifndef RTC_ROUTER_H
 #define RTC_ROUTER_H
 
-#include "rtc_common.h"
-#include "rtc_transport.h"
-#include "rtc_worker.h"
+#include "rtc/rtc_common.h"
+#include "rtc/rtc_transport.h"
+#include "rtc/rtc_worker.h"
 
 typedef struct rtc_router rtc_router_t;
 
