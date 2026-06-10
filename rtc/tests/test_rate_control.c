@@ -1,5 +1,5 @@
 /*
- * test_rate_control.c - AIMD rate controller tests.
+ * AIMD rate controller tests.
  */
 #include "test_harness.h"
 #include "rtc_rate_control.h"

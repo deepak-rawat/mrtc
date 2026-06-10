@@ -1,5 +1,5 @@
 /*
- * test_nack_buf.c - NACK retransmit buffer tests.
+ * NACK retransmit buffer tests.
  */
 #include "rtc_nack_buf.h"
 #include "test_harness.h"

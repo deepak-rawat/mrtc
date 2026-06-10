@@ -1,5 +1,5 @@
 /*
- * rtc_vec.c - Generic dynamic array implementation.
+ * Generic dynamic array implementation.
  */
 #include "rtc/rtc_vec.h"
 

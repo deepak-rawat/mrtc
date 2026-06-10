@@ -1,5 +1,5 @@
 /*
- * test_video_stats.c — Tests for video statistics and PSNR.
+ * Tests for video statistics and PSNR.
  */
 #include "test_harness.h"
 #include "media/video_stats.h"

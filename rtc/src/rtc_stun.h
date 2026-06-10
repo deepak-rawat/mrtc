@@ -166,7 +166,7 @@ int rtc_stun_get_nonce(const rtc_stun_msg_t *msg, char *buf, size_t buflen);
 int rtc_stun_long_term_key(const char *username, const char *realm, const char *password,
                            uint8_t key[16]);
 
-/* ---- ChannelData framing (not STUN, but TURN-related) ---- */
+/* ChannelData framing (not STUN, but TURN-related). */
 #define TURN_CHANNEL_DATA_HEADER 4
 #define TURN_CHANNEL_MIN         0x4000
 #define TURN_CHANNEL_MAX         0x7FFF

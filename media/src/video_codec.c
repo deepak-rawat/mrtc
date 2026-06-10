@@ -1,5 +1,5 @@
 /*
- * video_codec.c - Factory for pluggable video codecs.
+ * Factory for pluggable video codecs.
  */
 #include "media/video_codec.h"
 #include <stdlib.h>

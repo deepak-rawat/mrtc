@@ -38,13 +38,10 @@ typedef enum {
 typedef void (*rtc_on_frame_fn)(const uint8_t *payload, size_t len, uint16_t seq,
                                 uint32_t timestamp, uint32_t ssrc, bool marker, void *user);
 
-/* ---- Opaque types (internal structs defined in rtc_track.c) ---- */
-
+/* Opaque handles; internal structs are defined in rtc_track.c. */
 typedef struct rtc_rtp_sender rtc_rtp_sender_t;
 typedef struct rtc_rtp_receiver rtc_rtp_receiver_t;
 typedef struct rtc_rtp_transceiver rtc_rtp_transceiver_t;
-
-/* ---- RTCRtpSender ---- */
 
 /* Send a media frame. Builds RTP + SRTP internally (fires on main thread). */
 int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t len,
@@ -61,8 +58,6 @@ int rtc_rtp_sender_get_target_bitrate(const rtc_rtp_sender_t *sender);
 
 /* Returns true and clears if a keyframe was requested by rate control. */
 bool rtc_rtp_sender_should_keyframe(rtc_rtp_sender_t *sender);
-
-/* ---- RTCRtpSendParameters (spec subset) ---- */
 
 /* One per simulcast layer in the spec; we model just the primary layer. */
 typedef struct {
@@ -84,7 +79,7 @@ int rtc_rtp_sender_get_parameters(const rtc_rtp_sender_t *sender, rtc_rtp_send_p
  * Returns RTC_OK on success. */
 int rtc_rtp_sender_set_parameters(rtc_rtp_sender_t *sender, const rtc_rtp_send_params_t *params);
 
-/* ---- Sender feedback callbacks (fired on transport thread) ---- */
+/* Sender feedback callbacks fire on the transport thread. */
 
 /* NACK: reports lost sequence numbers that were retransmitted. */
 typedef void (*rtc_on_nack_fn)(const uint16_t *lost_seqs, int count, void *user);
@@ -96,8 +91,6 @@ typedef void (*rtc_on_pli_fn)(void *user);
 void rtc_rtp_sender_on_nack(rtc_rtp_sender_t *sender, rtc_on_nack_fn fn, void *user);
 void rtc_rtp_sender_on_pli(rtc_rtp_sender_t *sender, rtc_on_pli_fn fn, void *user);
 
-/* ---- RTCRtpReceiver ---- */
-
 /* Set callback for incoming decoded frames (fires on transport thread) */
 void rtc_rtp_receiver_on_frame(rtc_rtp_receiver_t *receiver, rtc_on_frame_fn fn, void *user);
 
@@ -106,8 +99,6 @@ rtc_kind_t rtc_rtp_receiver_kind(const rtc_rtp_receiver_t *receiver);
 
 /* Get the codec parameters */
 const rtc_codec_t *rtc_rtp_receiver_get_codec(const rtc_rtp_receiver_t *receiver);
-
-/* ---- RTCRtpTransceiver ---- */
 
 /* Get/set direction */
 rtc_direction_t rtc_rtp_transceiver_direction(const rtc_rtp_transceiver_t *t);

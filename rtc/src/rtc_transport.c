@@ -1,5 +1,5 @@
 /*
- * rtc_transport.c - Logical endpoint transport skeleton.
+ * Logical endpoint transport skeleton.
  */
 #include "rtc_transport_internal.h"
 

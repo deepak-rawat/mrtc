@@ -1,5 +1,5 @@
 /*
- * rtc_ice.c - ICE (RFC 8445) minimal implementation.
+ * ICE (RFC 8445) minimal implementation.
  *
  * Gathers host candidates from local interfaces and server-reflexive
  * candidates via STUN. Performs simplified connectivity checks.

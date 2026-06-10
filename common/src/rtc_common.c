@@ -1,8 +1,5 @@
 /*
- * rtc_common.c - Platform utilities, logging, socket helpers, threading.
- *
- * Part of libmrtc_common — shared by all mrtc components.
- * Does NOT include rtc_init/rtc_cleanup (those stay in the rtc library).
+ * Platform utilities, logging, socket helpers, and threading.
  */
 #include "rtc/rtc_common.h"
 
@@ -20,7 +17,6 @@
 
 #include <openssl/rand.h>
 
-/* ---------- Logging ---------- */
 static rtc_log_level_t g_log_level = RTC_LOG_INFO;
 static FILE *g_log_file = NULL;
 static bool g_log_stderr = true;
@@ -76,7 +72,6 @@ void rtc_log(rtc_log_level_t level, const char *fmt, ...) {
     }
 }
 
-/* ---------- Socket helpers ---------- */
 void rtc_close_socket(rtc_socket_t s) {
     if (s == RTC_INVALID_SOCKET)
         return;
@@ -99,11 +94,9 @@ int rtc_set_nonblocking(rtc_socket_t s) {
 #endif
 }
 
-/* ---------- Address helpers ---------- */
 int rtc_addr_from_string(rtc_addr_t *out, const char *ip, uint16_t port) {
     memset(out, 0, sizeof(*out));
 
-    /* Try IPv4 first */
     struct sockaddr_in *sin = (struct sockaddr_in *)&out->addr;
     if (inet_pton(AF_INET, ip, &sin->sin_addr) == 1) {
         sin->sin_family = AF_INET;
@@ -112,7 +105,6 @@ int rtc_addr_from_string(rtc_addr_t *out, const char *ip, uint16_t port) {
         return RTC_OK;
     }
 
-    /* Try IPv6 */
     struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&out->addr;
     memset(sin6, 0, sizeof(*sin6));
     if (inet_pton(AF_INET6, ip, &sin6->sin6_addr) == 1) {
@@ -145,7 +137,6 @@ int rtc_addr_to_string(const rtc_addr_t *a, char *buf, size_t buflen, uint16_t *
     return RTC_OK;
 }
 
-/* ---------- Random ---------- */
 int rtc_random_bytes(uint8_t *buf, size_t len) {
     if (RAND_bytes(buf, (int)len) != 1)
         return RTC_ERR_GENERIC;
@@ -171,7 +162,6 @@ int rtc_random_string(char *buf, size_t len) {
     return RTC_OK;
 }
 
-/* ---------- Time ---------- */
 uint64_t rtc_time_ms(void) {
 #ifdef _WIN32
     return (uint64_t)GetTickCount64();
@@ -198,7 +188,6 @@ uint64_t rtc_time_us(void) {
 #endif
 }
 
-/* ---------- Threading ---------- */
 #ifdef _WIN32
 
 static DWORD WINAPI win_thread_wrapper(LPVOID arg) {

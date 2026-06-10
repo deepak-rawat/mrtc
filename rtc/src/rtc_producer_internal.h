@@ -1,5 +1,5 @@
 /*
- * rtc_producer_internal.h - Internal producer hooks used by logical transports.
+ * Internal producer hooks used by logical transports.
  */
 #ifndef RTC_PRODUCER_INTERNAL_H
 #define RTC_PRODUCER_INTERNAL_H

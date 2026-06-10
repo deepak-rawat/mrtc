@@ -1,5 +1,5 @@
 /*
- * test_ice.c - ICE component tests.
+ * ICE component tests.
  *
  * Tests:
  *   1. Init agent: verify credentials generated

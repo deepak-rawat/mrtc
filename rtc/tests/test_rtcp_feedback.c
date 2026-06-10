@@ -1,5 +1,5 @@
 /*
- * test_rtcp_feedback.c - RTCP feedback packet tests (NACK, PLI, FIR).
+ * RTCP feedback packet tests (NACK, PLI, FIR).
  *
  * Tests build/parse round-trips, edge cases, and wire format compliance
  * for all four feedback packet types added in Phase 2.

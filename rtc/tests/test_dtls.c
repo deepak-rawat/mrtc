@@ -1,5 +1,5 @@
 /*
- * test_dtls.c - DTLS component tests.
+ * DTLS component tests.
  *
  * Tests:
  *   1. Init DTLS transport (client), verify fingerprint generated

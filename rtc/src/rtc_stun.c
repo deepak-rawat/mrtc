@@ -1,5 +1,5 @@
 /*
- * rtc_stun.c - STUN (RFC 5389) minimal implementation.
+ * STUN (RFC 5389) minimal implementation.
  *
  * Supports Binding Request/Response, MESSAGE-INTEGRITY, FINGERPRINT,
  * XOR-MAPPED-ADDRESS, and ICE-specific attributes.
@@ -474,10 +474,7 @@ int rtc_stun_binding(const char *server_ip, uint16_t server_port, rtc_socket_t s
     return rtc_stun_get_mapped_address(&resp, mapped);
 }
 
-/* ================================================================== */
-/*  TURN extensions (RFC 5766)                                        */
-/* ================================================================== */
-
+/* TURN extensions (RFC 5766). */
 int rtc_stun_build_request(rtc_stun_msg_t *msg, uint16_t method, const char *username,
                            const char *password) {
     (void)username;
@@ -722,8 +719,6 @@ int rtc_stun_long_term_key(const char *username, const char *realm, const char *
     EVP_MD_CTX_free(ctx);
     return ok ? RTC_OK : RTC_ERR_GENERIC;
 }
-
-/* ---- ChannelData framing ---- */
 
 int rtc_turn_build_channel_data(uint8_t *buf, size_t buflen, uint16_t channel, const uint8_t *data,
                                 size_t len, size_t *out_len) {

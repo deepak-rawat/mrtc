@@ -1,5 +1,5 @@
 /*
- * rtc_vec.h - Generic dynamic array.
+ * Generic dynamic array.
  *
  * Byte-element typed array with O(1) amortized push, O(1) random access,
  * and explicit element size. Not thread-safe; caller serializes access.

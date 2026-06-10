@@ -1,5 +1,5 @@
 /*
- * meeting.h - Meeting (room) management for the signaling server.
+ * Meeting (room) management for the signaling server.
  *
  * A meeting holds a set of peers. The server creates/destroys meetings
  * as peers join/leave via WebSocket.

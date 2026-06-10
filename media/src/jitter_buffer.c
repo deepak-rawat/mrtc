@@ -1,5 +1,5 @@
 /*
- * jitter_buffer.c - Packet reordering and adaptive delay.
+ * Packet reordering and adaptive delay.
  *
  * Slots are heap-allocated and indexed by RTP sequence number via
  * rtc_u32_map_t. JB_MAX_PACKETS caps the depth; the buffer evicts the

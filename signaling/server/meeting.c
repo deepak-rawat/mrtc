@@ -1,5 +1,5 @@
 /*
- * meeting.c - Meeting management implementation.
+ * Meeting management implementation.
  */
 #include "meeting.h"
 #include "signaling/signaling_msg.h"

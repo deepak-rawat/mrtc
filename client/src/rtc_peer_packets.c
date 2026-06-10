@@ -1,5 +1,5 @@
 /*
- * rtc_peer_packets.c - Peer Connection: transport-thread packet I/O.
+ * Peer Connection: transport-thread packet I/O.
  *
  * Owns peer media/control callbacks that run from the logical runtime:
  *   - peer_handle_plain_rtp: parsed inbound RTP dispatch.
@@ -14,8 +14,6 @@
 #include "rtc_transport_internal.h"
 
 #include <string.h>
-
-/* ---- RTP receive path ---- */
 
 /* Find the receiver matching a parsed RTP packet. Fast path: O(1) lookup by
  * SSRC. Slow path on the first packet for a new SSRC: match by payload type
@@ -75,8 +73,6 @@ void peer_handle_plain_rtp(rtc_peer_connection_t *pc, const rtc_rtp_packet_t *pk
     record_twcc_arrival(pc, pkt);
 #endif
 }
-
-/* ---- RTCP receive path ---- */
 
 /* RTCP SR: remember last SR NTP timestamp on the matched receiver so the
  * next RR can compute DLSR (RFC 3550 §6.4.1). */
@@ -222,8 +218,7 @@ void peer_handle_plain_rtcp(rtc_peer_connection_t *pc, const uint8_t *buf, size_
     }
 }
 
-/* ---- RTCP periodic send timer (fires on transport thread every 5 seconds) ---- */
-
+/* RTCP periodic send timer: fires on the transport thread every 5 seconds. */
 void peer_rtcp_timer(void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
     pc->runtime_rtcp_timer = RTC_WORKER_TIMER_INVALID;
@@ -245,7 +240,7 @@ void peer_rtcp_timer(void *user) {
     }
 }
 
-/* ---- TWCC feedback timer (fires every 100ms on transport thread) ---- */
+/* TWCC feedback timer: fires every 100ms on the transport thread. */
 
 #ifdef MRTC_ENABLE_TWCC
 
@@ -287,8 +282,7 @@ void peer_twcc_fb_timer(void *user) {
     }
 }
 
-/* ---- BWE bitrate-change trampoline (fires on transport thread) ---- */
-
+/* BWE bitrate-change trampoline: fires on the transport thread. */
 void peer_on_bwe_bitrate(uint32_t bitrate_bps, void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
     if (pc->on_bitrate_estimate)

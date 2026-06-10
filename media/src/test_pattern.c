@@ -1,5 +1,5 @@
 /*
- * test_pattern.c - Animated bouncing box test pattern.
+ * Animated bouncing box test pattern.
  */
 #include "media/test_pattern.h"
 #include <stdio.h>

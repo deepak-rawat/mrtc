@@ -1,5 +1,5 @@
 /*
- * rtc_producer.c - SFU inbound media producer skeleton.
+ * SFU inbound media producer skeleton.
  */
 #include "rtc/rtc_producer.h"
 #include "rtc/rtc_vec.h"

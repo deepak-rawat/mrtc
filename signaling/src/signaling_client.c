@@ -1,5 +1,5 @@
 /*
- * signaling_client.c - WebSocket signaling client using libwebsockets.
+ * WebSocket signaling client using libwebsockets.
  */
 #include "signaling/signaling_client.h"
 #include "signaling/signaling_msg.h"

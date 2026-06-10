@@ -1,5 +1,5 @@
 /*
- * media_pipeline.c - Multi-stream media pipeline.
+ * Multi-stream media pipeline.
  *
  * Each send/recv stream has its own encoder/decoder, packetizer,
  * and jitter buffer. Streams are identified by label (send) or SSRC (recv).
@@ -15,7 +15,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ---- Per-stream state ---- */
 /* media_send_stream_t and media_recv_stream_t are the public opaque handles.
  * Their layouts diverge: send streams hold only encoder state (~14 KB),
  * recv streams hold the decoder + VP8 reassembly buffer + jitter buffer
@@ -55,7 +54,6 @@ struct media_recv_stream {
     video_recv_stats_t recv_stats;
 };
 
-/* ---- Per-peer send target ---- */
 typedef struct {
     char peer_id[MP_LABEL_SIZE];
     rtc_rtp_sender_t *video_sender;
@@ -85,8 +83,6 @@ struct media_pipeline {
         int psnr_interval;
     } dbg;
 };
-
-/* ---- Helpers ---- */
 
 static media_recv_stream_t *find_recv_by_ssrc(media_pipeline_t *p, uint32_t ssrc) {
     for (int i = 0; i < p->recv_count; i++)
@@ -120,8 +116,6 @@ static void recv_stream_destroy(media_recv_stream_t *s) {
         jitter_buffer_destroy(s->jb);
     s->active = false;
 }
-
-/* ---- Create / Destroy ---- */
 
 media_pipeline_t *media_pipeline_create(const media_pipeline_config_t *cfg) {
     media_pipeline_t *p = (media_pipeline_t *)calloc(1, sizeof(*p));
@@ -189,8 +183,6 @@ void media_pipeline_remove_send_peer(media_pipeline_t *p, const char *peer_id) {
     }
 }
 
-/* ---- Add send stream ---- */
-
 media_send_stream_t *media_pipeline_add_send_stream(media_pipeline_t *p, const char *label,
                                                     bool is_video, const char *codec, int width,
                                                     int height, int fps, int bitrate) {
@@ -239,8 +231,6 @@ media_send_stream_t *media_pipeline_add_send_stream(media_pipeline_t *p, const c
 uint32_t media_send_stream_get_ssrc(const media_send_stream_t *s) {
     return s ? s->ssrc : 0;
 }
-
-/* ---- Add recv stream ---- */
 
 media_recv_stream_t *media_pipeline_add_recv_stream(media_pipeline_t *p, const char *peer_id,
                                                     const char *label, uint32_t ssrc, bool is_video,
@@ -302,8 +292,6 @@ void media_pipeline_remove_peer(media_pipeline_t *p, const char *peer_id) {
             recv_stream_destroy(&p->recv[i]);
     }
 }
-
-/* ---- Send path ---- */
 
 static bool has_send_targets(media_pipeline_t *p) {
     for (int i = 0; i < p->send_peer_count; i++)
@@ -419,8 +407,6 @@ int media_pipeline_push_audio(media_pipeline_t *p, media_send_stream_t *stream,
     return push_audio_to_stream(p, stream, audio);
 }
 
-/* ---- Recv path ---- */
-
 static void recv_video_on_stream(media_pipeline_t *p, media_recv_stream_t *s, const uint8_t *data,
                                  int len, uint16_t seq, uint32_t timestamp, bool marker) {
     s->recv_stats.packets_received++;
@@ -527,8 +513,6 @@ int media_pipeline_recv_rtp(media_pipeline_t *p, media_recv_stream_t *stream, co
     return RTC_OK;
 }
 
-/* ---- Debug config ---- */
-
 int media_pipeline_set_debug(media_pipeline_t *p, const media_debug_config_t *cfg) {
     if (!p)
         return RTC_ERR_INVALID;
@@ -559,8 +543,6 @@ int media_pipeline_set_debug(media_pipeline_t *p, const media_debug_config_t *cf
 
     return RTC_OK;
 }
-
-/* ---- Stats access ---- */
 
 const video_send_stats_t *media_pipeline_get_send_stats(media_pipeline_t *p, int index) {
     if (!p || index < 0 || index >= p->send_count || !p->send[index].is_video)

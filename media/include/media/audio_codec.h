@@ -1,5 +1,5 @@
 /*
- * audio_codec.h - Pluggable audio codec interface via vtable.
+ * Pluggable audio codec interface via vtable.
  */
 #ifndef MEDIA_AUDIO_CODEC_H
 #define MEDIA_AUDIO_CODEC_H

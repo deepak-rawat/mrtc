@@ -1,12 +1,10 @@
 /*
- * rtc_rtcp.c - RTCP (RFC 3550) Sender/Receiver Reports.
+ * RTCP (RFC 3550) Sender/Receiver Reports.
  */
 #include "rtc_rtcp.h"
 
 #include <string.h>
 #include <stdio.h>
-
-/* ---------- Helpers ---------- */
 
 static void write_u16(uint8_t *p, uint16_t v) {
     p[0] = (uint8_t)(v >> 8);
@@ -38,8 +36,6 @@ static void get_ntp_time(uint32_t *sec, uint32_t *frac) {
     /* Convert ms fraction to NTP fraction (2^32 / 1000) */
     *frac = (uint32_t)((uint64_t)ms_frac * 4294967ULL);
 }
-
-/* ---------- Statistics ---------- */
 
 int rtc_rtcp_stats_init(rtc_rtcp_stats_t *stats, uint32_t ssrc) {
     if (!stats)
@@ -117,8 +113,6 @@ void rtc_rtcp_stats_on_rtp_send(rtc_rtcp_stats_t *stats, uint32_t timestamp, siz
     stats->octets_sent += (uint32_t)payload_len;
     stats->rtp_timestamp = timestamp;
 }
-
-/* ---------- Build Sender Report ---------- */
 
 int rtc_rtcp_build_sr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats) {
     if (!pkt || !stats)
@@ -223,8 +217,6 @@ int rtc_rtcp_build_sr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats) {
     return RTC_OK;
 }
 
-/* ---------- Build Receiver Report ---------- */
-
 int rtc_rtcp_build_rr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats) {
     if (!pkt || !stats)
         return RTC_ERR_INVALID;
@@ -299,8 +291,6 @@ int rtc_rtcp_build_rr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats) {
     pkt->buf_len = offset;
     return RTC_OK;
 }
-
-/* ---------- Parse ---------- */
 
 int rtc_rtcp_parse(rtc_rtcp_packet_t *pkt, const uint8_t *data, size_t len) {
     if (!pkt || !data)
@@ -387,8 +377,6 @@ int rtc_rtcp_parse(rtc_rtcp_packet_t *pkt, const uint8_t *data, size_t len) {
     return RTC_OK;
 }
 
-/* ---------- RTCP detection ---------- */
-
 bool rtc_rtcp_is_rtcp(const uint8_t *data, size_t len) {
     if (len < 4)
         return false;
@@ -402,8 +390,6 @@ bool rtc_rtcp_is_rtcp(const uint8_t *data, size_t len) {
     return (pt >= 200 && pt <= 206);
 }
 
-/* ---------- Helper: extract PT and FMT ---------- */
-
 bool rtc_rtcp_get_pt_fmt(const uint8_t *data, size_t len, uint8_t *pt, uint8_t *fmt) {
     if (!data || len < 4)
         return false;
@@ -415,7 +401,7 @@ bool rtc_rtcp_get_pt_fmt(const uint8_t *data, size_t len, uint8_t *pt, uint8_t *
     return true;
 }
 
-/* ---------- NACK Build (RFC 4585 §6.2.1) ---------- */
+/* NACK build (RFC 4585 §6.2.1). */
 
 /* Sort helper for uint16_t */
 static int cmp_u16(const void *a, const void *b) {
@@ -486,8 +472,6 @@ int rtc_rtcp_build_nack(uint8_t *buf, size_t buf_cap, size_t *out_len, uint32_t 
     return RTC_OK;
 }
 
-/* ---------- NACK Parse ---------- */
-
 int rtc_rtcp_parse_nack(rtc_rtcp_nack_t *out, const uint8_t *data, size_t len) {
     if (!out || !data)
         return RTC_ERR_INVALID;
@@ -521,8 +505,7 @@ int rtc_rtcp_parse_nack(rtc_rtcp_nack_t *out, const uint8_t *data, size_t len) {
     return RTC_OK;
 }
 
-/* ---------- PLI Build (RFC 4585 §6.3.1) ---------- */
-
+/* PLI build (RFC 4585 §6.3.1). */
 int rtc_rtcp_build_pli(uint8_t *buf, size_t buf_cap, size_t *out_len, uint32_t sender_ssrc,
                        uint32_t media_ssrc) {
     if (!buf || !out_len)
@@ -541,8 +524,6 @@ int rtc_rtcp_build_pli(uint8_t *buf, size_t buf_cap, size_t *out_len, uint32_t s
     return RTC_OK;
 }
 
-/* ---------- PLI Parse ---------- */
-
 int rtc_rtcp_parse_pli(rtc_rtcp_pli_t *out, const uint8_t *data, size_t len) {
     if (!out || !data)
         return RTC_ERR_INVALID;
@@ -558,8 +539,7 @@ int rtc_rtcp_parse_pli(rtc_rtcp_pli_t *out, const uint8_t *data, size_t len) {
     return RTC_OK;
 }
 
-/* ---------- FIR Build (RFC 5104 §4.3.1) ---------- */
-
+/* FIR build (RFC 5104 §4.3.1). */
 int rtc_rtcp_build_fir(uint8_t *buf, size_t buf_cap, size_t *out_len, uint32_t sender_ssrc,
                        uint32_t media_ssrc, uint8_t seq_nr) {
     if (!buf || !out_len)
@@ -585,8 +565,6 @@ int rtc_rtcp_build_fir(uint8_t *buf, size_t buf_cap, size_t *out_len, uint32_t s
     return RTC_OK;
 }
 
-/* ---------- FIR Parse ---------- */
-
 int rtc_rtcp_parse_fir(rtc_rtcp_fir_t *out, const uint8_t *data, size_t len) {
     if (!out || !data)
         return RTC_ERR_INVALID;
@@ -603,8 +581,6 @@ int rtc_rtcp_parse_fir(rtc_rtcp_fir_t *out, const uint8_t *data, size_t len) {
     out->seq_nr = data[16];
     return RTC_OK;
 }
-
-/* ---------- Transport-CC parse ---------- */
 
 #define TWCC_STATUS_NOT_RECV    0
 #define TWCC_STATUS_SMALL_DELTA 1

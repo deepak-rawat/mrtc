@@ -1,5 +1,5 @@
 /*
- * conference.h — High-level conferencing API.
+ * High-level conferencing API.
  *
  * Manages multi-party WebRTC sessions: peer connections, media encode/decode,
  * signaling wiring, and data channels. Applications push raw frames and
@@ -24,7 +24,7 @@
 #include <signaling/signaling_client.h>
 #include <stdbool.h>
 
-/* ---- Callbacks (fire from internal threads — app must handle thread safety) ---- */
+/* Callbacks fire from internal threads; the app must handle thread safety. */
 typedef struct {
     /* Remote media decoded and ready for display/playback */
     void (*on_remote_video)(const char *peer_id, const char *label, const video_frame_t *frame,
@@ -45,7 +45,6 @@ typedef struct {
     void (*on_error)(const char *message, void *user);
 } conference_callbacks_t;
 
-/* ---- Configuration ---- */
 typedef struct {
     const char *video_codec; /* "VP8" (default) */
     const char *audio_codec; /* "opus" (default) */
@@ -64,7 +63,6 @@ typedef struct {
 
 typedef struct conference conference_t;
 
-/* ---- Lifecycle ---- */
 conference_t *conference_create(const conference_config_t *cfg);
 
 /*
@@ -80,7 +78,7 @@ int conference_join(conference_t *c, signaling_client_t *signaling);
 void conference_leave(conference_t *c);
 void conference_destroy(conference_t *c);
 
-/* ---- Media sources (local capture → encode → send to all peers) ---- */
+/* Media sources: local capture → encode → send to all peers. */
 
 /*
  * Add a video source (e.g. "camera", "screen").
@@ -104,11 +102,9 @@ void conference_mute_source(conference_t *c, const char *label, bool mute);
 /* Remove a source entirely (e.g., stop screen sharing) */
 void conference_remove_source(conference_t *c, const char *label);
 
-/* ---- Data channel messaging ---- */
 int conference_send_message(conference_t *c, const char *peer_id, const uint8_t *data, size_t len);
 int conference_broadcast_message(conference_t *c, const uint8_t *data, size_t len);
 
-/* ---- Status ---- */
 int conference_get_peer_count(conference_t *c);
 
 #endif /* CONFERENCE_H */

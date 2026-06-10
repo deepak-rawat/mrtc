@@ -1,5 +1,5 @@
 /*
- * rtc_u32_map.h - Open-addressing hash map from uint32_t key to void* value.
+ * Open-addressing hash map from uint32_t key to void* value.
  *
  * Designed for hot-path SSRC -> receiver lookups: O(1) amortized, no
  * allocations per get/set after rehash, cache-friendly linear probing,

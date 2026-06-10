@@ -1,5 +1,5 @@
 /*
- * rtc_srtp.c - SRTP (RFC 3711) AES-128-CM with HMAC-SHA1-80.
+ * SRTP (RFC 3711) AES-128-CM with HMAC-SHA1-80.
  *
  * Implements key derivation, encryption/decryption, and authentication
  * for RTP packets using AES-128 Counter Mode.

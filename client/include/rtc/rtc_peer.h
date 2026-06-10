@@ -20,24 +20,20 @@
 #include "rtc_track.h"
 #include "rtc_data_channel.h"
 
-/* ---- Opaque peer connection ---- */
 typedef struct rtc_peer_connection rtc_peer_connection_t;
 
-/* ---- RTCSessionDescription ---- */
 typedef struct {
     rtc_sdp_type_t type; /* offer / answer / pranswer */
     char sdp[SDP_MAX_SIZE];
     size_t sdp_len;
 } rtc_desc_t;
 
-/* ---- RTCIceCandidate (for signaling exchange) ---- */
 typedef struct {
     char candidate[256]; /* a=candidate:... line */
     char mid[32];        /* sdpMid */
     int mid_index;       /* sdpMLineIndex */
 } rtc_ice_candidate_desc_t;
 
-/* ---- RTCIceServer ---- */
 typedef struct {
     const char *urls[4];
     int url_count;
@@ -45,13 +41,10 @@ typedef struct {
     const char *credential; /* TURN only (unused) */
 } rtc_ice_server_t;
 
-/* ---- RTCConfiguration ---- */
 typedef struct {
     rtc_ice_server_t ice_servers[4];
     int ice_server_count;
 } rtc_config_t;
-
-/* ---- State enums (mirror WebRTC spec names) ---- */
 
 typedef enum {
     RTC_SIGNALING_STABLE,
@@ -87,8 +80,7 @@ typedef enum {
     RTC_CONNECTION_CLOSED,
 } rtc_connection_state_t;
 
-/* ---- Callback typedefs (all fire on the transport thread) ---- */
-
+/* All callbacks fire on the transport thread. */
 typedef void (*rtc_on_signaling_state_fn)(rtc_signaling_state_t state, void *user);
 typedef void (*rtc_on_ice_gathering_state_fn)(rtc_ice_gathering_state_t state, void *user);
 typedef void (*rtc_on_ice_connection_state_fn)(rtc_ice_connection_state_t state, void *user);
@@ -96,8 +88,6 @@ typedef void (*rtc_on_connection_state_fn)(rtc_connection_state_t state, void *u
 typedef void (*rtc_on_ice_candidate_fn)(const rtc_ice_candidate_desc_t *cand, void *user);
 typedef void (*rtc_on_track_fn)(rtc_rtp_receiver_t *receiver, void *user);
 typedef void (*rtc_on_data_channel_fn)(rtc_data_channel_t *channel, void *user);
-
-/* ---- Lifecycle ---- */
 
 /* Create a new peer connection (heap-allocated, opaque). Returns NULL on error. */
 rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config);
@@ -107,8 +97,6 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc);
 
 /* Free memory. Must be called after close(). */
 void rtc_peer_connection_destroy(rtc_peer_connection_t *pc);
-
-/* ---- Track management ---- */
 
 /* Add a track (creates a transceiver with sendrecv direction).
  * Must be called before create_offer/create_answer.
@@ -139,8 +127,6 @@ int rtc_peer_connection_remove_track(rtc_peer_connection_t *pc, rtc_rtp_sender_t
 int rtc_peer_connection_get_transceivers(rtc_peer_connection_t *pc, rtc_rtp_transceiver_t **out,
                                          int *count);
 
-/* ---- SDP offer/answer ---- */
-
 /* Generate a local offer SDP from transceivers + ICE + DTLS. */
 int rtc_peer_connection_create_offer(rtc_peer_connection_t *pc, rtc_desc_t *desc);
 
@@ -158,8 +144,6 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
 const rtc_desc_t *rtc_peer_connection_local_desc(const rtc_peer_connection_t *pc);
 const rtc_desc_t *rtc_peer_connection_remote_desc(const rtc_peer_connection_t *pc);
 
-/* ---- Trickle ICE ---- */
-
 /* Add a remote ICE candidate received via signaling. */
 int rtc_peer_connection_add_ice_candidate(rtc_peer_connection_t *pc,
                                           const rtc_ice_candidate_desc_t *cand);
@@ -170,8 +154,6 @@ int rtc_peer_connection_add_ice_candidate(rtc_peer_connection_t *pc,
  * mid-session renegotiation). Returns RTC_ERR_INVALID otherwise. */
 int rtc_peer_connection_restart_ice(rtc_peer_connection_t *pc);
 
-/* ---- Data channels ---- */
-
 /* Create a data channel with the given label and options.
  * Returns the channel, or NULL on error.
  * The channel fires on_open once the DTLS connection is established. */
@@ -179,8 +161,7 @@ rtc_data_channel_t *rtc_peer_connection_create_data_channel(rtc_peer_connection_
                                                             const char *label,
                                                             const rtc_data_channel_init_t *opts);
 
-/* ---- Event callbacks (set before connection starts) ---- */
-
+/* Set these before the connection starts. */
 void rtc_peer_connection_on_signaling_state(rtc_peer_connection_t *pc, rtc_on_signaling_state_fn fn,
                                             void *user);
 void rtc_peer_connection_on_ice_gathering_state(rtc_peer_connection_t *pc,
@@ -202,14 +183,11 @@ typedef void (*rtc_on_bitrate_estimate_fn)(uint32_t bitrate_bps, void *user);
 void rtc_peer_connection_on_bitrate_estimate(rtc_peer_connection_t *pc,
                                              rtc_on_bitrate_estimate_fn fn, void *user);
 
-/* ---- State getters (safe to call from any thread) ---- */
-
+/* State getters are safe to call from any thread. */
 rtc_signaling_state_t rtc_peer_connection_signaling_state(const rtc_peer_connection_t *pc);
 rtc_ice_gathering_state_t rtc_peer_connection_ice_gathering_state(const rtc_peer_connection_t *pc);
 rtc_ice_connection_state_t rtc_peer_connection_ice_connection_state(const rtc_peer_connection_t *pc);
 rtc_connection_state_t rtc_peer_connection_connection_state(const rtc_peer_connection_t *pc);
-
-/* ---- Identity / capability getters ---- */
 
 /* Local DTLS certificate fingerprint (SHA-256, hex with colons).
  * Always returns a NUL-terminated string; never NULL after create. */

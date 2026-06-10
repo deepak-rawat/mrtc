@@ -1,5 +1,5 @@
 /*
- * test_data_channel.c - Data channel component tests.
+ * Data channel component tests.
  *
  * Tests:
  *   1. Create a data channel and verify properties
@@ -14,8 +14,6 @@
 #include <rtc/rtc_client.h>
 #include "rtc_data_channel_internal.h"
 #include "test_harness.h"
-
-/* ---------- Test transport (loopback) ---------- */
 
 /* Simulate a DTLS transport: messages sent by one side are received by the other */
 static rtc_dc_manager_t *g_peer_a;
@@ -32,8 +30,6 @@ static int loopback_send_b(const uint8_t *data, size_t len, void *user) {
     /* B's outgoing data is A's incoming data */
     return rtc_dc_manager_recv(g_peer_a, data, len);
 }
-
-/* ---------- Callback helpers ---------- */
 
 static int g_open_count = 0;
 static int g_close_count = 0;
@@ -72,9 +68,6 @@ static void reset_globals(void) {
     memset(g_last_msg, 0, sizeof(g_last_msg));
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: create a data channel and verify properties                  */
-/* ------------------------------------------------------------------ */
 TEST(dc_create) {
     rtc_dc_manager_t mgr;
     rtc_dc_manager_init(&mgr, loopback_send_a, NULL);
@@ -97,9 +90,6 @@ TEST(dc_create) {
            rtc_data_channel_id(dc));
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: OPEN → ACK handshake                                         */
-/* ------------------------------------------------------------------ */
 TEST(dc_open_handshake) {
     reset_globals();
     rtc_dc_manager_t mgr_a, mgr_b;
@@ -135,9 +125,6 @@ TEST(dc_open_handshake) {
     printf("    OPEN/ACK handshake completed\n");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: send and receive data                                        */
-/* ------------------------------------------------------------------ */
 TEST(dc_send_recv) {
     reset_globals();
     rtc_dc_manager_t mgr_a, mgr_b;
@@ -184,9 +171,6 @@ TEST(dc_send_recv) {
     rtc_dc_manager_close(&mgr_b);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: send text                                                    */
-/* ------------------------------------------------------------------ */
 TEST(dc_send_text) {
     reset_globals();
     rtc_dc_manager_t mgr_a, mgr_b;
@@ -214,9 +198,6 @@ TEST(dc_send_text) {
     rtc_dc_manager_close(&mgr_b);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: close handshake                                              */
-/* ------------------------------------------------------------------ */
 TEST(dc_close) {
     reset_globals();
     rtc_dc_manager_t mgr_a, mgr_b;
@@ -246,9 +227,6 @@ TEST(dc_close) {
     rtc_dc_manager_close(&mgr_b);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: multiple channels                                            */
-/* ------------------------------------------------------------------ */
 TEST(dc_multiple_channels) {
     reset_globals();
     rtc_dc_manager_t mgr_a, mgr_b;
@@ -282,9 +260,6 @@ TEST(dc_multiple_channels) {
     rtc_dc_manager_close(&mgr_b);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: reject send before channel is open                           */
-/* ------------------------------------------------------------------ */
 TEST(dc_send_before_open) {
     rtc_dc_manager_t mgr;
     rtc_dc_manager_init(&mgr, loopback_send_a, NULL);
@@ -303,9 +278,6 @@ TEST(dc_send_before_open) {
     rtc_dc_manager_close(&mgr);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: 16-bit channel ID round-trips (regression for 8-bit truncation) */
-/* ------------------------------------------------------------------ */
 TEST(dc_large_channel_id) {
     reset_globals();
     rtc_dc_manager_t mgr_a, mgr_b;
@@ -351,9 +323,6 @@ TEST(dc_large_channel_id) {
     rtc_dc_manager_close(&mgr_b);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: buffered_amount + byte counters + low-water callback         */
-/* ------------------------------------------------------------------ */
 static int g_buffered_low_count = 0;
 static void on_buffered_low(void *user) {
     (void)user;
@@ -407,7 +376,6 @@ TEST(dc_buffered_amount) {
     rtc_dc_manager_close(&mgr_b);
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Data Channel Tests\n");

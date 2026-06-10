@@ -1,5 +1,5 @@
 /*
- * test_str_map.c - Unit tests for rtc_str_map_t.
+ * Unit tests for rtc_str_map_t.
  */
 #include "rtc/rtc_str_map.h"
 #include "test_harness.h"

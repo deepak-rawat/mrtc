@@ -1,12 +1,11 @@
 /*
- * signaling_msg.c - JSON message build/parse using cJSON.
+ * JSON message build/parse using cJSON.
  */
 #include "signaling/signaling_msg.h"
 #include <cjson/cJSON.h>
 #include <string.h>
 #include <stdlib.h>
 
-/* ---- Type string mapping ---- */
 static const char *type_strings[] = {
     [SIG_MSG_JOIN] = "join",           [SIG_MSG_LEAVE] = "leave",
     [SIG_MSG_JOINED] = "joined",       [SIG_MSG_PEER_JOINED] = "peer_joined",
@@ -23,7 +22,6 @@ static sig_msg_type_t type_from_string(const char *s) {
     return SIG_MSG_UNKNOWN;
 }
 
-/* ---- Helper: create base object with "type" ---- */
 static cJSON *make_base(sig_msg_type_t type) {
     cJSON *obj = cJSON_CreateObject();
     if (!obj)
@@ -37,8 +35,6 @@ static char *finish(cJSON *obj) {
     cJSON_Delete(obj);
     return s;
 }
-
-/* ---- Build: Client → Server ---- */
 
 char *sig_msg_build_join(const char *meeting) {
     cJSON *obj = make_base(SIG_MSG_JOIN);
@@ -81,8 +77,6 @@ char *sig_msg_build_candidate(const char *to, const char *candidate) {
     cJSON_AddStringToObject(obj, "candidate", candidate);
     return finish(obj);
 }
-
-/* ---- Build: Server → Client ---- */
 
 char *sig_msg_build_joined(const char *peer_id, const char **peers, int peer_count) {
     cJSON *obj = make_base(SIG_MSG_JOINED);
@@ -145,8 +139,6 @@ char *sig_msg_build_error(const char *message) {
     cJSON_AddStringToObject(obj, "message", message);
     return finish(obj);
 }
-
-/* ---- Parse ---- */
 
 static void safe_copy(char *dst, size_t dst_size, const cJSON *item) {
     if (cJSON_IsString(item) && item->valuestring) {

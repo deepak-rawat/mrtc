@@ -1,5 +1,5 @@
 /*
- * jitter_buffer.h - Packet reordering and adaptive delay for RTP streams.
+ * Packet reordering and adaptive delay for RTP streams.
  */
 #ifndef MEDIA_JITTER_BUFFER_H
 #define MEDIA_JITTER_BUFFER_H

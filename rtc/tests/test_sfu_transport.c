@@ -1,5 +1,5 @@
 /*
- * test_sfu_transport.c - Logical SFU transport skeleton tests.
+ * Logical SFU transport skeleton tests.
  */
 #include <rtc/rtc.h>
 #include <rtc/rtc_worker.h>

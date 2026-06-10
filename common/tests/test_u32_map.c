@@ -1,5 +1,5 @@
 /*
- * test_u32_map.c - Unit tests for rtc_u32_map_t.
+ * Unit tests for rtc_u32_map_t.
  */
 #include "rtc/rtc_u32_map.h"
 #include "test_harness.h"

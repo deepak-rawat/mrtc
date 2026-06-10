@@ -1,5 +1,5 @@
 /*
- * test_rtcp.c - RTCP component tests.
+ * RTCP component tests.
  *
  * Tests:
  *   1. Build Sender Report and verify structure

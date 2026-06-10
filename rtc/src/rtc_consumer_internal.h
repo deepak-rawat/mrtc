@@ -1,5 +1,5 @@
 /*
- * rtc_consumer_internal.h - Internal consumer hooks used by producers.
+ * Internal consumer hooks used by producers.
  */
 #ifndef RTC_CONSUMER_INTERNAL_H
 #define RTC_CONSUMER_INTERNAL_H

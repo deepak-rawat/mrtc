@@ -1,5 +1,5 @@
 /*
- * rtc_track.c - Track / Transceiver implementation.
+ * Track / Transceiver implementation.
  *
  * Sender send path, receiver callbacks, transceiver accessors, plus the
  * per-transceiver lifecycle helpers called by rtc_peer.c (init/close/attach/
@@ -13,8 +13,6 @@
 
 #include <stdio.h>
 #include <string.h>
-
-/* ---- RTCRtpSender ---- */
 
 int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t len,
                         uint32_t samples, bool marker) {
@@ -122,8 +120,6 @@ bool rtc_rtp_sender_should_keyframe(rtc_rtp_sender_t *sender) {
 #endif
 }
 
-/* ---- Sender feedback callbacks ---- */
-
 void rtc_rtp_sender_on_nack(rtc_rtp_sender_t *sender, rtc_on_nack_fn fn, void *user) {
     if (!sender)
         return;
@@ -156,7 +152,7 @@ int rtc_rtp_sender_set_parameters(rtc_rtp_sender_t *sender, const rtc_rtp_send_p
     return RTC_OK;
 }
 
-/* ---- Internal handlers (called by peer connection on RTCP feedback) ---- */
+/* Internal handlers called by the peer connection on RTCP feedback. */
 
 /* Minimum interval between honored PLIs from the same remote (ms). Protects
  * the encoder against keyframe storms from a buggy or hostile peer. */
@@ -217,8 +213,6 @@ void rtc_rtp_sender_handle_pli(rtc_rtp_sender_t *sender) {
         sender->on_pli(sender->on_pli_user);
 }
 
-/* ---- RTCRtpReceiver ---- */
-
 void rtc_rtp_receiver_on_frame(rtc_rtp_receiver_t *receiver, rtc_on_frame_fn fn, void *user) {
     if (!receiver)
         return;
@@ -233,8 +227,6 @@ rtc_kind_t rtc_rtp_receiver_kind(const rtc_rtp_receiver_t *receiver) {
 const rtc_codec_t *rtc_rtp_receiver_get_codec(const rtc_rtp_receiver_t *receiver) {
     return receiver ? &receiver->codec : NULL;
 }
-
-/* ---- RTCRtpTransceiver ---- */
 
 rtc_direction_t rtc_rtp_transceiver_direction(const rtc_rtp_transceiver_t *t) {
     return t ? t->direction : RTC_DIR_INACTIVE;
@@ -257,8 +249,7 @@ const char *rtc_rtp_transceiver_mid(const rtc_rtp_transceiver_t *t) {
     return t ? t->mid : NULL;
 }
 
-/* ---- Per-transceiver lifecycle helpers (called by rtc_peer.c) ---- */
-
+/* Per-transceiver lifecycle helpers, called by rtc_peer.c. */
 void rtc_rtp_transceiver_init_slot(struct rtc_rtp_transceiver *t, int mid_index, rtc_kind_t kind,
                                    const rtc_codec_t *codec) {
     memset(t, 0, sizeof(*t));

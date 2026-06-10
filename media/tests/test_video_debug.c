@@ -1,5 +1,5 @@
 /*
- * test_video_debug.c — Checksum tests.
+ * Checksum tests.
  */
 #include "test_harness.h"
 #include "video_debug.h"

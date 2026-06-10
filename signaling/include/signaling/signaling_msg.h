@@ -1,5 +1,5 @@
 /*
- * signaling_msg.h - Signaling message wire format (JSON via cJSON).
+ * Signaling message wire format (JSON via cJSON).
  *
  * Shared by both signaling client and server.
  * Message types: join, leave, joined, peer_joined, peer_left,
@@ -57,7 +57,7 @@ typedef struct {
     char error_msg[SIG_MAX_ERROR_MSG];
 } sig_msg_t;
 
-/* ---------- Build helpers (return JSON string, caller frees) ---------- */
+/* Build helpers — return a JSON string the caller frees. */
 
 /* Client → Server */
 char *sig_msg_build_join(const char *meeting);
@@ -74,8 +74,6 @@ char *sig_msg_build_relay_offer(const char *from, const char *sdp);
 char *sig_msg_build_relay_answer(const char *from, const char *sdp);
 char *sig_msg_build_relay_candidate(const char *from, const char *candidate);
 char *sig_msg_build_error(const char *message);
-
-/* ---------- Parse ---------- */
 
 /*
  * Parse a JSON string into a sig_msg_t.

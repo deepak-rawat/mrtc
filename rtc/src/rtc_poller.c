@@ -1,5 +1,5 @@
 /*
- * rtc_poller.c - Platform-specific I/O multiplexer with wake support.
+ * Platform-specific I/O multiplexer with wake support.
  *
  * Backends: epoll+eventfd (Linux), kqueue+EVFILT_USER (macOS),
  *           select + UDP loopback wake socket (Windows / fallback).
@@ -8,9 +8,7 @@
 
 #include <string.h>
 
-/* ================================================================== */
-#ifdef __linux__ /* ---- epoll + eventfd backend ---- */
-/* ================================================================== */
+#ifdef __linux__ /* epoll + eventfd backend */
 
 #  include <sys/eventfd.h>
 #  include <unistd.h>
@@ -102,9 +100,7 @@ void rtc_poller_close(rtc_poller_t *p) {
     }
 }
 
-/* ================================================================== */
-#elif defined(__APPLE__) /* ---- kqueue + EVFILT_USER backend ---- */
-/* ================================================================== */
+#elif defined(__APPLE__) /* kqueue + EVFILT_USER backend */
 
 #  include <unistd.h>
 
@@ -188,9 +184,7 @@ void rtc_poller_close(rtc_poller_t *p) {
     }
 }
 
-/* ================================================================== */
-#else /* ---- select + UDP loopback wake backend (Windows / fallback) -- */
-/* ================================================================== */
+#else /* select + UDP loopback wake backend (Windows / fallback) */
 
 #  ifdef _WIN32
 #    include <windows.h>

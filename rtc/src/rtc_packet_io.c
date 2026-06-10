@@ -1,5 +1,5 @@
 /*
- * rtc_packet_io.c - Transport layer with threaded event loop.
+ * Transport layer with threaded event loop.
  *
  * Owns the UDP socket, runs a background poller thread,
  * classifies incoming packets per RFC 7983, and dispatches

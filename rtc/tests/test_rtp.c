@@ -1,5 +1,5 @@
 /*
- * test_rtp.c - RTP component tests.
+ * RTP component tests.
  *
  * Tests:
  *   1. Build an RTP packet and verify header fields

@@ -1,5 +1,5 @@
 /*
- * rtc_router_internal.h - Internal router helpers.
+ * Internal router helpers.
  */
 #ifndef RTC_ROUTER_INTERNAL_H
 #define RTC_ROUTER_INTERNAL_H

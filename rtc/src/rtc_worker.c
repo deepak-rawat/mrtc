@@ -1,5 +1,5 @@
 /*
- * rtc_worker.c - SFU/client runtime worker skeleton.
+ * SFU/client runtime worker skeleton.
  *
  * The worker will become the owner of packet I/O, command queues, and dynamic
  * timers. This first slice establishes lifecycle and timer-scheduler ownership

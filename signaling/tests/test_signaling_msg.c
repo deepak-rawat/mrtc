@@ -1,5 +1,5 @@
 /*
- * test_signaling_msg.c - Tests for signaling message build/parse.
+ * Tests for signaling message build/parse.
  */
 #include "test_harness.h"
 #include "signaling/signaling_msg.h"

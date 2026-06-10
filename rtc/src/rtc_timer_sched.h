@@ -1,5 +1,5 @@
 /*
- * rtc_timer_sched.h - Dynamic timer scheduler for worker-owned timers.
+ * Dynamic timer scheduler for worker-owned timers.
  *
  * Internal utility. The scheduler is not thread-safe; callers serialize access
  * from the owning worker/event loop. Cancellation is lazy: canceled timers are

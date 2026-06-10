@@ -1,5 +1,5 @@
 /*
- * test_sfu_media.c - SFU producer/consumer skeleton tests.
+ * SFU producer/consumer skeleton tests.
  */
 #include <rtc/rtc.h>
 #include <rtc/rtc_worker.h>

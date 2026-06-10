@@ -1,5 +1,5 @@
 /*
- * test_srtp.c - SRTP component tests.
+ * SRTP component tests.
  *
  * Tests:
  *   1. Init SRTP context with known keys, verify derived session keys

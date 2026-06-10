@@ -126,7 +126,6 @@ int rtc_twcc_receiver_build_feedback(rtc_twcc_receiver_t *r, uint32_t sender_ssr
             prev_us = (uint64_t)((int64_t)prev_us + (int64_t)deltas[i] * RTC_TWCC_TICK_US);
     }
 
-    /* ---- Build the packet ---- */
     /* Header: V=2, P=0, FMT=15, PT=205, length, sender_ssrc, media_ssrc,
      * base_seq(16), pkt_count(16), ref_time(24), fb_pkt_count(8) */
     if (cap < 20)

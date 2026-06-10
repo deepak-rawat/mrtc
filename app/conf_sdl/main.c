@@ -186,7 +186,6 @@ int main(int argc, char *argv[]) {
     conference_join(conf, sig);
     printf("  Connected! Waiting for peers...\n\n");
 
-    /* ---- Main loop ---- */
     bool running = true;
     int16_t pcm_buf[960];
     uint64_t last_video_ms = 0;

@@ -1,5 +1,5 @@
 /*
- * ui_sdl3.h - SDL3 native UI: camera capture, audio I/O, video tile grid.
+ * SDL3 native UI: camera capture, audio I/O, video tile grid.
  */
 #ifndef UI_SDL3_H
 #define UI_SDL3_H

@@ -1,5 +1,5 @@
 /*
- * test_vec.c - Unit tests for rtc_vec_t dynamic array.
+ * Unit tests for rtc_vec_t dynamic array.
  */
 #include "rtc/rtc_vec.h"
 #include "test_harness.h"

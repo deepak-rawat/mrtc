@@ -82,8 +82,6 @@ typedef struct {
     size_t buf_len;
 } rtc_rtcp_packet_t;
 
-/* ---------- Statistics tracking ---------- */
-
 typedef struct {
     uint32_t ssrc; /* local SSRC */
 
@@ -133,7 +131,7 @@ int rtc_rtcp_parse(rtc_rtcp_packet_t *pkt, const uint8_t *data, size_t len);
 /* Check if raw data looks like RTCP (for demux alongside RTP) */
 bool rtc_rtcp_is_rtcp(const uint8_t *data, size_t len);
 
-/* ---------- RTCP Feedback packets (RFC 4585 / 5104) ---------- */
+/* RTCP feedback packets (RFC 4585 / 5104). */
 
 /* NACK parse result */
 typedef struct {

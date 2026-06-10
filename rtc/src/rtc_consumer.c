@@ -1,5 +1,5 @@
 /*
- * rtc_consumer.c - SFU outbound media consumer skeleton.
+ * SFU outbound media consumer skeleton.
  */
 #include "rtc/rtc_consumer.h"
 

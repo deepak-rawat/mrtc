@@ -1,5 +1,5 @@
 /*
- * rtc_peer.c - Peer Connection: control plane.
+ * Peer Connection: control plane.
  *
  * Lifecycle, SDP, connect choreography, timers, public API.
  * Packet handling (RTP/RTCP dispatch) lives in rtc_peer_packets.c.
@@ -11,7 +11,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ---- Forward declarations ---- */
 static int peer_dc_send(const uint8_t *data, size_t len, void *user);
 
 static void peer_runtime_close(rtc_peer_connection_t *pc);
@@ -291,10 +290,6 @@ static void peer_runtime_on_data(const uint8_t *data, size_t len, void *user) {
     rtc_dc_manager_recv(&pc->dc_manager, data, len);
 }
 
-/* ---- BWE bitrate callback ---- */
-
-/* ---- Helper: fill rtc_sdp_t from transceivers + ICE + DTLS ---- */
-
 static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
     int rc = peer_runtime_fill_sdp_transport(pc, sdp);
     if (rc != RTC_OK)
@@ -338,8 +333,6 @@ static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
     return RTC_OK;
 }
 
-/* ---- Helper: try to start connection ---- */
-
 static void peer_try_connect(rtc_peer_connection_t *pc) {
     if (!pc->has_local_desc || !pc->has_remote_desc)
         return;
@@ -361,8 +354,6 @@ static void peer_try_connect(rtc_peer_connection_t *pc) {
     pc->runtime_connect_timer =
         rtc_worker_add_timer(peer_runtime_worker(pc), rtc_time_ms(), peer_runtime_connect_timer, pc);
 }
-
-/* ---- Public API ---- */
 
 rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)calloc(1, sizeof(*pc));
@@ -453,8 +444,6 @@ void rtc_peer_connection_destroy(rtc_peer_connection_t *pc) {
     free(pc);
 }
 
-/* ---- Track management ---- */
-
 rtc_rtp_sender_t *rtc_peer_connection_add_track(rtc_peer_connection_t *pc, rtc_kind_t kind,
                                                 const rtc_codec_t *codec) {
     if (!pc || !codec)
@@ -536,8 +525,6 @@ int rtc_peer_connection_get_transceivers(rtc_peer_connection_t *pc, rtc_rtp_tran
     *count = n;
     return RTC_OK;
 }
-
-/* ---- SDP offer/answer ---- */
 
 int rtc_peer_connection_create_offer(rtc_peer_connection_t *pc, rtc_desc_t *desc) {
     if (!pc || !desc)
@@ -776,8 +763,6 @@ const rtc_desc_t *rtc_peer_connection_remote_desc(const rtc_peer_connection_t *p
     return (pc && pc->has_remote_desc) ? &pc->remote_desc : NULL;
 }
 
-/* ---- Trickle ICE ---- */
-
 int rtc_peer_connection_add_ice_candidate(rtc_peer_connection_t *pc,
                                           const rtc_ice_candidate_desc_t *cand) {
     if (!pc)
@@ -803,8 +788,6 @@ int rtc_peer_connection_restart_ice(rtc_peer_connection_t *pc) {
     return rtc_transport_restart_ice(pc->runtime_transport);
 }
 
-/* ---- Data channels ---- */
-
 /* Send callback for data channel manager (sends via DTLS) */
 static int peer_dc_send(const uint8_t *data, size_t len, void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
@@ -826,8 +809,6 @@ rtc_data_channel_t *rtc_peer_connection_create_data_channel(rtc_peer_connection_
 
     return rtc_dc_manager_create_channel(&pc->dc_manager, label, opts);
 }
-
-/* ---- Event callbacks ---- */
 
 void rtc_peer_connection_on_signaling_state(rtc_peer_connection_t *pc, rtc_on_signaling_state_fn fn,
                                             void *user) {
@@ -897,8 +878,6 @@ void rtc_peer_connection_on_bitrate_estimate(rtc_peer_connection_t *pc,
 #endif
 }
 
-/* ---- State getters ---- */
-
 rtc_signaling_state_t rtc_peer_connection_signaling_state(const rtc_peer_connection_t *pc) {
     return pc ? pc->signaling_state : RTC_SIGNALING_CLOSED;
 }
@@ -916,8 +895,6 @@ rtc_connection_state_t rtc_peer_connection_connection_state(const rtc_peer_conne
     return pc ? pc->connection_state : RTC_CONNECTION_CLOSED;
 }
 
-/* ---- Identity / capability getters ---- */
-
 const char *rtc_peer_connection_local_fingerprint(const rtc_peer_connection_t *pc) {
     if (pc && pc->runtime_fingerprint[0] != '\0')
         return pc->runtime_fingerprint;
@@ -931,8 +908,6 @@ const char *rtc_peer_connection_remote_fingerprint(const rtc_peer_connection_t *
 bool rtc_peer_connection_can_trickle_ice_candidates(const rtc_peer_connection_t *pc) {
     return (pc && pc->has_remote_desc) ? pc->remote_sdp.ice_options_trickle : false;
 }
-
-/* ---- Stats (getStats) ---- */
 
 int rtc_peer_connection_get_stats(const rtc_peer_connection_t *pc, rtc_stats_report_t *report) {
     if (!pc || !report)

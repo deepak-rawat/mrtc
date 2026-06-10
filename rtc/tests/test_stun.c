@@ -1,5 +1,5 @@
 /*
- * test_stun.c - STUN component tests.
+ * STUN component tests.
  *
  * Tests:
  *   1. Build a simple STUN Binding Request (no ICE attributes)

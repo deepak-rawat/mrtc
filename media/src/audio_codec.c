@@ -1,5 +1,5 @@
 /*
- * audio_codec.c - Factory for pluggable audio codecs.
+ * Factory for pluggable audio codecs.
  */
 #include "media/audio_codec.h"
 #include <stdlib.h>

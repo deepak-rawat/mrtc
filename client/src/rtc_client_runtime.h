@@ -1,5 +1,5 @@
 /*
- * rtc_client_runtime.h - Internal shared runtime for client peer connections.
+ * Internal shared runtime for client peer connections.
  */
 #ifndef RTC_CLIENT_RUNTIME_H
 #define RTC_CLIENT_RUNTIME_H

@@ -1,5 +1,5 @@
 /*
- * video_codec.h - Pluggable video codec interface via vtable.
+ * Pluggable video codec interface via vtable.
  *
  * Supports VP8 (libvpx), with H.264 (OpenH264) and FFmpeg backends
  * addable by implementing the ops vtable.

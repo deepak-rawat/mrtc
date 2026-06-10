@@ -1,5 +1,5 @@
 /*
- * rtc_data_channel.c - Lightweight data channel over DTLS.
+ * Lightweight data channel over DTLS.
  *
  * Wire format for each message:
  *   [1 byte: channel_id] [1 byte: msg_type] [2 bytes: length BE] [payload]
@@ -41,8 +41,6 @@ struct rtc_data_channel {
     rtc_dc_manager_t *manager;
 };
 
-/* ---------- Internal helpers ---------- */
-
 static int dc_send_message(rtc_data_channel_t *dc, uint8_t msg_type, const uint8_t *payload,
                            size_t len) {
     if (!dc || !dc->manager || !dc->manager->send_fn)
@@ -83,8 +81,6 @@ static int dc_send_message(rtc_data_channel_t *dc, uint8_t msg_type, const uint8
 static rtc_data_channel_t *dc_find_by_id(rtc_dc_manager_t *mgr, uint16_t id) {
     return (rtc_data_channel_t *)rtc_u32_map_get(&mgr->channels, (uint32_t)id);
 }
-
-/* ---------- Data Channel API ---------- */
 
 int rtc_data_channel_send(rtc_data_channel_t *dc, const uint8_t *data, size_t len) {
     if (!dc)
@@ -194,8 +190,6 @@ uint64_t rtc_data_channel_bytes_sent(const rtc_data_channel_t *dc) {
 uint64_t rtc_data_channel_bytes_received(const rtc_data_channel_t *dc) {
     return dc ? dc->bytes_received : 0;
 }
-
-/* ---------- Data Channel Manager ---------- */
 
 int rtc_dc_manager_init(rtc_dc_manager_t *mgr, rtc_dc_send_fn send_fn, void *send_user) {
     if (!mgr)

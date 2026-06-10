@@ -1,5 +1,5 @@
 /*
- * test_rtp_sender_loopback.c - Client RTP sender end-to-end over a real
+ * Client RTP sender end-to-end over a real
  * runtime transport (worker/listener/router/transport + DTLS/SRTP). The
  * runtime is set up as fixture; the subject under test is the client
  * sender's RTP path.

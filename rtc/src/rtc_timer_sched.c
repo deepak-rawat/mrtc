@@ -1,5 +1,5 @@
 /*
- * rtc_timer_sched.c - Dynamic min-heap timer scheduler.
+ * Dynamic min-heap timer scheduler.
  */
 #include "rtc_timer_sched.h"
 

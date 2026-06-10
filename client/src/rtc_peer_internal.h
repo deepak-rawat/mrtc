@@ -1,5 +1,5 @@
 /*
- * rtc_peer_internal.h - Shared internal definitions for rtc_peer.c and
+ * Shared internal definitions for rtc_peer.c and
  * rtc_peer_packets.c.  NOT part of the public API.
  *
  * Contains the concrete struct layouts for peer_connection, sender,
@@ -38,7 +38,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* ---- Internal transceiver structs (layout shared with rtc_track.c) ---- */
+/* Internal transceiver structs; layout shared with rtc_track.c. */
 
 struct rtc_rtp_sender {
     rtc_codec_t codec;
@@ -90,8 +90,6 @@ struct rtc_rtp_transceiver {
     int mid_index;
     bool used;
 };
-
-/* ---- Peer connection internal struct ---- */
 
 struct rtc_peer_connection {
     /* Private logical runtime used by the peer facade. */
@@ -173,7 +171,7 @@ struct rtc_peer_connection {
 #endif
 };
 
-/* ---- State helpers (used by both peer and packets TUs) ---- */
+/* State helpers used by both the peer and packets TUs. */
 
 static inline void peer_set_signaling(rtc_peer_connection_t *pc, rtc_signaling_state_t s) {
     pc->signaling_state = s;
@@ -200,12 +198,11 @@ static inline void peer_set_connection(rtc_peer_connection_t *pc, rtc_connection
         pc->on_connection_state(s, pc->on_connection_state_user);
 }
 
-/* ---- Internal handlers from rtc_track.c ---- */
 
 void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_seqs, int count);
 void rtc_rtp_sender_handle_pli(rtc_rtp_sender_t *sender);
 
-/* ---- Internal transceiver helpers from rtc_track.c ----
+/* Internal transceiver helpers from rtc_track.c.
  * These operate on a single transceiver/sender/receiver. The peer connection
  * owns the array of transceivers and the SSRC maps; it loops over slots and
  * calls these helpers for the per-slot work.
@@ -239,7 +236,7 @@ void rtc_rtp_receiver_emit_rr_logical(struct rtc_rtp_receiver *r, rtc_transport_
 /* Serialize a single transceiver into an SDP m= section. */
 void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc_sdp_media_t *m);
 
-/* ---- Entry points defined in rtc_peer_packets.c ---- */
+/* Entry points defined in rtc_peer_packets.c. */
 void peer_handle_plain_rtp(rtc_peer_connection_t *pc, const rtc_rtp_packet_t *pkt);
 void peer_handle_plain_rtcp(rtc_peer_connection_t *pc, const uint8_t *buf, size_t pkt_len);
 

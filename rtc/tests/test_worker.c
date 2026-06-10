@@ -1,5 +1,5 @@
 /*
- * test_worker.c - RTC worker lifecycle tests.
+ * RTC worker lifecycle tests.
  */
 #include <rtc/rtc_worker.h>
 

@@ -1,5 +1,5 @@
 /*
- * test_turn.c - TURN unit tests (no network): STUN method builders,
+ * TURN unit tests (no network): STUN method builders,
  * ChannelData framing, long-term credential computation.
  */
 #include "test_harness.h"

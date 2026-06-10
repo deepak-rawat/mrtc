@@ -8,7 +8,6 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-/* ---------- Platform socket abstraction ---------- */
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -30,7 +29,6 @@ typedef int rtc_socket_t;
 #  define RTC_INVALID_SOCKET (-1)
 #endif
 
-/* ---------- Error codes ---------- */
 typedef enum {
     RTC_OK = 0,
     RTC_ERR_GENERIC = -1,
@@ -44,7 +42,6 @@ typedef enum {
     RTC_ERR_SDP = -9,
 } rtc_err_t;
 
-/* ---------- Session description basics ---------- */
 #define SDP_MAX_SIZE 8192
 
 typedef enum {
@@ -53,32 +50,25 @@ typedef enum {
     RTC_SDP_PRANSWER,
 } rtc_sdp_type_t;
 
-/* ---------- Network address ---------- */
 typedef struct {
     struct sockaddr_storage addr;
     socklen_t len;
 } rtc_addr_t;
 
-/* Helper to fill rtc_addr_t from ip string + port */
 int rtc_addr_from_string(rtc_addr_t *out, const char *ip, uint16_t port);
-/* Helper to format rtc_addr_t to string */
 int rtc_addr_to_string(const rtc_addr_t *a, char *buf, size_t buflen, uint16_t *port_out);
 
-/* ---------- Utility ---------- */
-/* Portable close socket */
 void rtc_close_socket(rtc_socket_t s);
-/* Set socket non-blocking */
 int rtc_set_nonblocking(rtc_socket_t s);
-/* Generate cryptographic random bytes */
+/* Cryptographically secure random bytes. */
 int rtc_random_bytes(uint8_t *buf, size_t len);
-/* Generate a random alphanumeric string (null-terminated, len includes nul) */
+/* Random alphanumeric string; len includes the NUL terminator. */
 int rtc_random_string(char *buf, size_t len);
-/* Current monotonic time in milliseconds */
+/* Monotonic time in milliseconds. */
 uint64_t rtc_time_ms(void);
-/* Current monotonic time in microseconds */
+/* Monotonic time in microseconds. */
 uint64_t rtc_time_us(void);
 
-/* ---------- Threading ---------- */
 #ifdef _WIN32
 typedef HANDLE rtc_thread_t;
 typedef CRITICAL_SECTION rtc_mutex_t;
@@ -106,7 +96,6 @@ void rtc_cond_signal(rtc_cond_t *c);
 /* Wait with timeout in milliseconds. Returns RTC_OK or RTC_ERR_TIMEOUT. */
 int rtc_cond_wait_timeout(rtc_cond_t *c, rtc_mutex_t *m, uint32_t timeout_ms);
 
-/* ---------- Logging ---------- */
 typedef enum {
     RTC_LOG_ERROR = 0,
     RTC_LOG_WARN = 1,

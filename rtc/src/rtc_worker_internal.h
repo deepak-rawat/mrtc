@@ -1,5 +1,5 @@
 /*
- * rtc_worker_internal.h - Internal worker runtime hooks.
+ * Internal worker runtime hooks.
  */
 #ifndef RTC_WORKER_INTERNAL_H
 #define RTC_WORKER_INTERNAL_H

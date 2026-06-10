@@ -1,5 +1,5 @@
 /*
- * video_stats.c — Per-stream video statistics and PSNR.
+ * Per-stream video statistics and PSNR.
  */
 #include "media/video_stats.h"
 #include "media/video_codec.h"

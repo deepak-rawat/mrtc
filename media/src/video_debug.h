@@ -1,5 +1,5 @@
 /*
- * video_debug.h — Opt-in frame integrity check.
+ * Opt-in frame integrity check.
  *
  * FNV-1a checksum over Y plane. Useful for detecting stale/duplicate
  * decoder output (the "traces" artifact).

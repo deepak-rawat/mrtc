@@ -1,5 +1,5 @@
 /*
- * test_vp8.c - VP8 RTP packetization/depacketization tests.
+ * VP8 RTP packetization/depacketization tests.
  *
  * Tests:
  *   1. Packetize a small frame (single payload)

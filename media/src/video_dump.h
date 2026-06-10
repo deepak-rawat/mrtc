@@ -1,5 +1,5 @@
 /*
- * video_dump.h — IVF bitstream dump for VP8/VP9.
+ * IVF bitstream dump for VP8/VP9.
  *
  * Controlled by media_debug_config_t.send_dump_path / recv_dump_path.
  * Both NULL by default → zero overhead. Set path to enable.

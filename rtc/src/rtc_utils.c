@@ -1,5 +1,5 @@
 /*
- * rtc_utils.c - Library init/cleanup.
+ * Library init/cleanup.
  * All other utilities (logging, threading, sockets, etc.) are in common/.
  */
 #include "rtc/rtc.h"

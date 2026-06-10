@@ -1,5 +1,5 @@
 /*
- * test_packet_io.c - Transport layer tests.
+ * Transport layer tests.
  *
  * Tests:
  *   1. Init/close lifecycle: socket created, thread runs, close joins

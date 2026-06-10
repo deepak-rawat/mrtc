@@ -1,5 +1,5 @@
 /*
- * signaling_server.c - WebSocket signaling server using libwebsockets.
+ * WebSocket signaling server using libwebsockets.
  *
  * Usage: signaling_server [port]   (default: 8080)
  */

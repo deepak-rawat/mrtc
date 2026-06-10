@@ -43,8 +43,6 @@ typedef void (*rtc_on_dc_close_fn)(void *user);
 typedef void (*rtc_on_dc_message_fn)(const uint8_t *data, size_t len, void *user);
 typedef void (*rtc_on_dc_buffered_amount_low_fn)(void *user);
 
-/* ---- API ---- */
-
 /* Send binary data over the channel */
 int rtc_data_channel_send(rtc_data_channel_t *dc, const uint8_t *data, size_t len);
 

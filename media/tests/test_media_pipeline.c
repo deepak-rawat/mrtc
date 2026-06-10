@@ -1,5 +1,5 @@
 /*
- * test_media_pipeline.c - Media pipeline integration tests.
+ * Media pipeline integration tests.
  *
  * Tests single-stream and multi-stream send/recv paths.
  */

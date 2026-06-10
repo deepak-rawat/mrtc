@@ -1,5 +1,5 @@
 /*
- * rtc_transport_internal.h - Internal logical transport constructors.
+ * Internal logical transport constructors.
  */
 #ifndef RTC_TRANSPORT_INTERNAL_H
 #define RTC_TRANSPORT_INTERNAL_H

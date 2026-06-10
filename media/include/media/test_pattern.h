@@ -1,5 +1,5 @@
 /*
- * test_pattern.h - Animated video test pattern generator.
+ * Animated video test pattern generator.
  *
  * Generates a bouncing colored box on a dark background with a frame counter.
  * Each instance gets a random color so different peers are visually distinct.

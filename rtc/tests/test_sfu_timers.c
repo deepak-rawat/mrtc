@@ -1,5 +1,5 @@
 /*
- * test_sfu_timers.c - SFU runtime timer integration tests.
+ * SFU runtime timer integration tests.
  */
 #include <rtc/rtc.h>
 #include <rtc/rtc_worker.h>

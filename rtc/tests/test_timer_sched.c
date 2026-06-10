@@ -1,5 +1,5 @@
 /*
- * test_timer_sched.c - Dynamic timer scheduler tests.
+ * Dynamic timer scheduler tests.
  */
 #include "rtc_timer_sched.h"
 #include "test_harness.h"

@@ -1,5 +1,5 @@
 /*
- * conference.c — Conference library implementation.
+ * Conference library implementation.
  *
  * Manages peer connections, media encode/decode, signaling wiring, data channels.
  * Internally uses rtc (peer connection), media (codecs + pipeline), and signaling.
@@ -26,7 +26,7 @@
 #define CONF_MAX_SOURCES 4
 #define CONF_LABEL_SIZE  64
 
-/* ---- Per-source metadata (encoding handled by media_pipeline) ---- */
+/* Per-source metadata; encoding is handled by media_pipeline. */
 typedef struct {
     char label[CONF_LABEL_SIZE];
     bool is_video;
@@ -35,7 +35,6 @@ typedef struct {
     media_send_stream_t *stream; /* pipeline handle */
 } conf_source_t;
 
-/* ---- Per-peer state ---- */
 typedef struct {
     char peer_id[CONF_LABEL_SIZE];
     rtc_peer_connection_t *pc;
@@ -49,7 +48,6 @@ typedef struct {
     conference_t *conf; /* back-pointer for callbacks */
 } conf_peer_t;
 
-/* ---- Conference state ---- */
 struct conference {
     conference_config_t cfg;
     signaling_client_t *signaling;
@@ -65,8 +63,6 @@ struct conference {
 
     media_pipeline_t *pipeline; /* shared: encode+fanout (send) + decode (recv) */
 };
-
-/* ---- Helpers ---- */
 
 static conf_source_t *find_source(conference_t *c, const char *label) {
     return (conf_source_t *)rtc_str_map_get(&c->source_index, label);
@@ -113,8 +109,6 @@ static void destroy_peer(conference_t *c, conf_peer_t *p) {
     p->active = false;
 }
 
-/* ---- Renderer for recv pipeline → app callbacks ---- */
-
 static void pipeline_on_video(const char *peer_id, const char *label, const video_frame_t *frame,
                               void *user) {
     conference_t *c = (conference_t *)user;
@@ -128,8 +122,6 @@ static void pipeline_on_audio(const char *peer_id, const char *label, const audi
     if (c->cfg.callbacks.on_remote_audio)
         c->cfg.callbacks.on_remote_audio(peer_id, label, audio, c->cfg.user_data);
 }
-
-/* ---- Peer connection callbacks ---- */
 
 static void on_conn_state(rtc_connection_state_t state, void *user) {
     conf_peer_t *p = (conf_peer_t *)user;
@@ -217,8 +209,6 @@ static void on_dc_channel(rtc_data_channel_t *channel, void *user) {
         p->dc_open = true;
 }
 
-/* ---- Create peer connection ---- */
-
 static rtc_peer_connection_t *create_pc(conference_t *c, conf_peer_t *cp) {
     rtc_config_t config;
     memset(&config, 0, sizeof(config));
@@ -256,8 +246,6 @@ static rtc_peer_connection_t *create_pc(conference_t *c, conf_peer_t *cp) {
     cp->pc = pc;
     return pc;
 }
-
-/* ---- Signaling: offer/answer ---- */
 
 static int offer_to_peer(conference_t *c, conf_peer_t *cp) {
     rtc_peer_connection_t *pc = create_pc(c, cp);
@@ -345,8 +333,6 @@ static int handle_answer(conference_t *c, const char *from, const char *sdp) {
     return rtc_peer_connection_set_remote_desc(cp->pc, &answer_desc);
 }
 
-/* ---- Signaling callbacks ---- */
-
 static void sig_on_joined(const char *my_id, const char **peer_ids, int n, void *user) {
     conference_t *c = (conference_t *)user;
     snprintf(c->my_id, sizeof(c->my_id), "%s", my_id);
@@ -397,8 +383,6 @@ static void sig_on_error(const char *msg, void *user) {
     if (c->cfg.callbacks.on_error)
         c->cfg.callbacks.on_error(msg, c->cfg.user_data);
 }
-
-/* ---- Public API ---- */
 
 conference_t *conference_create(const conference_config_t *cfg) {
     conference_t *c = (conference_t *)calloc(1, sizeof(*c));

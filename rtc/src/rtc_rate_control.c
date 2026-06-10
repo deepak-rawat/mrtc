@@ -1,5 +1,5 @@
 /*
- * rtc_rate_control.c - AIMD (Additive Increase Multiplicative Decrease) bitrate adaptation.
+ * AIMD (Additive Increase Multiplicative Decrease) bitrate adaptation.
  *
  * loss < 2%  → increase 5%
  * loss > 5%  → decrease 20%

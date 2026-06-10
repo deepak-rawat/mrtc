@@ -1,5 +1,5 @@
 /*
- * rtc_sdp.c - SDP (RFC 4566) generation and parsing for WebRTC.
+ * SDP (RFC 4566) generation and parsing for WebRTC.
  *
  * Supports multiple m= lines: audio, video, and application (data channel).
  */

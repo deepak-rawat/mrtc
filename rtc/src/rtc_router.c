@@ -1,5 +1,5 @@
 /*
- * rtc_router.c - SFU media routing graph skeleton.
+ * SFU media routing graph skeleton.
  */
 #include "rtc/rtc_router.h"
 

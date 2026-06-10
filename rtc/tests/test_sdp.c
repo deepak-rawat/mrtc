@@ -1,5 +1,5 @@
 /*
- * test_sdp.c - SDP component tests.
+ * SDP component tests.
  *
  * Tests:
  *   1. Generate an audio offer SDP and verify structure

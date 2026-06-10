@@ -1,5 +1,5 @@
 /*
- * test_video_codec.c - VP8 encode/decode round-trip tests.
+ * VP8 encode/decode round-trip tests.
  */
 #include "test_harness.h"
 #include "media/video_codec.h"

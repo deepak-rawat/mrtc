@@ -1,5 +1,5 @@
 /*
- * rtc_listener.c - Shared RTC listener foundation.
+ * Shared RTC listener foundation.
  */
 #include "rtc/rtc_listener.h"
 

@@ -1,5 +1,5 @@
 /*
- * ui_sdl3.c - SDL3 native UI implementation.
+ * SDL3 native UI implementation.
  */
 #include "ui_sdl3.h"
 #include <stdio.h>
@@ -148,8 +148,6 @@ void ui_sdl3_update_preview(ui_sdl3_t *ui, const video_frame_t *frame) {
     }
 }
 
-/* ---- Tile management ---- */
-
 /* Build composite key "peer_id:label" into out (size must be >= 64+1+32+1). */
 static void ui_tile_key(char *out, size_t out_sz, const char *peer_id, const char *label) {
     snprintf(out, out_sz, "%s:%s", peer_id, label);
@@ -178,8 +176,6 @@ static ui_tile_t *find_or_create_tile(ui_sdl3_t *ui, const char *peer_id, const 
     rtc_str_map_set(&ui->tile_index, key, t);
     return t;
 }
-
-/* ---- Renderer callbacks ---- */
 
 void ui_sdl3_on_video_frame(const char *peer_id, const char *label, const video_frame_t *frame,
                             void *user) {
@@ -251,8 +247,6 @@ void ui_sdl3_on_audio_samples(const char *peer_id, const char *label, const audi
         SDL_PutAudioStreamData(ui->speaker_stream, audio->samples,
                                audio->sample_count * audio->channels * (int)sizeof(int16_t));
 }
-
-/* ---- Rendering ---- */
 
 void ui_sdl3_render(ui_sdl3_t *ui) {
     SDL_SetRenderDrawColor(ui->renderer, 30, 30, 30, 255);

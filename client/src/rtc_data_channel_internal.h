@@ -1,5 +1,5 @@
 /*
- * rtc_data_channel_internal.h - Internal data channel manager interface.
+ * Internal data channel manager interface.
  * NOT part of the public API.
  *
  * The data channel manager is embedded inside rtc_peer_connection and

@@ -1,5 +1,5 @@
 /*
- * rtc_str_map.h - Open-addressing hash map from string key to void* value.
+ * Open-addressing hash map from string key to void* value.
  *
  * Used for peer_id, meeting name, and label-based lookups across mrtc.
  * O(1) amortized, linear probing on power-of-2 sized table, FNV-1a hashing.

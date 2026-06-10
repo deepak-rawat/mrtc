@@ -1,5 +1,5 @@
 /*
- * vp8_packetizer.c - VP8 RTP packetization/depacketization (RFC 7741).
+ * VP8 RTP packetization/depacketization (RFC 7741).
  */
 #include "vp8_packetizer.h"
 

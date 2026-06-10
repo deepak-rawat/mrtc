@@ -1,5 +1,5 @@
 /*
- * rtc_rate_control.h - AIMD bitrate adaptation from RTCP feedback.
+ * AIMD bitrate adaptation from RTCP feedback.
  */
 #ifndef RTC_RATE_CONTROL_H
 #define RTC_RATE_CONTROL_H

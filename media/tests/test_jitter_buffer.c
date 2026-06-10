@@ -1,5 +1,5 @@
 /*
- * test_jitter_buffer.c - Jitter buffer reordering and timing tests.
+ * Jitter buffer reordering and timing tests.
  */
 #include "test_harness.h"
 #include "jitter_buffer.h"

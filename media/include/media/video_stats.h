@@ -1,5 +1,5 @@
 /*
- * video_stats.h — Per-stream video statistics (W3C WebRTC Stats aligned).
+ * Per-stream video statistics (W3C WebRTC Stats aligned).
  *
  * Pure cumulative counters. App polls via get_stats(), diffs two reads,
  * computes rates. No snapshot/log functions — app decides presentation.

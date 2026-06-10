@@ -1,5 +1,5 @@
 /*
- * rtc_turn.c - TURN client implementation.
+ * TURN client implementation.
  *
  * Handles Allocate (with 401 challenge retry), CreatePermission,
  * ChannelBind, and ChannelData send. Uses blocking sendto/recvfrom

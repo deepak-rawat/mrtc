@@ -1,5 +1,5 @@
 /*
- * rtc_str_map.c - Open-addressing hash map keyed by C strings.
+ * Open-addressing hash map keyed by C strings.
  *
  * Implementation notes:
  *   - FNV-1a 32-bit hash of NUL-terminated key.

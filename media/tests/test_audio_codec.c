@@ -1,5 +1,5 @@
 /*
- * test_audio_codec.c - Opus encode/decode round-trip tests.
+ * Opus encode/decode round-trip tests.
  */
 #include "test_harness.h"
 #include "media/audio_codec.h"

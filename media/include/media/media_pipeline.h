@@ -1,5 +1,5 @@
 /*
- * media_pipeline.h - Multi-stream media pipeline.
+ * Multi-stream media pipeline.
  *
  * Supports multiple send streams (camera, screen share) and multiple
  * recv streams (one per remote peer per track), each with its own
@@ -22,7 +22,7 @@
 #define MP_MAX_RECV_STREAMS 16
 #define MP_LABEL_SIZE       64
 
-/* ---- Renderer interface (application provides) ---- */
+/* Renderer interface (application provides). */
 typedef struct {
     void (*on_video_frame)(const char *peer_id, const char *label, const video_frame_t *frame,
                            void *user);
@@ -33,7 +33,7 @@ typedef struct {
 
 #define MP_MAX_SEND_PEERS 8
 
-/* ---- Pipeline config (initial defaults) ---- */
+/* Pipeline config (initial defaults). */
 typedef struct {
     const char *default_video_codec; /* "VP8" */
     const char *default_audio_codec; /* "opus" */
@@ -52,7 +52,7 @@ typedef struct media_recv_stream media_recv_stream_t;
 media_pipeline_t *media_pipeline_create(const media_pipeline_config_t *cfg);
 void media_pipeline_destroy(media_pipeline_t *p);
 
-/* ---- Send peers (fan-out: encode once → send to N peers) ---- */
+/* Send peers — fan-out: encode once → send to N peers. */
 
 /*
  * Register a send peer. When push_video/push_audio is called, the pipeline
@@ -63,7 +63,7 @@ int media_pipeline_add_send_peer(media_pipeline_t *p, const char *peer_id,
                                  rtc_rtp_sender_t *video_sender, rtc_rtp_sender_t *audio_sender);
 void media_pipeline_remove_send_peer(media_pipeline_t *p, const char *peer_id);
 
-/* ---- Send streams (local tracks) ---- */
+/* Send streams (local tracks). */
 
 /*
  * Add a local send stream. Returns an opaque handle, or NULL on error.
@@ -87,7 +87,7 @@ int media_pipeline_push_video(media_pipeline_t *p, media_send_stream_t *stream,
 int media_pipeline_push_audio(media_pipeline_t *p, media_send_stream_t *stream,
                               const audio_frame_t *audio);
 
-/* ---- Recv streams (remote tracks) ---- */
+/* Recv streams (remote tracks). */
 
 /*
  * Register a remote recv stream. Returns an opaque handle, or NULL on error.
@@ -115,7 +115,7 @@ void media_pipeline_remove_peer(media_pipeline_t *p, const char *peer_id);
 int media_pipeline_recv_rtp(media_pipeline_t *p, media_recv_stream_t *stream, const uint8_t *data,
                             int len, uint16_t seq, uint32_t timestamp, bool marker);
 
-/* ---- Debug configuration (all features off by default) ---- */
+/* Debug configuration (all features off by default). */
 
 typedef struct {
     const char *send_dump_path;            /* IVF dump path, NULL = disabled */
@@ -128,7 +128,7 @@ typedef struct {
 /* Configure all debug features at once. Pass NULL to disable everything. */
 int media_pipeline_set_debug(media_pipeline_t *p, const media_debug_config_t *cfg);
 
-/* ---- Stats access (app polls these, computes rates by diffing) ---- */
+/* Stats access — app polls these, computes rates by diffing. */
 
 const video_send_stats_t *media_pipeline_get_send_stats(media_pipeline_t *p, int index);
 const video_recv_stats_t *media_pipeline_get_recv_stats(media_pipeline_t *p, int index);

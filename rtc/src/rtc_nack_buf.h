@@ -1,5 +1,5 @@
 /*
- * rtc_nack_buf.h - Circular buffer for NACK retransmission.
+ * Circular buffer for NACK retransmission.
  *
  * Stores the last N sent RTP packets (post-SRTP) indexed by sequence number.
  * On NACK receipt, packets can be looked up and retransmitted without

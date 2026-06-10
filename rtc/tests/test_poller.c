@@ -1,5 +1,5 @@
 /*
- * test_poller.c - rtc_poller tests.
+ * rtc_poller tests.
  *
  * Covers:
  *   1. Init/close lifecycle

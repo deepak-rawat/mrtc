@@ -1,5 +1,5 @@
 /*
- * test_peer.c - Peer connection lifecycle tests (new WebRTC-style API).
+ * Peer connection lifecycle tests (new WebRTC-style API).
  *
  * Tests:
  *   1. Create / close / destroy lifecycle
@@ -26,9 +26,6 @@
 #  define SLEEP_MS(ms) usleep((ms) * 1000)
 #endif
 
-/* ------------------------------------------------------------------ */
-/*  Test: create / close / destroy                                     */
-/* ------------------------------------------------------------------ */
 TEST(peer_create_destroy) {
     rtc_config_t config;
     memset(&config, 0, sizeof(config));
@@ -45,9 +42,6 @@ TEST(peer_create_destroy) {
     printf("    create -> close -> destroy OK\n");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: add_track creates sender with correct codec                  */
-/* ------------------------------------------------------------------ */
 TEST(peer_add_track) {
     rtc_config_t config;
     memset(&config, 0, sizeof(config));
@@ -79,9 +73,6 @@ TEST(peer_add_track) {
     rtc_peer_connection_destroy(pc);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: create_offer generates SDP                                   */
-/* ------------------------------------------------------------------ */
 TEST(peer_create_offer) {
     rtc_config_t config;
     memset(&config, 0, sizeof(config));
@@ -114,9 +105,6 @@ TEST(peer_create_offer) {
     rtc_peer_connection_destroy(pc);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: set_local_desc transitions signaling state                   */
-/* ------------------------------------------------------------------ */
 TEST(peer_signaling_states) {
     rtc_config_t config;
     memset(&config, 0, sizeof(config));
@@ -147,9 +135,6 @@ TEST(peer_signaling_states) {
     rtc_peer_connection_destroy(pc);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: on_ice_candidate fires for gathered candidates               */
-/* ------------------------------------------------------------------ */
 static int g_ice_cand_count;
 static bool g_ice_complete;
 
@@ -195,9 +180,6 @@ TEST(peer_ice_candidates) {
     rtc_peer_connection_destroy(pc);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: add_ice_candidate parses trickled candidates                 */
-/* ------------------------------------------------------------------ */
 TEST(peer_add_ice_candidate) {
     rtc_config_t config;
     memset(&config, 0, sizeof(config));
@@ -257,9 +239,6 @@ static bool sdp_get_first_candidate_port(const char *sdp, uint16_t *out_port) {
     return true;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: peer connections share the client runtime UDP listener       */
-/* ------------------------------------------------------------------ */
 TEST(peer_shared_runtime_listener) {
     rtc_config_t config;
     memset(&config, 0, sizeof(config));
@@ -407,9 +386,6 @@ static bool wait_for_runtime_connected(rtc_transport_t *transport, int timeout_m
     return false;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: peer auto-connects to a separate runtime transport           */
-/* ------------------------------------------------------------------ */
 static _Atomic rtc_connection_state_t g_alice_state;
 
 static void alice_on_conn(rtc_connection_state_t state, void *user) {
@@ -476,9 +452,6 @@ TEST(peer_connects_to_runtime_transport) {
     close_remote_env(&remote);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: get_stats produces a valid snapshot                          */
-/* ------------------------------------------------------------------ */
 TEST(peer_get_stats) {
     rtc_config_t config;
     memset(&config, 0, sizeof(config));
@@ -516,9 +489,6 @@ TEST(peer_get_stats) {
     rtc_peer_connection_destroy(pc);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: add_transceiver honors direction; remove_track flips it      */
-/* ------------------------------------------------------------------ */
 TEST(peer_add_transceiver_remove_track) {
     rtc_config_t config;
     memset(&config, 0, sizeof(config));
@@ -566,9 +536,6 @@ TEST(peer_add_transceiver_remove_track) {
     rtc_peer_connection_destroy(pc);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: sender get/set parameters                                    */
-/* ------------------------------------------------------------------ */
 TEST(peer_sender_parameters) {
     rtc_config_t config;
     memset(&config, 0, sizeof(config));
@@ -619,9 +586,6 @@ TEST(peer_sender_parameters) {
     rtc_peer_connection_destroy(pc);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: identity getters (fingerprint, can_trickle)                  */
-/* ------------------------------------------------------------------ */
 TEST(peer_identity_getters) {
     rtc_config_t config;
     memset(&config, 0, sizeof(config));
@@ -672,9 +636,6 @@ TEST(peer_identity_getters) {
     rtc_peer_connection_destroy(pc2);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Test: restart_ice rotates ufrag in the next offer                  */
-/* ------------------------------------------------------------------ */
 TEST(peer_restart_ice) {
     rtc_config_t config;
     memset(&config, 0, sizeof(config));
@@ -716,7 +677,6 @@ TEST(peer_restart_ice) {
     rtc_peer_connection_destroy(pc);
 }
 
-/* ------------------------------------------------------------------ */
 int main(void) {
     printf("========================================\n");
     printf("  Peer Connection Tests (New API)\n");

@@ -1,5 +1,5 @@
 /*
- * test_tone.c - 440Hz sine tone generator.
+ * 440Hz sine tone generator.
  */
 #include "media/test_tone.h"
 #include <stdlib.h>

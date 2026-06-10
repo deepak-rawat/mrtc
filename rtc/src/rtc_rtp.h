@@ -57,7 +57,7 @@ int rtc_rtp_build_with_ext(rtc_rtp_packet_t *pkt, uint8_t pt, uint16_t seq, uint
 /* Parse raw bytes into RTP header + payload pointer */
 int rtc_rtp_parse(rtc_rtp_packet_t *pkt, const uint8_t *data, size_t len);
 
-/* ---------- Simple RTP session (sequence & timestamp tracking) ---------- */
+/* Simple RTP session: sequence & timestamp tracking. */
 typedef struct {
     uint32_t ssrc;
     uint16_t seq;

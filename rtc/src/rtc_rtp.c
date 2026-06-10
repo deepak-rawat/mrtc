@@ -1,5 +1,5 @@
 /*
- * rtc_rtp.c - RTP (RFC 3550) minimal packetization.
+ * RTP (RFC 3550) minimal packetization.
  */
 #include "rtc_rtp.h"
 #include "rtc_rtp_ext.h"

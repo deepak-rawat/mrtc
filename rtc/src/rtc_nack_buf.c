@@ -1,5 +1,5 @@
 /*
- * rtc_nack_buf.c - Circular buffer for NACK retransmission.
+ * Circular buffer for NACK retransmission.
  */
 #include "rtc_nack_buf.h"
 #include <stdlib.h>

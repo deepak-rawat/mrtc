@@ -1,5 +1,5 @@
 /*
- * test_sfu_ice.c - Logical transport ICE tests.
+ * Logical transport ICE tests.
  */
 #include <rtc/rtc.h>
 #include <rtc/rtc_worker.h>

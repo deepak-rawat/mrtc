@@ -1,5 +1,5 @@
 /*
- * rtc_dtls.c - DTLS 1.2 transport using OpenSSL.
+ * DTLS 1.2 transport using OpenSSL.
  *
  * Generates a self-signed ECDSA certificate, performs DTLS handshake
  * over UDP via BIO memory pair, and exports SRTP keying material.

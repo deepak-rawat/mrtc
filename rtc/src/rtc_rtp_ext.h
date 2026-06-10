@@ -45,8 +45,7 @@ int rtc_rtp_ext_parse_body(const uint8_t *ext_data, size_t ext_len, rtc_rtp_ext_
 /* Lookup helper: find entry by id, return pointer (into out[]) or NULL. */
 const rtc_rtp_ext_t *rtc_rtp_ext_find(const rtc_rtp_ext_t *exts, size_t count, uint8_t id);
 
-/* ---------- Canonical WebRTC extension URIs and helpers ---------- */
-
+/* Canonical WebRTC extension URIs. */
 #define RTC_EXT_URI_ABS_SEND_TIME "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time"
 #define RTC_EXT_URI_TRANSPORT_CC \
     "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"

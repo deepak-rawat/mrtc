@@ -1,5 +1,5 @@
 /*
- * signaling_client.h - WebSocket signaling client API.
+ * WebSocket signaling client API.
  *
  * Connects to a signaling server, joins a meeting, and exchanges
  * offer/answer/candidate messages with peers.

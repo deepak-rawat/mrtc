@@ -1,5 +1,5 @@
 /*
- * rtc_turn.h - TURN client (RFC 5766) for relay candidate gathering.
+ * TURN client (RFC 5766) for relay candidate gathering.
  *
  * Manages a TURN allocation on a server: allocate, create permissions,
  * bind channels, and send/receive data via ChannelData framing.

@@ -1,5 +1,5 @@
 /*
- * codec_vp8.c - VP8 codec backend using libvpx.
+ * VP8 codec backend using libvpx.
  */
 #include "media/video_codec.h"
 #include <vpx/vpx_encoder.h>
@@ -9,7 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ---- Encoder ---- */
 typedef struct {
     vpx_codec_ctx_t codec;
     vpx_image_t img;
@@ -150,7 +149,6 @@ static const video_encoder_ops_t vp8_encoder_ops = {
     .close = vp8_enc_close,
 };
 
-/* ---- Decoder ---- */
 typedef struct {
     vpx_codec_ctx_t codec;
 } vp8_decoder_ctx_t;
@@ -197,7 +195,7 @@ static const video_decoder_ops_t vp8_decoder_ops = {
     .close = vp8_dec_close,
 };
 
-/* ---- Registration (called from video_codec.c factory) ---- */
+/* Registration entry points, called from the video_codec.c factory. */
 const video_encoder_ops_t *vp8_get_encoder_ops(void) {
     return &vp8_encoder_ops;
 }

@@ -1,5 +1,5 @@
 /*
- * video_dump.c — IVF bitstream dump for VP8/VP9.
+ * IVF bitstream dump for VP8/VP9.
  */
 #include "video_dump.h"
 #include <rtc/rtc_common.h>

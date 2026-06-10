@@ -1,12 +1,11 @@
 /*
- * codec_opus.c - Opus audio codec backend using libopus.
+ * Opus audio codec backend using libopus.
  */
 #include "media/audio_codec.h"
 #include <opus/opus.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ---- Encoder ---- */
 typedef struct {
     OpusEncoder *enc;
     int sample_rate;
@@ -59,7 +58,6 @@ static const audio_encoder_ops_t opus_encoder_ops = {
     .close = opus_enc_close,
 };
 
-/* ---- Decoder ---- */
 typedef struct {
     OpusDecoder *dec;
     int sample_rate;
@@ -114,7 +112,6 @@ static const audio_decoder_ops_t opus_decoder_ops = {
     .close = opus_dec_close,
 };
 
-/* ---- Registration ---- */
 const audio_encoder_ops_t *opus_get_encoder_ops(void) {
     return &opus_encoder_ops;
 }

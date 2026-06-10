@@ -1,5 +1,5 @@
 /*
- * rtc_u32_map.c - Open-addressing hash map from uint32_t to void*.
+ * Open-addressing hash map from uint32_t to void*.
  *
  * Implementation notes:
  *   - Linear probing on a power-of-2 sized table.
@@ -35,7 +35,6 @@ static rtc_err_t u32_rehash(rtc_u32_map_t *m, size_t new_cap) {
 
     size_t mask = new_cap - 1;
 
-    /* Re-insert all used entries into the new table */
     if (m->entries) {
         for (size_t i = 0; i < m->cap; i++) {
             rtc_u32_map_entry_t *src = &m->entries[i];

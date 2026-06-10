@@ -1,5 +1,5 @@
 /*
- * rtc_listener_internal.h - Internal listener demux registration hooks.
+ * Internal listener demux registration hooks.
  */
 #ifndef RTC_LISTENER_INTERNAL_H
 #define RTC_LISTENER_INTERNAL_H

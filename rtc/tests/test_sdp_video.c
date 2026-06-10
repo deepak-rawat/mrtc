@@ -1,5 +1,5 @@
 /*
- * test_sdp_video.c - SDP tests for video and multi-media support.
+ * SDP tests for video and multi-media support.
  *
  * Tests:
  *   1. Generate a video SDP and verify structure

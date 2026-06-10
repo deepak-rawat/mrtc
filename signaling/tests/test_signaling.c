@@ -1,5 +1,5 @@
 /*
- * test_signaling.c - Tests for meeting management logic (no network).
+ * Tests for meeting management logic (no network).
  */
 #include "test_harness.h"
 #include "meeting.h"

@@ -1,5 +1,5 @@
 /*
- * video_debug.c — Frame integrity checksum.
+ * Frame integrity checksum.
  */
 #include "video_debug.h"
 

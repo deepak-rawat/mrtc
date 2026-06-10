@@ -1,5 +1,5 @@
 /*
- * test_listener.c - RTC listener lifecycle tests.
+ * RTC listener lifecycle tests.
  */
 #include <rtc/rtc.h>
 #include <rtc/rtc_listener.h>

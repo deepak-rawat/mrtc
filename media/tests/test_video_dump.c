@@ -1,5 +1,5 @@
 /*
- * test_video_dump.c — IVF dump tests.
+ * IVF dump tests.
  */
 #include "test_harness.h"
 #include "video_dump.h"

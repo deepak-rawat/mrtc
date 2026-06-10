@@ -1,5 +1,5 @@
 /*
- * test_tone.h - Audio sine tone generator for testing.
+ * Audio sine tone generator for testing.
  */
 #ifndef MEDIA_TEST_TONE_H
 #define MEDIA_TEST_TONE_H
