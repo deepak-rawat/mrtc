@@ -1,16 +1,16 @@
 /*
- * Client RTP sender end-to-end over a real
- * runtime transport (worker/listener/router/transport + DTLS/SRTP). The
- * runtime is set up as fixture; the subject under test is the client
- * sender's RTP path.
+ * Client RTP sender over a public runtime transport.
  */
 #include <rtc/rtc_client.h>
+#include <rtc/rtc_listener.h>
+#include <rtc/rtc_router.h>
+#include <rtc/rtc_sdp.h>
+#include <rtc/rtc_transport.h>
+#include <rtc/rtc_worker.h>
 
-#include "rtc_peer_internal.h"
-#include "rtc_dtls.h"
-#include "rtc_srtp.h"
-#include "rtc_stun.h"
 #include "test_harness.h"
+
+#include <stdatomic.h>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -20,190 +20,203 @@
 #  define SLEEP_MS(ms) usleep((unsigned)((ms) * 1000))
 #endif
 
-static int listener_loopback_addr(rtc_listener_t *listener, rtc_addr_t *out) {
-    rtc_addr_t local;
-    int rc = rtc_listener_get_local_addr(listener, &local);
-    if (rc != RTC_OK)
-        return rc;
-    uint16_t port = ntohs(((struct sockaddr_in *)&local.addr)->sin_port);
-    return rtc_addr_from_string(out, "127.0.0.1", port);
-}
-
-static rtc_socket_t make_bound_sender(void) {
-    rtc_socket_t sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sender == RTC_INVALID_SOCKET)
-        return RTC_INVALID_SOCKET;
-    struct sockaddr_in bind_addr;
-    memset(&bind_addr, 0, sizeof(bind_addr));
-    bind_addr.sin_family = AF_INET;
-    bind_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    bind_addr.sin_port = 0;
-    if (bind(sender, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
-        rtc_close_socket(sender);
-        return RTC_INVALID_SOCKET;
-    }
-    if (rtc_set_nonblocking(sender) != RTC_OK) {
-        rtc_close_socket(sender);
-        return RTC_INVALID_SOCKET;
-    }
-    return sender;
-}
-
-static int send_udp_from(rtc_listener_t *listener, const uint8_t *data, size_t len,
-                         rtc_socket_t sender) {
-    rtc_addr_t dest;
-    int rc = listener_loopback_addr(listener, &dest);
-    if (rc != RTC_OK)
-        return rc;
-    int sent = sendto(sender, (const char *)data, (int)len, 0, (const struct sockaddr *)&dest.addr,
-                      dest.len);
-    return sent == (int)len ? RTC_OK : RTC_ERR_SOCKET;
-}
-
-static bool recv_udp_packet(rtc_socket_t sender, uint8_t *buf, size_t buf_len, size_t *out_len,
-                            int timeout_ms) {
-    uint64_t deadline = rtc_time_ms() + (uint64_t)timeout_ms;
-    while (rtc_time_ms() < deadline) {
-        int n = recv(sender, (char *)buf, (int)buf_len, 0);
-        if (n > 0) {
-            *out_len = (size_t)n;
-            return true;
-        }
-        SLEEP_MS(10);
-    }
-    return false;
-}
-
 typedef struct {
+    rtc_worker_t *worker;
     rtc_listener_t *listener;
-    rtc_socket_t sender;
-} dtls_client_send_ctx_t;
+    rtc_router_t *router;
+    rtc_transport_t *transport;
+} remote_env_t;
 
-static int dtls_client_send(const uint8_t *data, size_t len, void *user) {
-    dtls_client_send_ctx_t *ctx = (dtls_client_send_ctx_t *)user;
-    return send_udp_from(ctx->listener, data, len, ctx->sender);
+static _Atomic rtc_connection_state_t g_peer_state;
+static rtc_mutex_t g_rtp_lock;
+static rtc_cond_t g_rtp_cond;
+static int g_rtp_count;
+static uint8_t g_rtp_payload[128];
+static size_t g_rtp_payload_len;
+static uint8_t g_rtp_payload_type;
+
+static void on_peer_state(rtc_connection_state_t state, void *user) {
+    (void)user;
+    g_peer_state = state;
 }
 
-static bool wait_for_transport_packets(rtc_transport_t *transport, uint64_t target,
-                                       int timeout_ms) {
-    uint64_t deadline = rtc_time_ms() + (uint64_t)timeout_ms;
-    while (rtc_time_ms() < deadline) {
-        rtc_transport_stats_t stats;
-        if (rtc_transport_get_stats(transport, &stats) == RTC_OK &&
-            stats.packets_received >= target)
-            return true;
-        SLEEP_MS(10);
+static void on_plain_rtp(const rtc_rtp_packet_t *pkt, void *user) {
+    (void)user;
+    rtc_mutex_lock(&g_rtp_lock);
+    g_rtp_count++;
+    g_rtp_payload_type = pkt->header.payload_type;
+    g_rtp_payload_len = pkt->payload_len;
+    if (g_rtp_payload_len > sizeof(g_rtp_payload))
+        g_rtp_payload_len = sizeof(g_rtp_payload);
+    memcpy(g_rtp_payload, pkt->payload, g_rtp_payload_len);
+    rtc_cond_signal(&g_rtp_cond);
+    rtc_mutex_unlock(&g_rtp_lock);
+}
+
+static bool make_remote_env(remote_env_t *env) {
+    memset(env, 0, sizeof(*env));
+    env->worker = rtc_worker_create(NULL);
+    if (!env->worker)
+        return false;
+    env->listener = rtc_listener_create(env->worker, NULL);
+    if (!env->listener)
+        return false;
+    env->router = rtc_router_create(env->worker, NULL);
+    if (!env->router)
+        return false;
+    env->transport = rtc_router_create_transport(env->router, &(rtc_transport_config_t){
+                                                                  .listener = env->listener,
+                                                                  .ice_mode = RTC_ICE_MODE_LITE,
+                                                              });
+    return env->transport != NULL;
+}
+
+static void close_remote_env(remote_env_t *env) {
+    rtc_transport_destroy(env->transport);
+    rtc_router_destroy(env->router);
+    rtc_listener_destroy(env->listener);
+    rtc_worker_destroy(env->worker);
+}
+
+static bool add_loopback_candidate(rtc_sdp_t *sdp, rtc_listener_t *listener) {
+    rtc_addr_t local;
+    if (rtc_listener_get_local_addr(listener, &local) != RTC_OK)
+        return false;
+    uint16_t port = ntohs(((struct sockaddr_in *)&local.addr)->sin_port);
+
+    rtc_ice_candidate_t candidate;
+    memset(&candidate, 0, sizeof(candidate));
+    candidate.type = ICE_CANDIDATE_HOST;
+    candidate.component = 1;
+    candidate.priority = 2130706431u;
+    memcpy(candidate.foundation, "H0", sizeof("H0"));
+    if (rtc_addr_from_string(&candidate.addr, "127.0.0.1", port) != RTC_OK)
+        return false;
+    return rtc_sdp_add_candidate(sdp, &candidate) == RTC_OK;
+}
+
+static bool build_runtime_answer(remote_env_t *remote, const rtc_desc_t *offer,
+                                 rtc_desc_t *answer) {
+    rtc_sdp_t parsed_offer;
+    memset(&parsed_offer, 0, sizeof(parsed_offer));
+    if (rtc_sdp_parse(&parsed_offer, offer->sdp, offer->sdp_len) != RTC_OK)
+        return false;
+
+    rtc_sdp_t sdp;
+    memset(&sdp, 0, sizeof(sdp));
+    sdp.type = RTC_SDP_ANSWER;
+    sdp.setup = RTC_SETUP_PASSIVE;
+    sdp.media_type = parsed_offer.media_type;
+    sdp.payload_type = parsed_offer.payload_type;
+    sdp.clockrate = parsed_offer.clockrate;
+    sdp.channels = parsed_offer.channels;
+    memcpy(sdp.codec_name, parsed_offer.codec_name, sizeof(sdp.codec_name));
+    sdp.media_count = parsed_offer.media_count;
+    if (sdp.media_count > 0)
+        memcpy(sdp.media, parsed_offer.media, sizeof(rtc_sdp_media_t) * (size_t)sdp.media_count);
+
+    rtc_ice_parameters_t ice;
+    rtc_dtls_parameters_t dtls;
+    bool ok = rtc_transport_get_ice_parameters(remote->transport, &ice) == RTC_OK &&
+              rtc_transport_get_dtls_parameters(remote->transport, &dtls) == RTC_OK;
+    if (ok) {
+        memcpy(sdp.ice_ufrag, ice.username_fragment, sizeof(sdp.ice_ufrag));
+        memcpy(sdp.ice_pwd, ice.password, sizeof(sdp.ice_pwd));
+        memcpy(sdp.fingerprint, dtls.fingerprint, sizeof(sdp.fingerprint));
+        ok = add_loopback_candidate(&sdp, remote->listener) && rtc_sdp_generate(&sdp) == RTC_OK;
     }
-    return false;
+
+    if (ok) {
+        memset(answer, 0, sizeof(*answer));
+        answer->type = RTC_SDP_ANSWER;
+        memcpy(answer->sdp, sdp.raw, sdp.raw_len);
+        answer->sdp_len = sdp.raw_len;
+    }
+
+    rtc_sdp_close(&sdp);
+    rtc_sdp_close(&parsed_offer);
+    return ok;
 }
 
-static bool wait_for_dtls_connected(rtc_transport_t *transport, int timeout_ms) {
+static bool wait_for_peer_connected(remote_env_t *remote, int timeout_ms) {
     uint64_t deadline = rtc_time_ms() + (uint64_t)timeout_ms;
     while (rtc_time_ms() < deadline) {
         rtc_transport_stats_t stats;
-        if (rtc_transport_get_stats(transport, &stats) == RTC_OK &&
+        if (g_peer_state == RTC_CONNECTION_CONNECTED &&
+            rtc_transport_get_stats(remote->transport, &stats) == RTC_OK &&
             stats.dtls_state == RTC_TRANSPORT_DTLS_CONNECTED && stats.srtp_ready)
             return true;
+        if (g_peer_state == RTC_CONNECTION_FAILED)
+            return false;
         SLEEP_MS(10);
     }
     return false;
 }
 
-static bool select_transport_tuple(rtc_listener_t *listener, rtc_transport_t *transport,
-                                   rtc_socket_t sender, const char *ufrag) {
-    char username[64];
-    snprintf(username, sizeof(username), "%s:remote", ufrag);
-    rtc_stun_msg_t req;
-    if (rtc_stun_build_binding_request(&req, username, NULL, 1234, true, 99, true) != RTC_OK)
-        return false;
-    if (send_udp_from(listener, req.buf, req.buf_len, sender) != RTC_OK)
-        return false;
-    return wait_for_transport_packets(transport, 1, 1000);
-}
-
-static bool drive_dtls_handshake(rtc_listener_t *listener, rtc_transport_t *transport,
-                                 rtc_socket_t sender, rtc_dtls_transport_t *client) {
-    dtls_client_send_ctx_t send_ctx = {.listener = listener, .sender = sender};
-    if (rtc_dtls_init(client, RTC_DTLS_ROLE_CLIENT, dtls_client_send, &send_ctx) != RTC_OK)
-        return false;
-    if (rtc_dtls_handshake(client) != RTC_OK)
-        return false;
-
-    uint8_t buf[4096];
-    uint64_t deadline = rtc_time_ms() + 3000;
-    while (rtc_time_ms() < deadline && client->state != RTC_DTLS_STATE_CONNECTED) {
-        int n = recv(sender, (char *)buf, sizeof(buf), 0);
-        if (n > 0 && rtc_dtls_recv(client, buf, (size_t)n) != RTC_OK)
+static bool wait_for_rtp(int target, int timeout_ms) {
+    rtc_mutex_lock(&g_rtp_lock);
+    uint64_t deadline = rtc_time_ms() + (uint64_t)timeout_ms;
+    while (g_rtp_count < target) {
+        uint64_t now = rtc_time_ms();
+        if (now >= deadline) {
+            rtc_mutex_unlock(&g_rtp_lock);
             return false;
-        if (wait_for_dtls_connected(transport, 1) && client->state == RTC_DTLS_STATE_CONNECTED)
-            break;
-        SLEEP_MS(10);
+        }
+        rtc_cond_wait_timeout(&g_rtp_cond, &g_rtp_lock, (uint32_t)(deadline - now));
     }
-    return client->state == RTC_DTLS_STATE_CONNECTED && wait_for_dtls_connected(transport, 1000);
+    rtc_mutex_unlock(&g_rtp_lock);
+    return true;
 }
 
 TEST(sender_send_over_logical_transport) {
-    rtc_worker_t *worker = rtc_worker_create(NULL);
-    ASSERT(worker != NULL);
-    rtc_listener_t *listener = rtc_listener_create(worker, NULL);
-    ASSERT(listener != NULL);
-    rtc_router_t *router = rtc_router_create(worker, NULL);
-    ASSERT(router != NULL);
-    rtc_transport_t *transport =
-        rtc_router_create_transport(router, &(rtc_transport_config_t){
-                                                .listener = listener,
-                                                .ice_mode = RTC_ICE_MODE_LITE,
-                                            });
-    ASSERT(transport != NULL);
+    ASSERT_EQ(rtc_mutex_init(&g_rtp_lock), RTC_OK);
+    ASSERT_EQ(rtc_cond_init(&g_rtp_cond), RTC_OK);
+    g_peer_state = RTC_CONNECTION_NEW;
+    g_rtp_count = 0;
+    g_rtp_payload_len = 0;
+    g_rtp_payload_type = 0;
+    memset(g_rtp_payload, 0, sizeof(g_rtp_payload));
 
-    rtc_ice_parameters_t ice;
-    ASSERT_EQ(rtc_transport_get_ice_parameters(transport, &ice), RTC_OK);
-    rtc_socket_t remote = make_bound_sender();
-    ASSERT(remote != RTC_INVALID_SOCKET);
-    ASSERT(select_transport_tuple(listener, transport, remote, ice.username_fragment));
+    rtc_config_t config;
+    memset(&config, 0, sizeof(config));
+    rtc_peer_connection_t *peer = rtc_peer_connection_create(&config);
+    ASSERT(peer != NULL);
 
-    rtc_dtls_transport_t client;
-    ASSERT(drive_dtls_handshake(listener, transport, remote, &client));
-    ASSERT_EQ(rtc_dtls_export_srtp_keys(&client), RTC_OK);
+    remote_env_t remote;
+    ASSERT(make_remote_env(&remote));
+    rtc_transport_on_rtp(remote.transport, on_plain_rtp, NULL);
+    rtc_peer_connection_on_connection_state(peer, on_peer_state, NULL);
 
     rtc_codec_t vp8;
     memset(&vp8, 0, sizeof(vp8));
     vp8.payload_type = 96;
     memcpy(vp8.mime_type, "video/VP8", sizeof("video/VP8"));
     vp8.clock_rate = 90000;
+    rtc_rtp_sender_t *sender = rtc_peer_connection_add_track(peer, RTC_KIND_VIDEO, &vp8);
+    ASSERT(sender != NULL);
 
-    struct rtc_rtp_transceiver transceiver;
-    rtc_rtp_transceiver_init_slot(&transceiver, 0, RTC_KIND_VIDEO, &vp8);
-    rtc_rtp_sender_attach_logical(&transceiver.sender, transport);
+    rtc_desc_t offer;
+    ASSERT_EQ(rtc_peer_connection_create_offer(peer, &offer), RTC_OK);
+    ASSERT_EQ(rtc_peer_connection_set_local_desc(peer, &offer), RTC_OK);
+
+    rtc_desc_t answer;
+    ASSERT(build_runtime_answer(&remote, &offer, &answer));
+    ASSERT_EQ(rtc_peer_connection_set_remote_desc(peer, &answer), RTC_OK);
+    ASSERT(wait_for_peer_connected(&remote, 10000));
 
     const uint8_t payload[] = {0xFE, 0xED, 0xFA, 0xCE};
-    ASSERT_EQ(rtc_rtp_sender_send(&transceiver.sender, payload, sizeof(payload), 3000, true),
-              RTC_OK);
+    ASSERT_EQ(rtc_rtp_sender_send(sender, payload, sizeof(payload), 3000, true), RTC_OK);
+    ASSERT(wait_for_rtp(1, 1000));
 
-    uint8_t buf[1500];
-    size_t len = 0;
-    ASSERT(recv_udp_packet(remote, buf, sizeof(buf), &len, 1000));
+    ASSERT_EQ(g_rtp_payload_type, 96);
+    ASSERT_EQ(g_rtp_payload_len, sizeof(payload));
+    ASSERT_MEM_EQ(g_rtp_payload, payload, sizeof(payload));
 
-    rtc_srtp_ctx_t recv_ctx;
-    ASSERT_EQ(rtc_srtp_init(&recv_ctx, client.srtp_server_key, RTC_SRTP_MASTER_KEY_LEN,
-                            client.srtp_server_salt, RTC_SRTP_MASTER_SALT_LEN),
-              RTC_OK);
-    ASSERT_EQ(rtc_srtp_unprotect(&recv_ctx, buf, &len), RTC_OK);
-
-    rtc_rtp_packet_t parsed;
-    ASSERT_EQ(rtc_rtp_parse(&parsed, buf, len), RTC_OK);
-    ASSERT_EQ(parsed.header.payload_type, 96);
-    ASSERT_EQ(parsed.payload_len, sizeof(payload));
-    ASSERT_MEM_EQ(parsed.payload, payload, sizeof(payload));
-
-    rtc_srtp_close(&recv_ctx);
-    rtc_rtp_transceiver_close_resources(&transceiver);
-    rtc_dtls_close(&client);
-    rtc_close_socket(remote);
-    rtc_transport_destroy(transport);
-    rtc_router_destroy(router);
-    rtc_listener_destroy(listener);
-    rtc_worker_destroy(worker);
+    rtc_peer_connection_close(peer);
+    rtc_peer_connection_destroy(peer);
+    close_remote_env(&remote);
+    rtc_cond_destroy(&g_rtp_cond);
+    rtc_mutex_destroy(&g_rtp_lock);
 }
 
 int main(void) {

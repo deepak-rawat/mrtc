@@ -10,8 +10,6 @@
  * Feature-gated sections: TWCC arrival recording, BWE feedback, rate control.
  */
 #include "rtc_peer_internal.h"
-#include "rtc_srtp.h"
-#include "rtc_transport_internal.h"
 
 #include <string.h>
 
@@ -262,7 +260,7 @@ void peer_twcc_fb_timer(void *user) {
         if (rtc_twcc_receiver_build_feedback(&pc->twcc_receiver, pc->twcc_local_ssrc,
                                              pc->twcc_remote_ssrc, fb, sizeof(fb),
                                              &fb_len) == RTC_OK) {
-            uint8_t buf[RTCP_MAX_PACKET + 4 + SRTP_AUTH_TAG_LEN];
+            uint8_t buf[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
             if (fb_len <= sizeof(buf)) {
                 memcpy(buf, fb, fb_len);
                 size_t out_len = fb_len;

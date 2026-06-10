@@ -14,7 +14,7 @@
 #include <rtc/rtc_router.h>
 #include <rtc/rtc_transport.h>
 #include <rtc/rtc_worker.h>
-#include "rtc_sdp.h"
+#include <rtc/rtc_sdp.h>
 #include "test_harness.h"
 #include <stdatomic.h>
 

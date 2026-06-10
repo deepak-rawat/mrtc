@@ -556,8 +556,7 @@ void rtc_transport_destroy(rtc_transport_t *transport) {
     free(transport);
 }
 
-int rtc_transport_set_dtls_role_internal(rtc_transport_t *transport,
-                                         rtc_transport_dtls_role_t role) {
+int rtc_transport_set_dtls_role(rtc_transport_t *transport, rtc_transport_dtls_role_t role) {
     if (!transport)
         return RTC_ERR_INVALID;
     if (transport->dtls.state != RTC_DTLS_STATE_NEW)
@@ -632,6 +631,10 @@ int rtc_transport_send_raw(rtc_transport_t *transport, const uint8_t *data, size
     if (!transport->selected_remote_valid)
         return RTC_ERR_INVALID;
     return rtc_listener_send_to(transport->listener, data, len, &transport->selected_remote);
+}
+
+int rtc_transport_send_protected_rtp(rtc_transport_t *transport, const uint8_t *data, size_t len) {
+    return rtc_transport_send_raw(transport, data, len);
 }
 
 int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap) {

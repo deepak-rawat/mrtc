@@ -12,26 +12,25 @@
 #include "rtc/rtc_stats.h"
 #include "rtc/rtc_u32_map.h"
 #include "rtc_data_channel_internal.h"
-#include "rtc_rtp.h"
-#include "rtc_rtp_ext.h"
-#include "rtc_rtcp.h"
-#include "rtc_sdp.h"
-#include "rtc_nack_buf.h"
+#include "rtc/rtc_rtp.h"
+#include "rtc/rtc_rtp_ext.h"
+#include "rtc/rtc_rtcp.h"
+#include "rtc/rtc_sdp.h"
+#include "rtc/rtc_nack_buf.h"
 #include "rtc_client_runtime.h"
 #include "rtc/rtc_listener.h"
 #include "rtc/rtc_router.h"
 #include "rtc/rtc_transport.h"
 #include "rtc/rtc_worker.h"
-#include "rtc_worker_internal.h"
 
 #ifdef MRTC_ENABLE_RATE_CONTROL
-#  include "rtc_rate_control.h"
+#  include "rtc/rtc_rate_control.h"
 #endif
 
 #ifdef MRTC_ENABLE_TWCC
-#  include "rtc_twcc_sender.h"
-#  include "rtc_twcc_receiver.h"
-#  include "rtc_bwe.h"
+#  include "rtc/rtc_twcc_sender.h"
+#  include "rtc/rtc_twcc_receiver.h"
+#  include "rtc/rtc_bwe.h"
 #endif
 
 #include <stdatomic.h>

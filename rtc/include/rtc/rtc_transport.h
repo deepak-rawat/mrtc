@@ -5,13 +5,20 @@
 #define RTC_PUBLIC_TRANSPORT_H
 
 #include "rtc_common.h"
+#include "rtc_rtp.h"
 
-#define RTC_ICE_UFRAG_MAX        8
-#define RTC_ICE_PWD_MAX          24
-#define RTC_DTLS_FINGERPRINT_MAX 96
+#define RTC_ICE_UFRAG_MAX                   8
+#define RTC_ICE_PWD_MAX                     24
+#define RTC_DTLS_FINGERPRINT_MAX            96
+#define RTC_TRANSPORT_RTP_PROTECT_OVERHEAD  10
+#define RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD 14
 
 typedef struct rtc_transport rtc_transport_t;
 typedef struct rtc_listener rtc_listener_t;
+
+typedef void (*rtc_transport_rtp_fn)(const rtc_rtp_packet_t *pkt, void *user);
+typedef void (*rtc_transport_rtcp_fn)(const uint8_t *data, size_t len, void *user);
+typedef void (*rtc_transport_data_fn)(const uint8_t *data, size_t len, void *user);
 
 typedef enum {
     RTC_TRANSPORT_CANDIDATE_HOST,
@@ -84,8 +91,16 @@ int rtc_transport_add_remote_candidate(rtc_transport_t *transport,
                                        const rtc_transport_candidate_t *candidate);
 int rtc_transport_start_ice(rtc_transport_t *transport);
 int rtc_transport_start_dtls(rtc_transport_t *transport);
+int rtc_transport_set_dtls_role(rtc_transport_t *transport, rtc_transport_dtls_role_t role);
 int rtc_transport_get_dtls_parameters(rtc_transport_t *transport, rtc_dtls_parameters_t *out);
 int rtc_transport_get_stats(rtc_transport_t *transport, rtc_transport_stats_t *out);
+void rtc_transport_on_rtp(rtc_transport_t *transport, rtc_transport_rtp_fn fn, void *user);
+void rtc_transport_on_rtcp(rtc_transport_t *transport, rtc_transport_rtcp_fn fn, void *user);
+void rtc_transport_on_data(rtc_transport_t *transport, rtc_transport_data_fn fn, void *user);
+int rtc_transport_send_data(rtc_transport_t *transport, const uint8_t *data, size_t len);
+int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap);
+int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap);
+int rtc_transport_send_protected_rtp(rtc_transport_t *transport, const uint8_t *data, size_t len);
 void rtc_transport_close(rtc_transport_t *transport);
 void rtc_transport_destroy(rtc_transport_t *transport);
 

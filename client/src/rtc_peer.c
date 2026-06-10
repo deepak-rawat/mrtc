@@ -5,7 +5,6 @@
  * Packet handling (RTP/RTCP dispatch) lives in rtc_peer_packets.c.
  */
 #include "rtc_peer_internal.h"
-#include "rtc_transport_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -185,14 +184,12 @@ static void peer_runtime_set_remote_desc(rtc_peer_connection_t *pc, const rtc_sd
     }
 
     if (pc->local_sdp.type == RTC_SDP_OFFER && sdp->setup == RTC_SETUP_ACTIVE) {
-        (void)rtc_transport_set_dtls_role_internal(pc->runtime_transport,
-                                                   RTC_TRANSPORT_DTLS_ROLE_SERVER);
+        (void)rtc_transport_set_dtls_role(pc->runtime_transport, RTC_TRANSPORT_DTLS_ROLE_SERVER);
         rtc_dtls_parameters_t dtls;
         if (rtc_transport_get_dtls_parameters(pc->runtime_transport, &dtls) == RTC_OK)
             memcpy(pc->runtime_fingerprint, dtls.fingerprint, sizeof(pc->runtime_fingerprint));
     } else if (pc->local_sdp.type == RTC_SDP_ANSWER || sdp->setup == RTC_SETUP_ACTPASS) {
-        (void)rtc_transport_set_dtls_role_internal(pc->runtime_transport,
-                                                   RTC_TRANSPORT_DTLS_ROLE_CLIENT);
+        (void)rtc_transport_set_dtls_role(pc->runtime_transport, RTC_TRANSPORT_DTLS_ROLE_CLIENT);
         rtc_dtls_parameters_t dtls;
         if (rtc_transport_get_dtls_parameters(pc->runtime_transport, &dtls) == RTC_OK)
             memcpy(pc->runtime_fingerprint, dtls.fingerprint, sizeof(pc->runtime_fingerprint));

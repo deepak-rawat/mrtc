@@ -12,8 +12,6 @@ target_include_directories(mrtc_client
     PRIVATE
         src
         include/rtc
-        ${PROJECT_SOURCE_DIR}/rtc/src      # client internals depend on runtime privates
-        ${PROJECT_SOURCE_DIR}/rtc/include/rtc
 )
 target_link_libraries(mrtc_client PUBLIC mrtc)
 mrtc_set_warnings(mrtc_client)
@@ -26,7 +24,6 @@ if(MRTC_BUILD_TESTS)
             ${PROJECT_SOURCE_DIR}/tests
             ${CMAKE_CURRENT_SOURCE_DIR}/src               # client internals
             ${CMAKE_CURRENT_SOURCE_DIR}/include/rtc
-            ${PROJECT_SOURCE_DIR}/rtc/src                 # mrtc internals (rtc_sdp.h, rtc_dtls.h, ...)
         )
         target_link_libraries(${test_name} PRIVATE mrtc_client)
         add_test(NAME ${test_name} COMMAND ${test_name})

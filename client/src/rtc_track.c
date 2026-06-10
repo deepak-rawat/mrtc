@@ -7,9 +7,6 @@
  * rtc_peer_internal.h (shared with rtc_peer*.c).
  */
 #include "rtc_peer_internal.h"
-#include "rtc_rtp_ext.h"
-#include "rtc_srtp.h"
-#include "rtc_transport_internal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -170,7 +167,7 @@ void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_s
         uint16_t twcc_seq = 0;
         if (!rtc_nack_buf_retransmit(sender->nack_buf, lost_seqs[i], &pkt, &pkt_len, &twcc_seq))
             continue; /* not in buffer or per-seq retransmit cap hit */
-        rtc_transport_send_raw(sender->transport, pkt, pkt_len);
+        rtc_transport_send_protected_rtp(sender->transport, pkt, pkt_len);
 #ifdef MRTC_ENABLE_TWCC
         /* The retransmit carries the original TWCC seq. Drop it from the
          * sender ring so handle_rtcp_twcc skips this seq when feedback
@@ -329,15 +326,14 @@ void rtc_rtp_receiver_activate(struct rtc_rtp_receiver *r) {
 }
 
 /* SR / RR build + SRTCP protect + send. The scratch buffer is sized to hold
- * the largest RTCP packet plus the 4-byte SRTCP index trailer plus the auth
- * tag (see rtc_srtp_protect_rtcp). */
+ * the largest RTCP packet plus the SRTCP trailer added by the transport. */
 void rtc_rtp_sender_emit_sr_logical(struct rtc_rtp_sender *s, rtc_transport_t *transport) {
     if (!s || !s->active || !transport || s->rtcp_stats.packets_sent == 0)
         return;
     rtc_rtcp_packet_t pkt;
     if (rtc_rtcp_build_sr(&pkt, &s->rtcp_stats) != RTC_OK)
         return;
-    uint8_t buf[RTCP_MAX_PACKET + 4 + SRTP_AUTH_TAG_LEN];
+    uint8_t buf[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
     if (pkt.buf_len > sizeof(buf))
         return;
     memcpy(buf, pkt.buf, pkt.buf_len);
@@ -353,7 +349,7 @@ void rtc_rtp_receiver_emit_rr_logical(struct rtc_rtp_receiver *r, rtc_transport_
     rtc_rtcp_packet_t pkt;
     if (rtc_rtcp_build_rr(&pkt, &r->rtcp_stats) != RTC_OK)
         return;
-    uint8_t buf[RTCP_MAX_PACKET + 4 + SRTP_AUTH_TAG_LEN];
+    uint8_t buf[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
     if (pkt.buf_len > sizeof(buf))
         return;
     memcpy(buf, pkt.buf, pkt.buf_len);
