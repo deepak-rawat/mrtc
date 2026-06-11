@@ -10,7 +10,7 @@
  *   6. Maximum payload size
  */
 #include <rtc/rtc.h>
-#include "rtc_rtp.h"
+#include "rtc/rtc_rtp.h"
 #include "test_harness.h"
 
 TEST(rtp_build_basic) {

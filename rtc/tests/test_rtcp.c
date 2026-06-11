@@ -11,7 +11,7 @@
  *   7. Parse rejection of invalid packets
  */
 #include <rtc/rtc.h>
-#include "rtc_rtcp.h"
+#include "rtc/rtc_rtcp.h"
 #include "test_harness.h"
 
 TEST(rtcp_build_sr) {

@@ -5,8 +5,8 @@
 
 #include "rtc_listener_internal.h"
 #include "rtc_dtls.h"
-#include "rtc_rtp.h"
-#include "rtc_sdp.h"
+#include "rtc/rtc_rtp.h"
+#include "rtc/rtc_sdp.h"
 #include "rtc_srtp.h"
 #include "rtc_stun.h"
 #include "rtc_worker_internal.h"

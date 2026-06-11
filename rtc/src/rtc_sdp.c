@@ -3,7 +3,7 @@
  *
  * Supports multiple m= lines: audio, video, and application (data channel).
  */
-#include "rtc_sdp.h"
+#include "rtc/rtc_sdp.h"
 
 #include <stdarg.h>
 #include <stdio.h>

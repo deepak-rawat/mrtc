@@ -6,7 +6,7 @@
  * RTT > 300ms → decrease 10%
  * loss > 10% → request keyframe
  */
-#include "rtc_rate_control.h"
+#include "rtc/rtc_rate_control.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 

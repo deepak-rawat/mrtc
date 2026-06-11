@@ -2,7 +2,7 @@
  * AIMD rate controller tests.
  */
 #include "test_harness.h"
-#include "rtc_rate_control.h"
+#include "rtc/rtc_rate_control.h"
 #include <rtc/rtc_common.h>
 
 TEST(rc_no_loss_increase) {

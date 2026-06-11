@@ -1,7 +1,7 @@
 /*
  * RTCP (RFC 3550) Sender/Receiver Reports.
  */
-#include "rtc_rtcp.h"
+#include "rtc/rtc_rtcp.h"
 
 #include <string.h>
 #include <stdio.h>

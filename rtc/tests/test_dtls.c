@@ -10,7 +10,7 @@
  *   6. Client and server derive the same SRTP keys
  */
 #include <rtc/rtc.h>
-#include "rtc_rtp.h"
+#include "rtc/rtc_rtp.h"
 #include "rtc_dtls.h"
 #include "rtc_srtp.h"
 #include "test_harness.h"

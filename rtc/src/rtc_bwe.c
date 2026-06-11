@@ -2,7 +2,7 @@
  * Google Congestion Control — simplified C implementation.
  * See rtc_bwe.h for design notes.
  */
-#include "rtc_bwe.h"
+#include "rtc/rtc_bwe.h"
 
 #include <math.h>
 #include <stdlib.h>

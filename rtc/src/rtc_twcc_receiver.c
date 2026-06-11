@@ -6,8 +6,8 @@
  * use small (1-byte) deltas, others use 2-byte signed deltas. Values outside
  * the 16-bit signed range cause the packet to be marked not-received.
  */
-#include "rtc_twcc_receiver.h"
-#include "rtc_rtcp.h"
+#include "rtc/rtc_twcc_receiver.h"
+#include "rtc/rtc_rtcp.h"
 
 #include <string.h>
 

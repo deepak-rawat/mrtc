@@ -10,7 +10,7 @@
  *   6. Video codec variants (VP8, H264)
  */
 #include <rtc/rtc.h>
-#include "rtc_sdp.h"
+#include "rtc/rtc_sdp.h"
 #include "test_harness.h"
 
 TEST(sdp_generate_video) {

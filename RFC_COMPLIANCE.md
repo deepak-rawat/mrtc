@@ -43,7 +43,7 @@ Status of each IETF RFC relevant to the WebRTC protocol stack as implemented in 
 > RFC 8108 (SSRC-specific RTCP), RFC 8860 (deprecates RTP/RTCP transport address pairing).
 > Still the base specification — not obsoleted.
 
-Files: `rtc/src/rtc_rtp.c`, `rtc/src/rtc_rtcp.c`, `rtc/include/rtc/rtc_rtp.h`, `rtc/src/rtc_rtcp.h`
+Files: `rtc/src/rtc_rtp.c`, `rtc/src/rtc_rtcp.c`, `rtc/include/rtc/rtc_rtp.h`, `rtc/include/rtc/rtc_rtcp.h`
 
 ### Implemented
 
@@ -701,7 +701,7 @@ successors, ordered by priority.
   - Support reduced-size RTCP (RFC 5506) — send FB without compound SR/RR+SDES
   - Add NACK retransmit buffer (512 packets) in sender
   - Wire PLI → `video_encoder_request_keyframe()`
-- **Files:** `rtc/src/rtc_rtcp.c`, `rtc/src/rtc_rtcp.h`, `client/src/rtc_peer.c`, `rtc/src/rtc_sdp.c`
+- **Files:** `rtc/src/rtc_rtcp.c`, `rtc/include/rtc/rtc_rtcp.h`, `client/src/rtc_peer.c`, `rtc/src/rtc_sdp.c`, `rtc/include/rtc/rtc_sdp.h`
 - **Effort:** Large
 
 #### B2 — RTCP Compound Packets & SDES CNAME (RFC 3550 §6.1 + RFC 7022)

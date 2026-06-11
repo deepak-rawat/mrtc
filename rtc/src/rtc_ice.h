@@ -9,7 +9,7 @@
 
 #include "rtc_common.h"
 #include "rtc_stun.h"
-#include "rtc_sdp.h" /* for rtc_ice_candidate_t, ICE_MAX_CANDIDATES, etc. */
+#include "rtc/rtc_sdp.h" /* for rtc_ice_candidate_t, ICE_MAX_CANDIDATES, etc. */
 
 /* Forward declaration - avoid including rtc_packet_io.h to prevent circular deps */
 typedef struct rtc_packet_io rtc_packet_io_t;

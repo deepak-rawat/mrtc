@@ -10,7 +10,7 @@
 #include <rtc/rtc_consumer.h>
 
 #include "rtc_dtls.h"
-#include "rtc_rtp.h"
+#include "rtc/rtc_rtp.h"
 #include "rtc_srtp.h"
 #include "rtc_stun.h"
 #include "rtc_transport_internal.h"

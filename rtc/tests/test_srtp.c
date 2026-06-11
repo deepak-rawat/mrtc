@@ -10,9 +10,9 @@
  *   6. Separate send/recv contexts (simulating two peers)
  */
 #include <rtc/rtc.h>
-#include "rtc_rtp.h"
+#include "rtc/rtc_rtp.h"
 #include "rtc_srtp.h"
-#include "rtc_rtcp.h"
+#include "rtc/rtc_rtcp.h"
 #include "test_harness.h"
 
 /* Fixed test keys (deterministic) */

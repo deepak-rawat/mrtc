@@ -5,7 +5,7 @@
  * for all four feedback packet types added in Phase 2.
  */
 #include <rtc/rtc.h>
-#include "rtc_rtcp.h"
+#include "rtc/rtc_rtcp.h"
 #include "test_harness.h"
 
 #include <string.h>

@@ -1,8 +1,8 @@
 /*
  * Tests for RTP one-byte header extensions (RFC 8285).
  */
-#include "rtc_rtp.h"
-#include "rtc_rtp_ext.h"
+#include "rtc/rtc_rtp.h"
+#include "rtc/rtc_rtp_ext.h"
 #include "test_harness.h"
 
 #include <string.h>
