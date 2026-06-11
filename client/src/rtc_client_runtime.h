@@ -9,9 +9,6 @@
 
 typedef struct rtc_client_runtime rtc_client_runtime_t;
 
-int rtc_client_runtime_global_init(void);
-void rtc_client_runtime_global_cleanup(void);
-
 rtc_client_runtime_t *rtc_client_runtime_acquire(void);
 void rtc_client_runtime_release(rtc_client_runtime_t *runtime);
 

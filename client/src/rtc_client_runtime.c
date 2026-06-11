@@ -16,7 +16,6 @@ struct rtc_client_runtime {
 };
 
 static rtc_mutex_t g_runtime_lock;
-static bool g_runtime_lock_ready;
 static rtc_client_runtime_t *g_default_runtime;
 
 static void client_runtime_destroy(rtc_client_runtime_t *runtime) {
@@ -49,43 +48,7 @@ fail:
     return NULL;
 }
 
-int rtc_client_runtime_global_init(void) {
-    if (g_runtime_lock_ready)
-        return RTC_OK;
-    int rc = rtc_mutex_init(&g_runtime_lock);
-    if (rc != RTC_OK)
-        return rc;
-    g_runtime_lock_ready = true;
-    return RTC_OK;
-}
-
-void rtc_client_runtime_global_cleanup(void) {
-    rtc_client_runtime_t *runtime = NULL;
-
-    if (g_runtime_lock_ready) {
-        rtc_mutex_lock(&g_runtime_lock);
-        runtime = g_default_runtime;
-        g_default_runtime = NULL;
-        rtc_mutex_unlock(&g_runtime_lock);
-    }
-
-    if (runtime) {
-        if (runtime->ref_count > 0)
-            RTC_LOG_WARN("Client runtime cleanup with %d live peer connection(s)",
-                         runtime->ref_count);
-        client_runtime_destroy(runtime);
-    }
-
-    if (g_runtime_lock_ready) {
-        rtc_mutex_destroy(&g_runtime_lock);
-        g_runtime_lock_ready = false;
-    }
-}
-
 rtc_client_runtime_t *rtc_client_runtime_acquire(void) {
-    if (!g_runtime_lock_ready && rtc_client_runtime_global_init() != RTC_OK)
-        return NULL;
-
     rtc_mutex_lock(&g_runtime_lock);
     if (!g_default_runtime) {
         g_default_runtime = client_runtime_create();
@@ -101,15 +64,11 @@ rtc_client_runtime_t *rtc_client_runtime_acquire(void) {
 }
 
 void rtc_client_runtime_release(rtc_client_runtime_t *runtime) {
-    if (!runtime || !g_runtime_lock_ready)
-        return;
-
     bool destroy = false;
     rtc_mutex_lock(&g_runtime_lock);
-    if (runtime->ref_count > 0)
-        runtime->ref_count--;
-    if (runtime->ref_count == 0 && g_default_runtime == runtime) {
-        g_default_runtime = NULL;
+    if (--runtime->ref_count == 0) {
+        if (g_default_runtime == runtime)
+            g_default_runtime = NULL;
         destroy = true;
     }
     rtc_mutex_unlock(&g_runtime_lock);
@@ -119,18 +78,18 @@ void rtc_client_runtime_release(rtc_client_runtime_t *runtime) {
 }
 
 rtc_worker_t *rtc_client_runtime_worker(rtc_client_runtime_t *runtime) {
-    return runtime ? runtime->worker : NULL;
+    return runtime->worker;
 }
 
 rtc_listener_t *rtc_client_runtime_listener(rtc_client_runtime_t *runtime) {
-    return runtime ? runtime->listener : NULL;
+    return runtime->listener;
 }
 
 int rtc_client_init(void) {
     int rc = rtc_init();
     if (rc != RTC_OK)
         return rc;
-    rc = rtc_client_runtime_global_init();
+    rc = rtc_mutex_init(&g_runtime_lock);
     if (rc != RTC_OK) {
         rtc_cleanup();
         return rc;
@@ -139,6 +98,15 @@ int rtc_client_init(void) {
 }
 
 void rtc_client_cleanup(void) {
-    rtc_client_runtime_global_cleanup();
+    rtc_mutex_lock(&g_runtime_lock);
+    rtc_client_runtime_t *leaked = g_default_runtime;
+    rtc_mutex_unlock(&g_runtime_lock);
+
+    if (leaked) {
+        /* Leak the mutex too -- pending releases still need it. */
+        RTC_LOG_WARN("Client cleanup with live peer connection(s); leaking runtime");
+    } else {
+        rtc_mutex_destroy(&g_runtime_lock);
+    }
     rtc_cleanup();
 }
