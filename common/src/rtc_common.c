@@ -254,6 +254,9 @@ void rtc_cond_destroy(rtc_cond_t *c) {
 void rtc_cond_signal(rtc_cond_t *c) {
     WakeConditionVariable(c);
 }
+void rtc_cond_broadcast(rtc_cond_t *c) {
+    WakeAllConditionVariable(c);
+}
 
 int rtc_cond_wait_timeout(rtc_cond_t *c, rtc_mutex_t *m, uint32_t timeout_ms) {
     if (SleepConditionVariableCS(c, m, timeout_ms))
@@ -292,6 +295,9 @@ void rtc_cond_destroy(rtc_cond_t *c) {
 }
 void rtc_cond_signal(rtc_cond_t *c) {
     pthread_cond_signal(c);
+}
+void rtc_cond_broadcast(rtc_cond_t *c) {
+    pthread_cond_broadcast(c);
 }
 
 int rtc_cond_wait_timeout(rtc_cond_t *c, rtc_mutex_t *m, uint32_t timeout_ms) {

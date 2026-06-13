@@ -105,23 +105,6 @@ static rtc_pkt_type_t transport_classify(const uint8_t *data, size_t len) {
     return RTC_PKT_UNKNOWN;
 }
 
-/* Packet I/O still owns timers for the legacy peer path, but storage is
- * dynamic via rtc_timer_sched_t so old peer timers no longer have a fixed
- * 16-slot ceiling. */
-
-static void timer_fire_expired(rtc_packet_io_t *t) {
-    rtc_timer_sched_fn fn = NULL;
-    void *user = NULL;
-    for (;;) {
-        rtc_mutex_lock(&t->timer_mutex);
-        bool has_timer = rtc_timer_sched_pop_due(&t->timers, rtc_time_ms(), &fn, &user);
-        rtc_mutex_unlock(&t->timer_mutex);
-        if (!has_timer)
-            return;
-        fn(user);
-    }
-}
-
 /* recvmsg + PKTINFO is only available on POSIX in this revision. Windows
  * uses WSARecvMsg which requires GUID-indirected function pointer lookup
  * — left as a TODO. On Windows we fall back to recvfrom and skip the
@@ -244,155 +227,131 @@ static void drain_err_queue(rtc_socket_t s) {
 #  endif
 #endif /* RTC_PACKET_IO_HAS_PKTINFO */
 
-static void *transport_thread_fn(void *arg) {
-    rtc_packet_io_t *t = (rtc_packet_io_t *)arg;
-    uint8_t buf[RTC_PACKET_IO_BUF_SIZE];
-    rtc_poller_event_t evs[RTC_POLLER_MAX_EVENTS];
-
-    while (t->running) {
-        rtc_mutex_lock(&t->timer_mutex);
-        int timeout = rtc_timer_sched_next_timeout_ms(&t->timers, rtc_time_ms(), 100);
-        rtc_mutex_unlock(&t->timer_mutex);
-
-        int n = rtc_poller_wait(&t->poller, evs, RTC_POLLER_MAX_EVENTS, timeout);
-
-        rtc_socket_t s = atomic_load_explicit(&t->sock, memory_order_acquire);
-        for (int e = 0; e < n; e++) {
-            if (evs[e].fd != s || !(evs[e].events & RTC_POLLER_EV_READ))
-                continue;
+int rtc_packet_io_drain(rtc_packet_io_t *t) {
+    rtc_socket_t s = atomic_load_explicit(&t->sock, memory_order_acquire);
+    if (s == RTC_INVALID_SOCKET)
+        return 0;
 #if RTC_PACKET_IO_HAS_RECVMMSG
-            /* Linux fast path: drain a burst in one syscall. The slot
-             * arena is heap-allocated (16 * 9216 byte data buffers).
-             * Falls through to per-packet recvmsg below only if this
-             * branch is compiled out (non-Linux). */
-            {
-                mmsg_slot_t *slots = (mmsg_slot_t *)t->recv_batch_arena;
-                struct mmsghdr hdrs[RTC_PACKET_IO_RECV_BATCH];
-                for (int i = 0; i < RTC_PACKET_IO_RECV_BATCH; i++) {
-                    slots[i].iov.iov_base = slots[i].data;
-                    slots[i].iov.iov_len = sizeof(slots[i].data);
-                    memset(&hdrs[i], 0, sizeof(hdrs[i]));
-                    hdrs[i].msg_hdr.msg_name = &slots[i].from;
-                    hdrs[i].msg_hdr.msg_namelen = sizeof(slots[i].from);
-                    hdrs[i].msg_hdr.msg_iov = &slots[i].iov;
-                    hdrs[i].msg_hdr.msg_iovlen = 1;
-                    hdrs[i].msg_hdr.msg_control = slots[i].cbuf;
-                    hdrs[i].msg_hdr.msg_controllen = sizeof(slots[i].cbuf);
-                }
-                int nrecv = recvmmsg(s, hdrs, RTC_PACKET_IO_RECV_BATCH, MSG_DONTWAIT, NULL);
-                if (nrecv > 0) {
-                    for (int i = 0; i < nrecv; i++) {
-                        size_t plen = hdrs[i].msg_len;
-                        atomic_fetch_add_explicit(&t->pkts_recv, 1, memory_order_relaxed);
-                        atomic_fetch_add_explicit(&t->bytes_recv, (uint64_t)plen,
-                                                  memory_order_relaxed);
-                        if (plen == sizeof(slots[i].data))
-                            RTC_LOG_WARN("Transport: recvmmsg slot filled (%zu bytes); "
-                                         "possible packet truncation",
-                                         plen);
-
-                        struct msghdr *mh = &hdrs[i].msg_hdr;
-                        for (struct cmsghdr *c = CMSG_FIRSTHDR(mh); c; c = CMSG_NXTHDR(mh, c)) {
-                            if (c->cmsg_level == IPPROTO_IPV6 && c->cmsg_type == IPV6_PKTINFO) {
-                                const struct in6_pktinfo *pi =
-                                    (const struct in6_pktinfo *)CMSG_DATA(c);
-                                memcpy(&t->last_local_v6, &pi->ipi6_addr, sizeof(pi->ipi6_addr));
-                                atomic_store_explicit(&t->last_local_valid, true,
-                                                      memory_order_release);
-                            }
-#  ifdef SO_RXQ_OVFL
-                            else if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SO_RXQ_OVFL) {
-                                uint32_t v;
-                                memcpy(&v, CMSG_DATA(c), sizeof(v));
-                                atomic_store_explicit(&t->recv_kernel_drops, (uint64_t)v,
-                                                      memory_order_relaxed);
-                            }
-#  endif
-                        }
-
-                        rtc_addr_t from;
-                        memcpy(&from.addr, &slots[i].from, hdrs[i].msg_hdr.msg_namelen);
-                        from.len = hdrs[i].msg_hdr.msg_namelen;
-                        addr_unmap_v4(&from);
-
-                        rtc_pkt_type_t type = transport_classify(slots[i].data, plen);
-                        if (t->on_recv)
-                            t->on_recv(type, slots[i].data, plen, &from, t->recv_user);
-                    }
-                    if (nrecv == RTC_PACKET_IO_RECV_BATCH)
-                        atomic_fetch_add_explicit(&t->recv_drain_full, 1, memory_order_relaxed);
-                }
-                continue; /* burst processed; skip per-packet path below */
-            }
-#endif
-            int drained = 0;
-            for (int i = 0; i < RTC_PACKET_IO_RECV_BATCH; i++) {
-                struct sockaddr_storage from_store;
-                socklen_t fromlen = sizeof(from_store);
-                ssize_t len;
-
-#if RTC_PACKET_IO_HAS_PKTINFO
-                struct in6_addr local6;
-                bool local_valid = false;
-                uint32_t kdrops = 0;
-                len = recv_one_with_pktinfo(s, buf, sizeof(buf), &from_store, &fromlen, &local6,
-                                            &local_valid, &kdrops);
-                if (len > 0 && local_valid) {
-                    /* Atomic 128-bit store is non-portable; the addr is
-                     * only used by senders as a best-effort source pin.
-                     * Worst case under race: one send goes out the wrong
-                     * iface (same as today). Acceptable. */
-                    memcpy(&t->last_local_v6, &local6, sizeof(local6));
-                    atomic_store_explicit(&t->last_local_valid, true, memory_order_release);
-                }
-                if (kdrops) {
-                    /* SO_RXQ_OVFL reports the absolute drop counter
-                     * since the socket opened; storing it directly is
-                     * fine \u2014 monotonic, no overflow concerns at u64. */
-                    atomic_store_explicit(&t->recv_kernel_drops, (uint64_t)kdrops,
-                                          memory_order_relaxed);
-                }
-#else
-                len = recvfrom(s, (char *)buf, sizeof(buf), 0, (struct sockaddr *)&from_store,
-                               &fromlen);
-#endif
-                if (len <= 0)
-                    break; /* EWOULDBLOCK or error — socket drained */
-                drained++;
-
+    /* Linux fast path: drain a burst in one syscall. The slot arena is
+     * heap-allocated (RECV_BATCH * 9216 byte data buffers). */
+    {
+        mmsg_slot_t *slots = (mmsg_slot_t *)t->recv_batch_arena;
+        struct mmsghdr hdrs[RTC_PACKET_IO_RECV_BATCH];
+        for (int i = 0; i < RTC_PACKET_IO_RECV_BATCH; i++) {
+            slots[i].iov.iov_base = slots[i].data;
+            slots[i].iov.iov_len = sizeof(slots[i].data);
+            memset(&hdrs[i], 0, sizeof(hdrs[i]));
+            hdrs[i].msg_hdr.msg_name = &slots[i].from;
+            hdrs[i].msg_hdr.msg_namelen = sizeof(slots[i].from);
+            hdrs[i].msg_hdr.msg_iov = &slots[i].iov;
+            hdrs[i].msg_hdr.msg_iovlen = 1;
+            hdrs[i].msg_hdr.msg_control = slots[i].cbuf;
+            hdrs[i].msg_hdr.msg_controllen = sizeof(slots[i].cbuf);
+        }
+        int nrecv = recvmmsg(s, hdrs, RTC_PACKET_IO_RECV_BATCH, MSG_DONTWAIT, NULL);
+        if (nrecv > 0) {
+            for (int i = 0; i < nrecv; i++) {
+                size_t plen = hdrs[i].msg_len;
                 atomic_fetch_add_explicit(&t->pkts_recv, 1, memory_order_relaxed);
-                atomic_fetch_add_explicit(&t->bytes_recv, (uint64_t)len, memory_order_relaxed);
-
-                /* Truncation heuristic: a perfectly-full buffer is
-                 * suspicious since RTC_PACKET_IO_BUF_SIZE is sized for
-                 * jumbo frames. Real WebRTC traffic never reaches this. */
-                if ((size_t)len == sizeof(buf))
-                    RTC_LOG_WARN("Transport: recvfrom filled buffer (%zd bytes) — "
+                atomic_fetch_add_explicit(&t->bytes_recv, (uint64_t)plen, memory_order_relaxed);
+                if (plen == sizeof(slots[i].data))
+                    RTC_LOG_WARN("Transport: recvmmsg slot filled (%zu bytes); "
                                  "possible packet truncation",
-                                 len);
+                                 plen);
+
+                struct msghdr *mh = &hdrs[i].msg_hdr;
+                for (struct cmsghdr *c = CMSG_FIRSTHDR(mh); c; c = CMSG_NXTHDR(mh, c)) {
+                    if (c->cmsg_level == IPPROTO_IPV6 && c->cmsg_type == IPV6_PKTINFO) {
+                        const struct in6_pktinfo *pi = (const struct in6_pktinfo *)CMSG_DATA(c);
+                        memcpy(&t->last_local_v6, &pi->ipi6_addr, sizeof(pi->ipi6_addr));
+                        atomic_store_explicit(&t->last_local_valid, true, memory_order_release);
+                    }
+#  ifdef SO_RXQ_OVFL
+                    else if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SO_RXQ_OVFL) {
+                        uint32_t v;
+                        memcpy(&v, CMSG_DATA(c), sizeof(v));
+                        atomic_store_explicit(&t->recv_kernel_drops, (uint64_t)v,
+                                              memory_order_relaxed);
+                    }
+#  endif
+                }
 
                 rtc_addr_t from;
-                memcpy(&from.addr, &from_store, fromlen);
-                from.len = fromlen;
-                /* Normalize v4-mapped to plain AF_INET so callers see the
-                 * address family they expect (ICE / SDP / STUN all key on
-                 * AF_INET for IPv4 peers). */
+                memcpy(&from.addr, &slots[i].from, hdrs[i].msg_hdr.msg_namelen);
+                from.len = hdrs[i].msg_hdr.msg_namelen;
                 addr_unmap_v4(&from);
 
-                rtc_pkt_type_t type = transport_classify(buf, (size_t)len);
-
-                if (t->on_recv) {
-                    t->on_recv(type, buf, (size_t)len, &from, t->recv_user);
-                }
+                rtc_pkt_type_t type = transport_classify(slots[i].data, plen);
+                if (t->on_recv)
+                    t->on_recv(type, slots[i].data, plen, &from, t->recv_user);
             }
-            if (drained == RTC_PACKET_IO_RECV_BATCH)
+            if (nrecv == RTC_PACKET_IO_RECV_BATCH)
                 atomic_fetch_add_explicit(&t->recv_drain_full, 1, memory_order_relaxed);
         }
-
-        timer_fire_expired(t);
+        return nrecv > 0 ? nrecv : 0;
     }
+#endif
+    uint8_t buf[RTC_PACKET_IO_BUF_SIZE];
+    int drained = 0;
+    for (int i = 0; i < RTC_PACKET_IO_RECV_BATCH; i++) {
+        struct sockaddr_storage from_store;
+        socklen_t fromlen = sizeof(from_store);
+        ssize_t len;
 
-    return NULL;
+#if RTC_PACKET_IO_HAS_PKTINFO
+        struct in6_addr local6;
+        bool local_valid = false;
+        uint32_t kdrops = 0;
+        len = recv_one_with_pktinfo(s, buf, sizeof(buf), &from_store, &fromlen, &local6,
+                                    &local_valid, &kdrops);
+        if (len > 0 && local_valid) {
+            /* Atomic 128-bit store is non-portable; the addr is only used
+             * by senders as a best-effort source pin. Worst case under
+             * race: one send goes out the wrong iface (same as today). */
+            memcpy(&t->last_local_v6, &local6, sizeof(local6));
+            atomic_store_explicit(&t->last_local_valid, true, memory_order_release);
+        }
+        if (kdrops) {
+            /* SO_RXQ_OVFL reports the absolute drop counter since the
+             * socket opened; storing it directly is fine - monotonic, no
+             * overflow concerns at u64. */
+            atomic_store_explicit(&t->recv_kernel_drops, (uint64_t)kdrops, memory_order_relaxed);
+        }
+#else
+        len = recvfrom(s, (char *)buf, sizeof(buf), 0, (struct sockaddr *)&from_store, &fromlen);
+#endif
+        if (len <= 0)
+            break; /* EWOULDBLOCK or error - socket drained */
+        drained++;
+
+        atomic_fetch_add_explicit(&t->pkts_recv, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&t->bytes_recv, (uint64_t)len, memory_order_relaxed);
+
+        /* Truncation heuristic: a perfectly-full buffer is suspicious
+         * since RTC_PACKET_IO_BUF_SIZE is sized for jumbo frames. Real
+         * WebRTC traffic never reaches this. */
+        if ((size_t)len == sizeof(buf))
+            RTC_LOG_WARN("Transport: recvfrom filled buffer (%zd bytes) - "
+                         "possible packet truncation",
+                         len);
+
+        rtc_addr_t from;
+        memcpy(&from.addr, &from_store, fromlen);
+        from.len = fromlen;
+        /* Normalize v4-mapped to plain AF_INET so callers see the address
+         * family they expect (ICE / SDP / STUN all key on AF_INET for
+         * IPv4 peers). */
+        addr_unmap_v4(&from);
+
+        rtc_pkt_type_t type = transport_classify(buf, (size_t)len);
+
+        if (t->on_recv) {
+            t->on_recv(type, buf, (size_t)len, &from, t->recv_user);
+        }
+    }
+    if (drained == RTC_PACKET_IO_RECV_BATCH)
+        atomic_fetch_add_explicit(&t->recv_drain_full, 1, memory_order_relaxed);
+    return drained;
 }
 
 static int packet_io_fill_bind_addr(struct sockaddr_in6 *bind_addr,
@@ -560,65 +519,22 @@ int rtc_packet_io_init_ex(rtc_packet_io_t *t, const rtc_packet_io_config_t *cfg,
     if (got_snd > 0 && got_snd < wanted)
         RTC_LOG_WARN("Transport: SO_SNDBUF clamped to %d (requested %d)", got_snd, wanted);
 
-    /* Init poller and register socket */
-    rc = rtc_poller_init(&t->poller);
-    if (rc != RTC_OK) {
-        rtc_close_socket(s);
-        return rc;
-    }
-
-    rc = rtc_poller_add(&t->poller, s);
-    if (rc != RTC_OK) {
-        rtc_poller_close(&t->poller);
-        rtc_close_socket(s);
-        return rc;
-    }
-
-    /* Init synchronization */
-    rtc_mutex_init(&t->timer_mutex);
-    rc = rtc_timer_sched_init(&t->timers);
-    if (rc != RTC_OK) {
-        rtc_mutex_destroy(&t->timer_mutex);
-        rtc_poller_close(&t->poller);
-        rtc_close_socket(s);
-        return rc;
-    }
-
 #if RTC_PACKET_IO_HAS_RECVMMSG
     /* Heap arena for the recvmmsg batch: too big for the thread stack
      * (16 * 9216 ≈ 144KB). One allocation for the transport's lifetime. */
     t->recv_batch_arena = calloc(RTC_PACKET_IO_RECV_BATCH, sizeof(mmsg_slot_t));
     if (!t->recv_batch_arena) {
-        rtc_timer_sched_close(&t->timers);
-        rtc_mutex_destroy(&t->timer_mutex);
-        rtc_poller_close(&t->poller);
         rtc_close_socket(s);
         return RTC_ERR_NOMEM;
     }
 #endif
 
-    /* Wire up callback before the thread starts so no packet is missed. */
+    /* Install the recv callback and publish the socket. The owning worker
+     * registers the socket with its poller and calls rtc_packet_io_drain()
+     * when it becomes readable. */
     t->on_recv = on_recv;
     t->recv_user = user;
-
-    /* Publish socket and running flag, then start background thread. */
     atomic_store_explicit(&t->sock, s, memory_order_release);
-    atomic_store_explicit(&t->running, true, memory_order_release);
-
-    rc = rtc_thread_create(&t->thread, transport_thread_fn, t);
-    if (rc != RTC_OK) {
-        atomic_store_explicit(&t->running, false, memory_order_relaxed);
-        atomic_store_explicit(&t->sock, RTC_INVALID_SOCKET, memory_order_relaxed);
-        rtc_poller_close(&t->poller);
-        rtc_close_socket(s);
-        rtc_timer_sched_close(&t->timers);
-        rtc_mutex_destroy(&t->timer_mutex);
-#if RTC_PACKET_IO_HAS_RECVMMSG
-        free(t->recv_batch_arena);
-        t->recv_batch_arena = NULL;
-#endif
-        return rc;
-    }
 
     char ipbuf[64];
     uint16_t port = 0;
@@ -749,35 +665,6 @@ void rtc_packet_io_set_remote(rtc_packet_io_t *t, const rtc_addr_t *addr) {
     atomic_store_explicit(&t->remote_addr_set, true, memory_order_release);
 }
 
-rtc_timer_id_t rtc_packet_io_add_timer(rtc_packet_io_t *t, uint64_t deadline_ms, rtc_timer_fn fn,
-                                       void *user) {
-    if (!t || !fn)
-        return RTC_TIMER_HANDLE_INVALID;
-    rtc_mutex_lock(&t->timer_mutex);
-    rtc_timer_id_t id = rtc_timer_sched_add(&t->timers, deadline_ms, fn, user);
-    int pending = rtc_timer_sched_pending_count(&t->timers);
-    if (pending > t->timer_slot_hwm)
-        t->timer_slot_hwm = pending;
-    rtc_mutex_unlock(&t->timer_mutex);
-    if (id == RTC_TIMER_HANDLE_INVALID) {
-        RTC_LOG_WARN("Transport: failed to schedule timer");
-        return id;
-    }
-    /* Break the poll loop so the new (possibly sooner) deadline is
-     * observed promptly. Without this, the thread can sleep up to the
-     * previous timeout (default 100ms) before noticing. */
-    rtc_poller_wake(&t->poller);
-    return id;
-}
-
-void rtc_packet_io_cancel_timer(rtc_packet_io_t *t, rtc_timer_id_t id) {
-    if (!t || id == RTC_TIMER_HANDLE_INVALID)
-        return;
-    rtc_mutex_lock(&t->timer_mutex);
-    rtc_timer_sched_cancel(&t->timers, id);
-    rtc_mutex_unlock(&t->timer_mutex);
-}
-
 rtc_socket_t rtc_packet_io_get_socket(const rtc_packet_io_t *t) {
     return atomic_load_explicit(&t->sock, memory_order_acquire);
 }
@@ -796,37 +683,21 @@ void rtc_packet_io_get_stats(const rtc_packet_io_t *t, rtc_packet_io_stats_t *ou
     out->send_would_block = atomic_load_explicit(&t->send_would_block, memory_order_relaxed);
     out->recv_drain_full = atomic_load_explicit(&t->recv_drain_full, memory_order_relaxed);
     out->recv_kernel_drops = atomic_load_explicit(&t->recv_kernel_drops, memory_order_relaxed);
-    out->timer_slot_hwm = t->timer_slot_hwm;
 }
 
 void rtc_packet_io_close(rtc_packet_io_t *t) {
-    /* Idempotent: only the thread that flips running true -> false runs
-     * the shutdown sequence. Concurrent / repeated close calls no-op. */
-    bool was_running = atomic_exchange_explicit(&t->running, false, memory_order_acq_rel);
-    if (!was_running)
-        return;
-
-    /* Wake the poller so the thread observes running==false now, not
-     * after the next timeout. */
-    rtc_poller_wake(&t->poller);
-
-    /* Join thread (it observes running==false and exits its loop). */
-    rtc_thread_join(&t->thread);
-
-    /* Cleanup */
-    rtc_poller_close(&t->poller);
-
+    /* Idempotent: the first close swaps the socket to INVALID and frees
+     * resources; concurrent / repeated calls no-op. The owning worker
+     * must have stopped polling this socket before close is called. */
     rtc_socket_t s = atomic_exchange_explicit(&t->sock, RTC_INVALID_SOCKET, memory_order_acq_rel);
-    if (s != RTC_INVALID_SOCKET)
-        rtc_close_socket(s);
-
-    rtc_timer_sched_close(&t->timers);
-    rtc_mutex_destroy(&t->timer_mutex);
+    if (s == RTC_INVALID_SOCKET)
+        return;
+    rtc_close_socket(s);
 
 #if RTC_PACKET_IO_HAS_RECVMMSG
     free(t->recv_batch_arena);
     t->recv_batch_arena = NULL;
 #endif
 
-    RTC_LOG_INFO("Transport: closed (timer pending hwm=%d)", t->timer_slot_hwm);
+    RTC_LOG_INFO("Transport: closed");
 }

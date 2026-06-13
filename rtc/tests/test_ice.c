@@ -164,34 +164,40 @@ static void ice_test_data_capture_cb(rtc_pkt_type_t type, const uint8_t *data, s
     rtc_mutex_unlock(&g_ice_mutex);
 }
 
+/* Passive packet I/O has no thread; the test pumps reception by draining
+ * the agents' sockets while waiting. */
+static rtc_packet_io_t *g_drain1;
+static rtc_packet_io_t *g_drain2;
+
+static void drain_pump(void) {
+    if (g_drain1)
+        rtc_packet_io_drain(g_drain1);
+    if (g_drain2)
+        rtc_packet_io_drain(g_drain2);
+}
+
 static bool wait_for_stun(int target, int timeout_ms) {
-    rtc_mutex_lock(&g_ice_mutex);
     uint64_t deadline = rtc_time_ms() + (uint64_t)timeout_ms;
-    while (g_stun_recv_count < target) {
-        uint64_t now = rtc_time_ms();
-        if (now >= deadline) {
-            rtc_mutex_unlock(&g_ice_mutex);
+    for (;;) {
+        drain_pump();
+        if (g_stun_recv_count >= target)
+            return true;
+        if (rtc_time_ms() >= deadline)
             return false;
-        }
-        rtc_cond_wait_timeout(&g_ice_cond, &g_ice_mutex, (uint32_t)(deadline - now));
+        SLEEP_MS(2);
     }
-    rtc_mutex_unlock(&g_ice_mutex);
-    return true;
 }
 
 static bool wait_for_data(int target, int timeout_ms) {
-    rtc_mutex_lock(&g_ice_mutex);
     uint64_t deadline = rtc_time_ms() + (uint64_t)timeout_ms;
-    while (g_data_recv_count < target) {
-        uint64_t now = rtc_time_ms();
-        if (now >= deadline) {
-            rtc_mutex_unlock(&g_ice_mutex);
+    for (;;) {
+        drain_pump();
+        if (g_data_recv_count >= target)
+            return true;
+        if (rtc_time_ms() >= deadline)
             return false;
-        }
-        rtc_cond_wait_timeout(&g_ice_cond, &g_ice_mutex, (uint32_t)(deadline - now));
+        SLEEP_MS(2);
     }
-    rtc_mutex_unlock(&g_ice_mutex);
-    return true;
 }
 
 TEST(ice_two_agents_connect) {
@@ -260,6 +266,8 @@ TEST(ice_two_agents_connect) {
     ASSERT_EQ(rc, RTC_OK);
 
     rtc_addr_t bob_addr = bob.local_candidates[0].addr;
+    g_drain1 = &transport_a;
+    g_drain2 = &transport_b;
     rc = rtc_packet_io_send(&transport_a, req.buf, req.buf_len, &bob_addr);
     ASSERT_EQ(rc, RTC_OK);
 
@@ -276,6 +284,8 @@ TEST(ice_two_agents_connect) {
 
     printf("    Alice -> Bob STUN check: request sent, response received\n");
 
+    g_drain1 = NULL;
+    g_drain2 = NULL;
     rtc_packet_io_close(&transport_a);
     rtc_packet_io_close(&transport_b);
     rtc_mutex_lock(&g_ice_mutex);
@@ -308,6 +318,8 @@ TEST(ice_data_transfer) {
 
     /* Alice sends data to Bob via transport */
     const char *msg = "Hello over ICE!";
+    g_drain1 = &transport_a;
+    g_drain2 = &transport_b;
     int rc = rtc_packet_io_send_to_remote(&transport_a, (const uint8_t *)msg, strlen(msg));
     ASSERT_EQ(rc, RTC_OK);
 
@@ -333,6 +345,8 @@ TEST(ice_data_transfer) {
 
     printf("    Bob -> Alice: \"%s\" (%zu bytes)\n", reply, g_data_recv_len);
 
+    g_drain1 = NULL;
+    g_drain2 = NULL;
     rtc_packet_io_close(&transport_a);
     rtc_packet_io_close(&transport_b);
     rtc_ice_close(&alice);

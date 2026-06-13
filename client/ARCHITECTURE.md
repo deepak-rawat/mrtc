@@ -205,11 +205,12 @@ are documented in [../rtc/ARCHITECTURE.md](../rtc/ARCHITECTURE.md).
 The peer connection inherits the runtime's threading model:
 
 - **Main thread** — API calls, `add_track`, `create_offer`/`answer`,
-  `set_local`/`remote_desc`, `sender_send`, `close`, `destroy`.
-- **Listener I/O thread** (from `libmrtc`) — socket I/O, RFC 7983 demux,
-  per-route dispatch to this peer's transport.
-- **Worker timers** (from `libmrtc`) — logical transport ICE checks,
-  DTLS retransmission, RTCP / TWCC feedback emission.
+  `set_local`/`remote_desc`, `sender_send`, `close`, `destroy`. Transport
+  control / teardown calls marshal onto the worker thread internally.
+- **Worker loop thread** (from `libmrtc`) — the single background thread:
+  socket I/O drain, RFC 7983 demux, per-route dispatch to this peer's
+  transport, and all logical-transport timers (ICE checks, DTLS
+  retransmission, RTCP / TWCC feedback emission).
 
 State observable to callers is published through C11 `_Atomic` flags on
 the peer connection (`signaling_state`, `ice_connection_state`,

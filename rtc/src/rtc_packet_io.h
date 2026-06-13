@@ -1,19 +1,22 @@
 /*
- * Transport layer - Owns the UDP socket, runs an event-driven thread,
- * and demuxes incoming packets (STUN/DTLS/RTP) per RFC 7983.
+ * Packet I/O - Owns the UDP socket, sends/receives datagrams, and
+ * demuxes incoming packets (STUN/DTLS/RTP) per RFC 7983.
  *
- * The transport provides:
+ * This object is PASSIVE: it does not own a thread or a timer scheduler.
+ * The owning rtc_worker registers the socket with its poller and calls
+ * rtc_packet_io_drain() when the socket becomes readable. All recv
+ * callbacks therefore fire on the worker thread.
+ *
+ * Provides:
  *  - Socket lifecycle (create, bind, close)
- *  - Background thread with platform-native I/O poller (epoll/kqueue/select)
- *  - Packet classification and callback dispatch
- *  - Timer management for protocol retransmissions
+ *  - A non-blocking drain pass that classifies packets and dispatches
+ *    them to the registered callback
+ *  - Thread-safe send helpers
  */
 #ifndef RTC_PACKET_IO_H
 #define RTC_PACKET_IO_H
 
 #include "rtc_common.h"
-#include "rtc_poller.h"
-#include "rtc_timer_sched.h"
 
 #include <stdatomic.h>
 
@@ -35,19 +38,20 @@ typedef enum {
     RTC_PKT_CHANNEL_DATA, /* first byte [64, 79] — TURN ChannelData */
     RTC_PKT_DTLS,         /* first byte [20, 63]   */
     RTC_PKT_RTP,          /* first byte [128, 191], byte[1] PT < 200 */
-    RTC_PKT_RTCP,         /* first byte [128, 191], byte[1] PT 200-204 */
+    RTC_PKT_RTCP,         /* first byte [128, 191], byte[1] PT 200-206 */
     RTC_PKT_UNKNOWN,
 } rtc_pkt_type_t;
 
-/* Callback for received + classified packets (fires on transport thread).
+/* Callback for received + classified packets (fires on the worker thread).
  *
- * CONTRACT: must complete quickly (target < 1 ms). The transport thread
- * also drives timer scheduling for protocol retransmissions (DTLS, ICE,
- * RTCP, TWCC), so any time spent inside on_recv directly delays timer
- * firing and back-pressures the receive path.
+ * CONTRACT: must complete quickly (target < 1 ms). The worker thread
+ * that drains the socket also drives timer scheduling for protocol
+ * retransmissions (DTLS, ICE, RTCP, TWCC), so any time spent inside
+ * on_recv directly delays timer firing and back-pressures the receive
+ * path.
  *
  * Offload heavy work (video decoding, file I/O, application logic) to a
- * worker thread by enqueuing in this callback and returning immediately.
+ * separate thread by enqueuing in this callback and returning immediately.
  *
  * BUFFER LIFETIME: `data` points into a transport-owned buffer that is
  * reused for the NEXT packet. The callee MUST NOT retain `data` (or
@@ -62,35 +66,16 @@ typedef struct {
     uint16_t port;
 } rtc_packet_io_config_t;
 
-/* Timer callback */
-typedef void (*rtc_timer_fn)(void *user);
-
-/* Timer handle (generation-checked scheduler handle). */
-typedef rtc_timer_handle_t rtc_timer_id_t;
-
 typedef struct rtc_packet_io {
     /* Socket. Atomic so concurrent senders that race with close see
      * RTC_INVALID_SOCKET and return an error instead of using a freed fd. */
     _Atomic rtc_socket_t sock;
     rtc_addr_t local_addr;
 
-    /* Poller */
-    rtc_poller_t poller;
-
-    /* Thread */
-    rtc_thread_t thread;
-    _Atomic bool running; /* set false from any thread to stop poller loop */
-
     /* Packet callback. Installed by rtc_packet_io_init() before the
-     * background thread starts; never changed. Read unlocked on the hot
-     * path. */
+     * socket is registered with a worker; never changed afterwards. */
     rtc_packet_io_recv_fn on_recv;
     void *recv_user;
-
-    /* Dynamic timer scheduler and high-water mark of pending timers. */
-    rtc_timer_sched_t timers;
-    rtc_mutex_t timer_mutex;
-    int timer_slot_hwm;
 
     /* Selected remote address (set by ICE after connectivity checks).
      *
@@ -149,16 +134,25 @@ typedef struct {
     uint64_t send_would_block; /* EAGAIN/EWOULDBLOCK on sendto; transient */
     uint64_t recv_drain_full;
     uint64_t recv_kernel_drops; /* SO_RXQ_OVFL counter (Linux only; else 0) */
-    int timer_slot_hwm;
 } rtc_packet_io_stats_t;
 
 /*
- * Create UDP socket, install the recv callback, and start the poller
- * thread. on_recv (may be NULL) fires on the transport thread.
+ * Create and bind the UDP socket and install the recv callback. Does NOT
+ * start any thread: the owning worker drives I/O by polling the socket
+ * and calling rtc_packet_io_drain(). on_recv (may be NULL) fires on
+ * whichever thread calls rtc_packet_io_drain().
  */
 int rtc_packet_io_init(rtc_packet_io_t *t, rtc_packet_io_recv_fn on_recv, void *user);
 int rtc_packet_io_init_ex(rtc_packet_io_t *t, const rtc_packet_io_config_t *cfg,
                           rtc_packet_io_recv_fn on_recv, void *user);
+
+/*
+ * Drain up to RTC_PACKET_IO_RECV_BATCH datagrams from the socket without
+ * blocking, classifying each and dispatching to the recv callback.
+ * Intended to be called by the owning worker when the socket is readable.
+ * Returns the number of datagrams processed (0 when the socket is empty).
+ */
+int rtc_packet_io_drain(rtc_packet_io_t *t);
 
 /* Thread-safe: send data to a specific destination address */
 int rtc_packet_io_send(rtc_packet_io_t *t, const uint8_t *data, size_t len, const rtc_addr_t *dest);
@@ -169,17 +163,6 @@ int rtc_packet_io_send_to_remote(rtc_packet_io_t *t, const uint8_t *data, size_t
 /* Set the selected remote address (called by ICE after connect) */
 void rtc_packet_io_set_remote(rtc_packet_io_t *t, const rtc_addr_t *addr);
 
-/*
- * Schedule a timer callback at absolute deadline (rtc_time_ms).
- * Returns a timer ID, or RTC_TIMER_HANDLE_INVALID on error.
- * Thread-safe.
- */
-rtc_timer_id_t rtc_packet_io_add_timer(rtc_packet_io_t *t, uint64_t deadline_ms, rtc_timer_fn fn,
-                                       void *user);
-
-/* Cancel a pending timer. Thread-safe. */
-void rtc_packet_io_cancel_timer(rtc_packet_io_t *t, rtc_timer_id_t id);
-
 /* Get the underlying socket (for getsockname during ICE gathering) */
 rtc_socket_t rtc_packet_io_get_socket(const rtc_packet_io_t *t);
 
@@ -189,7 +172,7 @@ int rtc_packet_io_get_local_addr(rtc_packet_io_t *t, rtc_addr_t *out);
 /* Read a snapshot of internal counters. Lock-free. */
 void rtc_packet_io_get_stats(const rtc_packet_io_t *t, rtc_packet_io_stats_t *out);
 
-/* Stop thread, close socket, free resources */
+/* Close socket, free resources */
 void rtc_packet_io_close(rtc_packet_io_t *t);
 
 #endif /* RTC_PACKET_IO_H */

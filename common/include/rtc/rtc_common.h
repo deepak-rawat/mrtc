@@ -93,6 +93,8 @@ void rtc_mutex_unlock(rtc_mutex_t *m);
 int rtc_cond_init(rtc_cond_t *c);
 void rtc_cond_destroy(rtc_cond_t *c);
 void rtc_cond_signal(rtc_cond_t *c);
+/* Wake all threads blocked on the condition variable. */
+void rtc_cond_broadcast(rtc_cond_t *c);
 /* Wait with timeout in milliseconds. Returns RTC_OK or RTC_ERR_TIMEOUT. */
 int rtc_cond_wait_timeout(rtc_cond_t *c, rtc_mutex_t *m, uint32_t timeout_ms);
 

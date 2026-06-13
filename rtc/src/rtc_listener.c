@@ -7,6 +7,7 @@
 #include "rtc_listener_internal.h"
 #include "rtc_packet_io.h"
 #include "rtc_stun.h"
+#include "rtc_worker_internal.h"
 
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -252,6 +253,14 @@ static void listener_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t 
     atomic_fetch_add_explicit(&listener->packets_unhandled, 1, memory_order_relaxed);
 }
 
+/* Worker poller readiness callback: runs on the worker loop thread and
+ * drains the UDP socket, dispatching each packet to listener_on_packet. */
+static void listener_io_ready(rtc_socket_t fd, void *user) {
+    (void)fd;
+    rtc_listener_t *listener = (rtc_listener_t *)user;
+    rtc_packet_io_drain(&listener->io);
+}
+
 static int listener_fill_candidate(rtc_listener_t *listener, const rtc_listener_config_t *cfg) {
     char ip[64];
     uint16_t port = 0;
@@ -344,6 +353,20 @@ rtc_listener_t *rtc_listener_create(rtc_worker_t *worker, const rtc_listener_con
         free(listener);
         return NULL;
     }
+
+    /* Hand the socket to the worker: from here its loop thread drains
+     * the socket and dispatches packets to listener_on_packet. */
+    rc = rtc_worker_add_io(worker, rtc_packet_io_get_socket(&listener->io), listener_io_ready,
+                           listener);
+    if (rc != RTC_OK) {
+        rtc_packet_io_close(&listener->io);
+        free_routes(&listener->ufrag_routes);
+        free_routes(&listener->txn_routes);
+        free_routes(&listener->tuple_routes);
+        rtc_mutex_destroy(&listener->route_mutex);
+        free(listener);
+        return NULL;
+    }
     return listener;
 }
 
@@ -353,6 +376,9 @@ void rtc_listener_close(rtc_listener_t *listener) {
     bool was_closed = atomic_exchange_explicit(&listener->closed, true, memory_order_acq_rel);
     if (was_closed)
         return;
+    /* Stop the worker polling this socket (runs on the loop thread, so no
+     * drain can be in flight afterwards), then close the socket. */
+    rtc_worker_remove_io(listener->worker, rtc_packet_io_get_socket(&listener->io));
     rtc_packet_io_close(&listener->io);
 }
 

@@ -39,7 +39,7 @@ struct rtc_transport {
     uint8_t *app_buf;
     size_t app_buf_cap;
     rtc_addr_t selected_remote;
-    bool selected_remote_valid;
+    _Atomic bool selected_remote_valid;
     rtc_addr_t remote_candidate;
     bool remote_ice_valid;
     bool remote_candidate_valid;
@@ -47,7 +47,7 @@ struct rtc_transport {
     bool ice_txn_registered;
     rtc_worker_timer_t ice_timer;
     int ice_check_count;
-    bool srtp_ready;
+    _Atomic bool srtp_ready;
     rtc_worker_timer_t dtls_timer;
     _Atomic bool closed;
     _Atomic uint64_t packets_received;
@@ -57,6 +57,30 @@ struct rtc_transport {
 
 static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                                 const rtc_addr_t *from, void *user);
+
+/* Marshal a control/query operation onto the worker loop thread so all
+ * per-transport protocol state (ICE, DTLS/SSL, SRTP) is mutated by a
+ * single thread. The hot RTP/RTCP send path is the only exception; it
+ * relies on the atomic published flags selected_remote_valid / srtp_ready. */
+typedef int (*tx_op_fn)(rtc_transport_t *transport, void *arg);
+
+typedef struct {
+    tx_op_fn fn;
+    rtc_transport_t *transport;
+    void *arg;
+    int rc;
+} tx_op_call_t;
+
+static void tx_op_trampoline(void *user) {
+    tx_op_call_t *call = (tx_op_call_t *)user;
+    call->rc = call->fn(call->transport, call->arg);
+}
+
+static int tx_op_invoke(rtc_transport_t *transport, tx_op_fn fn, void *arg) {
+    tx_op_call_t call = {fn, transport, arg, RTC_OK};
+    rtc_worker_invoke(transport->worker, tx_op_trampoline, &call);
+    return call.rc;
+}
 
 static rtc_transport_dtls_state_t transport_dtls_state(rtc_dtls_state_t state) {
     switch (state) {
@@ -130,7 +154,8 @@ static int transport_send_ice_check(rtc_transport_t *transport) {
 }
 
 static void transport_arm_ice_timer(rtc_transport_t *transport) {
-    if (!transport->worker || transport->selected_remote_valid ||
+    if (!transport->worker ||
+        atomic_load_explicit(&transport->selected_remote_valid, memory_order_acquire) ||
         atomic_load_explicit(&transport->closed, memory_order_acquire)) {
         return;
     }
@@ -144,7 +169,7 @@ static void transport_ice_timer(void *user) {
     rtc_transport_t *transport = (rtc_transport_t *)user;
     transport->ice_timer = RTC_WORKER_TIMER_INVALID;
     if (atomic_load_explicit(&transport->closed, memory_order_acquire) ||
-        transport->selected_remote_valid) {
+        atomic_load_explicit(&transport->selected_remote_valid, memory_order_acquire)) {
         return;
     }
     if (transport->ice_check_count >= 120)
@@ -185,7 +210,8 @@ static void transport_dtls_timer(void *user) {
 }
 
 static void transport_try_export_srtp(rtc_transport_t *transport) {
-    if (transport->srtp_ready || transport->dtls.state != RTC_DTLS_STATE_CONNECTED)
+    if (atomic_load_explicit(&transport->srtp_ready, memory_order_acquire) ||
+        transport->dtls.state != RTC_DTLS_STATE_CONNECTED)
         return;
     transport_cancel_dtls_timer(transport);
     if (rtc_dtls_export_srtp_keys(&transport->dtls) != RTC_OK) {
@@ -219,11 +245,12 @@ static void transport_try_export_srtp(rtc_transport_t *transport) {
         transport->dtls.state = RTC_DTLS_STATE_FAILED;
         return;
     }
-    transport->srtp_ready = true;
+    atomic_store_explicit(&transport->srtp_ready, true, memory_order_release);
 }
 
 static void transport_handle_rtp(rtc_transport_t *transport, const uint8_t *data, size_t len) {
-    if (!transport->srtp_ready || len > SRTP_MAX_PACKET)
+    if (!atomic_load_explicit(&transport->srtp_ready, memory_order_acquire) ||
+        len > SRTP_MAX_PACKET)
         return;
 
     uint8_t buf[SRTP_MAX_PACKET];
@@ -241,7 +268,8 @@ static void transport_handle_rtp(rtc_transport_t *transport, const uint8_t *data
 }
 
 static void transport_handle_rtcp(rtc_transport_t *transport, const uint8_t *data, size_t len) {
-    if (!transport->srtp_ready || !transport->on_rtcp || len > SRTP_MAX_PACKET)
+    if (!atomic_load_explicit(&transport->srtp_ready, memory_order_acquire) ||
+        !transport->on_rtcp || len > SRTP_MAX_PACKET)
         return;
     uint8_t buf[SRTP_MAX_PACKET];
     memcpy(buf, data, len);
@@ -284,9 +312,9 @@ static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t
         }
         transport_unregister_ice_txn(transport);
         transport_cancel_ice_timer(transport);
-        if (!transport->selected_remote_valid) {
+        if (!atomic_load_explicit(&transport->selected_remote_valid, memory_order_acquire)) {
             transport->selected_remote = *from;
-            transport->selected_remote_valid = true;
+            atomic_store_explicit(&transport->selected_remote_valid, true, memory_order_release);
             (void)rtc_listener_register_tuple(transport->listener, &transport->selected_remote,
                                               transport_on_packet, transport);
         }
@@ -296,9 +324,9 @@ static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t
     if (msg.type != STUN_BINDING_REQUEST)
         return;
 
-    if (!transport->selected_remote_valid) {
+    if (!atomic_load_explicit(&transport->selected_remote_valid, memory_order_acquire)) {
         transport->selected_remote = *from;
-        transport->selected_remote_valid = true;
+        atomic_store_explicit(&transport->selected_remote_valid, true, memory_order_release);
         (void)rtc_listener_register_tuple(transport->listener, &transport->selected_remote,
                                           transport_on_packet, transport);
     }
@@ -386,19 +414,21 @@ static rtc_dtls_role_t transport_internal_dtls_role(rtc_transport_dtls_role_t ro
     return role == RTC_TRANSPORT_DTLS_ROLE_CLIENT ? RTC_DTLS_ROLE_CLIENT : RTC_DTLS_ROLE_SERVER;
 }
 
-int rtc_transport_get_ice_parameters(rtc_transport_t *transport, rtc_ice_parameters_t *out) {
-    if (!transport || !out)
-        return RTC_ERR_INVALID;
-    transport_copy_ice_parameters(transport, out);
+static int tx_get_ice_parameters_impl(rtc_transport_t *transport, void *arg) {
+    transport_copy_ice_parameters(transport, (rtc_ice_parameters_t *)arg);
     return RTC_OK;
 }
 
-int rtc_transport_restart_ice(rtc_transport_t *transport) {
-    if (!transport)
+int rtc_transport_get_ice_parameters(rtc_transport_t *transport, rtc_ice_parameters_t *out) {
+    if (!transport || !out)
         return RTC_ERR_INVALID;
-    if (transport->selected_remote_valid)
-        return RTC_ERR_INVALID;
+    return tx_op_invoke(transport, tx_get_ice_parameters_impl, out);
+}
 
+static int tx_restart_ice_impl(rtc_transport_t *transport, void *arg) {
+    (void)arg;
+    if (atomic_load_explicit(&transport->selected_remote_valid, memory_order_acquire))
+        return RTC_ERR_INVALID;
     rtc_listener_unregister_ufrag(transport->listener, transport->ice_ufrag);
     if (rtc_random_string(transport->ice_ufrag, sizeof(transport->ice_ufrag)) != RTC_OK ||
         rtc_random_string(transport->ice_pwd, sizeof(transport->ice_pwd)) != RTC_OK) {
@@ -408,14 +438,35 @@ int rtc_transport_restart_ice(rtc_transport_t *transport) {
                                        transport_on_packet, transport);
 }
 
+int rtc_transport_restart_ice(rtc_transport_t *transport) {
+    if (!transport)
+        return RTC_ERR_INVALID;
+    return tx_op_invoke(transport, tx_restart_ice_impl, NULL);
+}
+
+static int tx_set_remote_ice_impl(rtc_transport_t *transport, void *arg) {
+    const rtc_ice_parameters_t *remote = (const rtc_ice_parameters_t *)arg;
+    memcpy(transport->remote_ufrag, remote->username_fragment, sizeof(transport->remote_ufrag));
+    memcpy(transport->remote_pwd, remote->password, sizeof(transport->remote_pwd));
+    transport->remote_ice_valid = true;
+    return RTC_OK;
+}
+
 int rtc_transport_set_remote_ice_parameters(rtc_transport_t *transport,
                                             const rtc_ice_parameters_t *remote) {
     if (!transport || !remote || remote->username_fragment[0] == '\0' ||
         remote->password[0] == '\0')
         return RTC_ERR_INVALID;
-    memcpy(transport->remote_ufrag, remote->username_fragment, sizeof(transport->remote_ufrag));
-    memcpy(transport->remote_pwd, remote->password, sizeof(transport->remote_pwd));
-    transport->remote_ice_valid = true;
+    return tx_op_invoke(transport, tx_set_remote_ice_impl, (void *)remote);
+}
+
+static int tx_add_candidate_impl(rtc_transport_t *transport, void *arg) {
+    const rtc_transport_candidate_t *candidate = (const rtc_transport_candidate_t *)arg;
+    int rc =
+        rtc_addr_from_string(&transport->remote_candidate, candidate->address, candidate->port);
+    if (rc != RTC_OK)
+        return rc;
+    transport->remote_candidate_valid = true;
     return RTC_OK;
 }
 
@@ -425,22 +476,15 @@ int rtc_transport_add_remote_candidate(rtc_transport_t *transport,
         return RTC_ERR_INVALID;
     if (strcmp(candidate->protocol, "udp") != 0)
         return RTC_ERR_INVALID;
-    int rc =
-        rtc_addr_from_string(&transport->remote_candidate, candidate->address, candidate->port);
-    if (rc != RTC_OK)
-        return rc;
-    transport->remote_candidate_valid = true;
-    return RTC_OK;
+    return tx_op_invoke(transport, tx_add_candidate_impl, (void *)candidate);
 }
 
-int rtc_transport_start_ice(rtc_transport_t *transport) {
-    if (!transport)
-        return RTC_ERR_INVALID;
+static int tx_start_ice_impl(rtc_transport_t *transport, void *arg) {
+    (void)arg;
     if (transport->ice_mode != RTC_ICE_MODE_FULL)
         return RTC_ERR_INVALID;
-    if (transport->selected_remote_valid)
+    if (atomic_load_explicit(&transport->selected_remote_valid, memory_order_acquire))
         return RTC_OK;
-
     int rc = transport_send_ice_check(transport);
     if (rc != RTC_OK)
         return rc;
@@ -448,14 +492,18 @@ int rtc_transport_start_ice(rtc_transport_t *transport) {
     return RTC_OK;
 }
 
-int rtc_transport_start_dtls(rtc_transport_t *transport) {
+int rtc_transport_start_ice(rtc_transport_t *transport) {
     if (!transport)
         return RTC_ERR_INVALID;
-    if (!transport->selected_remote_valid)
+    return tx_op_invoke(transport, tx_start_ice_impl, NULL);
+}
+
+static int tx_start_dtls_impl(rtc_transport_t *transport, void *arg) {
+    (void)arg;
+    if (!atomic_load_explicit(&transport->selected_remote_valid, memory_order_acquire))
         return RTC_ERR_INVALID;
     if (transport->dtls.state == RTC_DTLS_STATE_CONNECTED)
         return RTC_OK;
-
     int rc = rtc_dtls_handshake(&transport->dtls);
     if (rc == RTC_OK) {
         transport_arm_dtls_timer(transport, 1000);
@@ -464,31 +512,67 @@ int rtc_transport_start_dtls(rtc_transport_t *transport) {
     return rc;
 }
 
-int rtc_transport_get_dtls_parameters(rtc_transport_t *transport, rtc_dtls_parameters_t *out) {
-    if (!transport || !out)
+int rtc_transport_start_dtls(rtc_transport_t *transport) {
+    if (!transport)
         return RTC_ERR_INVALID;
+    return tx_op_invoke(transport, tx_start_dtls_impl, NULL);
+}
+
+static int tx_get_dtls_parameters_impl(rtc_transport_t *transport, void *arg) {
+    rtc_dtls_parameters_t *out = (rtc_dtls_parameters_t *)arg;
     memset(out, 0, sizeof(*out));
     out->role = transport_public_dtls_role(transport->dtls.role);
     memcpy(out->fingerprint, rtc_dtls_get_fingerprint(&transport->dtls), sizeof(out->fingerprint));
     return RTC_OK;
 }
 
-int rtc_transport_get_stats(rtc_transport_t *transport, rtc_transport_stats_t *out) {
+int rtc_transport_get_dtls_parameters(rtc_transport_t *transport, rtc_dtls_parameters_t *out) {
     if (!transport || !out)
         return RTC_ERR_INVALID;
+    return tx_op_invoke(transport, tx_get_dtls_parameters_impl, out);
+}
+
+static int tx_get_stats_impl(rtc_transport_t *transport, void *arg) {
+    rtc_transport_stats_t *out = (rtc_transport_stats_t *)arg;
     memset(out, 0, sizeof(*out));
     out->closed = atomic_load_explicit(&transport->closed, memory_order_acquire);
     out->ice_mode = transport->ice_mode;
-    out->selected_tuple_valid = transport->selected_remote_valid;
-    if (transport->selected_remote_valid)
+    out->selected_tuple_valid =
+        atomic_load_explicit(&transport->selected_remote_valid, memory_order_acquire);
+    if (out->selected_tuple_valid)
         out->selected_remote = transport->selected_remote;
     out->dtls_state = transport_dtls_state(transport->dtls.state);
-    out->srtp_ready = transport->srtp_ready;
+    out->srtp_ready = atomic_load_explicit(&transport->srtp_ready, memory_order_acquire);
     out->packets_received =
         atomic_load_explicit(&transport->packets_received, memory_order_relaxed);
     out->bytes_received = atomic_load_explicit(&transport->bytes_received, memory_order_relaxed);
     out->dtls_packets_received =
         atomic_load_explicit(&transport->dtls_packets_received, memory_order_relaxed);
+    return RTC_OK;
+}
+
+int rtc_transport_get_stats(rtc_transport_t *transport, rtc_transport_stats_t *out) {
+    if (!transport || !out)
+        return RTC_ERR_INVALID;
+    return tx_op_invoke(transport, tx_get_stats_impl, out);
+}
+
+static int tx_close_impl(rtc_transport_t *transport, void *arg) {
+    (void)arg;
+    if (transport->listener) {
+        rtc_listener_unregister_ufrag(transport->listener, transport->ice_ufrag);
+        transport_unregister_ice_txn(transport);
+        if (atomic_load_explicit(&transport->selected_remote_valid, memory_order_acquire))
+            rtc_listener_unregister_tuple(transport->listener, &transport->selected_remote);
+    }
+    transport_cancel_ice_timer(transport);
+    transport_cancel_dtls_timer(transport);
+    if (atomic_load_explicit(&transport->srtp_ready, memory_order_acquire)) {
+        rtc_srtp_close(&transport->srtp_send);
+        rtc_srtp_close(&transport->srtp_recv);
+        atomic_store_explicit(&transport->srtp_ready, false, memory_order_release);
+    }
+    rtc_dtls_close(&transport->dtls);
     return RTC_OK;
 }
 
@@ -498,20 +582,10 @@ void rtc_transport_close(rtc_transport_t *transport) {
     bool was_closed = atomic_exchange_explicit(&transport->closed, true, memory_order_acq_rel);
     if (was_closed)
         return;
-    if (transport->listener) {
-        rtc_listener_unregister_ufrag(transport->listener, transport->ice_ufrag);
-        transport_unregister_ice_txn(transport);
-        if (transport->selected_remote_valid)
-            rtc_listener_unregister_tuple(transport->listener, &transport->selected_remote);
-    }
-    transport_cancel_ice_timer(transport);
-    transport_cancel_dtls_timer(transport);
-    if (transport->srtp_ready) {
-        rtc_srtp_close(&transport->srtp_send);
-        rtc_srtp_close(&transport->srtp_recv);
-        transport->srtp_ready = false;
-    }
-    rtc_dtls_close(&transport->dtls);
+    /* Run teardown on the worker thread so it cannot race packet dispatch
+     * or timer callbacks. Once this returns, no worker-thread code touches
+     * the transport, so the caller may safely free it. */
+    tx_op_invoke(transport, tx_close_impl, NULL);
 }
 
 void rtc_transport_destroy(rtc_transport_t *transport) {
@@ -522,47 +596,91 @@ void rtc_transport_destroy(rtc_transport_t *transport) {
     free(transport);
 }
 
-int rtc_transport_set_dtls_role(rtc_transport_t *transport, rtc_transport_dtls_role_t role) {
-    if (!transport)
-        return RTC_ERR_INVALID;
+static int tx_set_dtls_role_impl(rtc_transport_t *transport, void *arg) {
+    rtc_transport_dtls_role_t role = *(const rtc_transport_dtls_role_t *)arg;
     if (transport->dtls.state != RTC_DTLS_STATE_NEW)
         return RTC_ERR_INVALID;
-
     rtc_dtls_role_t internal_role = transport_internal_dtls_role(role);
     if (transport->dtls.role == internal_role)
         return RTC_OK;
-
     return rtc_dtls_set_role(&transport->dtls, internal_role);
+}
+
+int rtc_transport_set_dtls_role(rtc_transport_t *transport, rtc_transport_dtls_role_t role) {
+    if (!transport)
+        return RTC_ERR_INVALID;
+    return tx_op_invoke(transport, tx_set_dtls_role_impl, &role);
+}
+
+typedef struct {
+    rtc_transport_rtp_fn fn;
+    void *user;
+} tx_on_rtp_args_t;
+
+static int tx_on_rtp_impl(rtc_transport_t *transport, void *arg) {
+    tx_on_rtp_args_t *a = (tx_on_rtp_args_t *)arg;
+    transport->on_rtp = a->fn;
+    transport->on_rtp_user = a->user;
+    return RTC_OK;
 }
 
 void rtc_transport_on_rtp(rtc_transport_t *transport, rtc_transport_rtp_fn fn, void *user) {
     if (!transport)
         return;
-    transport->on_rtp = fn;
-    transport->on_rtp_user = user;
+    tx_on_rtp_args_t args = {fn, user};
+    tx_op_invoke(transport, tx_on_rtp_impl, &args);
+}
+
+typedef struct {
+    rtc_transport_rtcp_fn fn;
+    void *user;
+} tx_on_rtcp_args_t;
+
+static int tx_on_rtcp_impl(rtc_transport_t *transport, void *arg) {
+    tx_on_rtcp_args_t *a = (tx_on_rtcp_args_t *)arg;
+    transport->on_rtcp = a->fn;
+    transport->on_rtcp_user = a->user;
+    return RTC_OK;
 }
 
 void rtc_transport_on_rtcp(rtc_transport_t *transport, rtc_transport_rtcp_fn fn, void *user) {
     if (!transport)
         return;
-    transport->on_rtcp = fn;
-    transport->on_rtcp_user = user;
+    tx_on_rtcp_args_t args = {fn, user};
+    tx_op_invoke(transport, tx_on_rtcp_impl, &args);
+}
+
+typedef struct {
+    rtc_transport_data_fn fn;
+    void *user;
+} tx_on_data_args_t;
+
+static int tx_on_data_impl(rtc_transport_t *transport, void *arg) {
+    tx_on_data_args_t *a = (tx_on_data_args_t *)arg;
+    transport->on_data = a->fn;
+    transport->on_data_user = a->user;
+    return RTC_OK;
 }
 
 void rtc_transport_on_data(rtc_transport_t *transport, rtc_transport_data_fn fn, void *user) {
     if (!transport)
         return;
-    transport->on_data = fn;
-    transport->on_data_user = user;
+    tx_on_data_args_t args = {fn, user};
+    tx_op_invoke(transport, tx_on_data_impl, &args);
 }
 
-int rtc_transport_send_data(rtc_transport_t *transport, const uint8_t *data, size_t len) {
-    if (!transport || !data || transport->dtls.state != RTC_DTLS_STATE_CONNECTED)
+typedef struct {
+    const uint8_t *data;
+    size_t len;
+} tx_send_data_args_t;
+
+static int tx_send_data_impl(rtc_transport_t *transport, void *arg) {
+    tx_send_data_args_t *a = (tx_send_data_args_t *)arg;
+    if (transport->dtls.state != RTC_DTLS_STATE_CONNECTED)
         return RTC_ERR_INVALID;
-    int written = SSL_write(transport->dtls.ssl, data, (int)len);
+    int written = SSL_write(transport->dtls.ssl, a->data, (int)a->len);
     if (written <= 0)
         return RTC_ERR_SSL;
-
     uint8_t buf[2048];
     int pending;
     while ((pending = BIO_read(transport->dtls.wbio, buf, sizeof(buf))) > 0) {
@@ -573,10 +691,17 @@ int rtc_transport_send_data(rtc_transport_t *transport, const uint8_t *data, siz
     return RTC_OK;
 }
 
+int rtc_transport_send_data(rtc_transport_t *transport, const uint8_t *data, size_t len) {
+    if (!transport || !data)
+        return RTC_ERR_INVALID;
+    tx_send_data_args_t args = {data, len};
+    return tx_op_invoke(transport, tx_send_data_impl, &args);
+}
+
 int rtc_transport_send_raw(rtc_transport_t *transport, const uint8_t *data, size_t len) {
     if (!transport || !data || len == 0)
         return RTC_ERR_INVALID;
-    if (!transport->selected_remote_valid)
+    if (!atomic_load_explicit(&transport->selected_remote_valid, memory_order_acquire))
         return RTC_ERR_INVALID;
     return rtc_listener_send_to(transport->listener, data, len, &transport->selected_remote);
 }
@@ -588,7 +713,8 @@ int rtc_transport_send_protected_rtp(rtc_transport_t *transport, const uint8_t *
 int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap) {
     if (!transport || !buf || !len)
         return RTC_ERR_INVALID;
-    if (!transport->srtp_ready || !transport->selected_remote_valid)
+    if (!atomic_load_explicit(&transport->srtp_ready, memory_order_acquire) ||
+        !atomic_load_explicit(&transport->selected_remote_valid, memory_order_acquire))
         return RTC_ERR_INVALID;
 
     int rc = rtc_srtp_protect(&transport->srtp_send, buf, len, buf_cap);
@@ -600,7 +726,8 @@ int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len
 int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap) {
     if (!transport || !buf || !len)
         return RTC_ERR_INVALID;
-    if (!transport->srtp_ready || !transport->selected_remote_valid)
+    if (!atomic_load_explicit(&transport->srtp_ready, memory_order_acquire) ||
+        !atomic_load_explicit(&transport->selected_remote_valid, memory_order_acquire))
         return RTC_ERR_INVALID;
 
     int rc = rtc_srtp_protect_rtcp(&transport->srtp_send, buf, len, buf_cap);

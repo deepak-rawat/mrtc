@@ -94,8 +94,11 @@ Internal / private helpers (`rtc_ice.h`, `rtc_dtls.h`, `rtc_srtp.h`,
 The runtime core is the shared substrate used by both client and routing
 consumers.
 
-- **`rtc_worker_t`** — timer / scheduling shard used by logical
-  transports.
+- **`rtc_worker_t`** — the single event-loop thread for a runtime shard.
+  Owns the I/O poller, the dynamic timer scheduler, and a cross-thread
+  task queue. It drains registered sockets, fires timers, and runs
+  marshalled control / teardown work, so all per-transport protocol
+  state (ICE, DTLS, SRTP) stays single-threaded without per-object locks.
 - **`rtc_listener_t`** — owns a UDP packet I/O socket and demux maps.
   One listener can serve many logical transports on the same local port.
 - **`rtc_transport_t`** — one logical ICE / DTLS / SRTP endpoint over a
@@ -110,29 +113,28 @@ transports.
 
 ### Packet I/O (`rtc_packet_io.h/c`)
 
-Owns a UDP socket and runs a background thread with a platform I/O
-poller. It is a low-level primitive used by `rtc_listener_t`, not a
-peer-connection transport by itself.
+Owns a UDP socket and classifies packets per RFC 7983. It is a *passive*
+low-level primitive used by `rtc_listener_t`: it has no thread and no
+timers of its own. The owning `rtc_worker_t` registers the socket with
+its poller and calls `rtc_packet_io_drain()` when the socket becomes
+readable, so every recv callback fires on the worker loop thread.
 
 - **Socket:** single UDP socket, bound to an ephemeral port
-- **I/O Poller:** `rtc_poller_t` — epoll (Linux), kqueue (macOS),
-  select (Windows)
-- **Background thread:** runs the poller loop, fires timers, dispatches
-  packets
+- **Drain:** `rtc_packet_io_drain()` does one non-blocking batch read
+  (recvmmsg on Linux, recvmsg / recvfrom elsewhere) and dispatches each
+  packet to the recv callback
 - **Packet demux:** classifies incoming packets per RFC 7983 by first
   byte — STUN (0-3), DTLS (20-63), RTP/RTCP (128-191), TURN ChannelData
   (64-79)
-- **Timers:** dynamic scheduler-backed callbacks; runtime transports use
-  worker timers for ICE / DTLS / RTCP flows
 
 Packet flow:
 ```
-Recv:  UDP socket → demux (RFC 7983) → callback(type, data, from_addr)
+Recv:  worker poller → rtc_packet_io_drain() → demux (RFC 7983) → callback(type, data, from)
 Send:  rtc_packet_io_send(data, dest) → UDP sendto (thread-safe)
 ```
 
-Key functions: `rtc_packet_io_init_ex()`, `rtc_packet_io_send()`,
-`rtc_packet_io_get_local_addr()`.
+Key functions: `rtc_packet_io_init_ex()`, `rtc_packet_io_drain()`,
+`rtc_packet_io_send()`, `rtc_packet_io_get_local_addr()`.
 
 ### ICE / STUN
 
@@ -324,16 +326,23 @@ transport-cc is negotiated and surfaces the result via
 
 ## Threading Model
 
-- **Main thread:** API calls into runtime primitives, frame capture, UI
-  rendering.
-- **Listener packet I/O thread:** socket I/O, RFC 7983 demux, listener
-  route dispatch.
-- **Worker timers:** logical transport ICE checks, DTLS retransmission,
-  application-owned RTCP / TWCC timers scheduled on the worker.
+The worker owns the only background thread per runtime shard; it is the
+sole owner of all per-transport protocol state.
 
-Packet I/O uses the dynamic timer scheduler for low-level callbacks.
-Runtime transports use worker timers and listener route maps rather than
-peer-owned packet I/O timers.
+- **Main / app thread:** API calls into runtime primitives, frame
+  capture, UI rendering. Transport control, query, and teardown calls
+  are marshalled onto the worker thread (synchronously) so the caller
+  never touches shared ICE / DTLS / SRTP state directly.
+- **Worker loop thread:** drains the listener socket, runs RFC 7983
+  demux and route dispatch, fires timers (ICE checks, DTLS
+  retransmission, application-owned RTCP / TWCC), and executes
+  marshalled tasks (control ops, socket (de)registration, teardown).
+
+Because packet dispatch, timers, and control/teardown all run on the
+worker thread, transport state needs no per-object locks. The only
+lock-free cross-thread reads are on the hot RTP/RTCP send path, which
+checks the atomic published flags `selected_remote_valid` and
+`srtp_ready` before sending.
 
 ## Tests
 

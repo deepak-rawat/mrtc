@@ -84,8 +84,10 @@ static void router_on_rtp(const rtc_rtp_packet_t *pkt, void *user) {
 static void router_transport_destroy(rtc_router_transport_t *ctx) {
     if (!ctx)
         return;
-    if (ctx->transport)
-        rtc_transport_on_rtp(ctx->transport, NULL, NULL);
+    /* The transport is owned by the caller and, per the teardown
+     * convention, destroyed before the router. Once destroyed it no
+     * longer dispatches RTP, so we must NOT touch it here (doing so would
+     * be a use-after-free). We only release the router-side context. */
     if (ctx->ready) {
         rtc_mutex_destroy(&ctx->mutex);
         rtc_u32_map_free(&ctx->producers_by_ssrc);

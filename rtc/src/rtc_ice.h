@@ -85,7 +85,7 @@ int rtc_ice_add_remote_candidate(rtc_ice_agent_t *agent, const rtc_ice_candidate
  * Kick off connectivity checks (non-blocking).
  * Sends the first STUN binding request and sets state to CHECKING. The caller
  * is responsible for scheduling periodic rtc_ice_send_check() retries (e.g.
- * via rtc_packet_io_add_timer) until state transitions to CONNECTED or
+ * via a worker timer) until state transitions to CONNECTED or
  * rtc_ice_check_deadline_passed() returns true.
  *
  * STUN binding responses are processed asynchronously through the transport's

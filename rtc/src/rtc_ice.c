@@ -357,7 +357,7 @@ int rtc_ice_connect(rtc_ice_agent_t *agent) {
                  agent->remote_candidate_count);
 
     /* Fire the first check synchronously; subsequent retries are scheduled by
-     * the caller via rtc_packet_io_add_timer + rtc_ice_send_check. The
+     * the caller (e.g. via rtc_worker_add_timer) + rtc_ice_send_check. The
      * transport's recv callback dispatches BINDING_RESPONSE to
      * rtc_ice_handle_stun, which transitions state to CONNECTED. */
     return rtc_ice_send_check(agent);

@@ -1,12 +1,14 @@
 /*
  * RTC worker lifecycle tests.
  */
+#include <rtc/rtc.h>
 #include <rtc/rtc_worker.h>
 
 #include "rtc_worker_internal.h"
 #include "test_harness.h"
 
 #include <stdatomic.h>
+#include <string.h>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -120,12 +122,112 @@ TEST(worker_rejects_timer_after_close) {
     rtc_worker_destroy(worker);
 }
 
+static void increment_cb(void *user) {
+    _Atomic int *value = (_Atomic int *)user;
+    atomic_fetch_add_explicit(value, 1, memory_order_relaxed);
+}
+
+TEST(worker_post_runs) {
+    rtc_worker_t *worker = rtc_worker_create(NULL);
+    ASSERT(worker != NULL);
+
+    _Atomic int ran = 0;
+    ASSERT_EQ(rtc_worker_post(worker, increment_cb, &ran), RTC_OK);
+    ASSERT(wait_for_atomic(&ran, 1, 1000));
+
+    rtc_worker_destroy(worker);
+}
+
+TEST(worker_invoke_sync) {
+    rtc_worker_t *worker = rtc_worker_create(NULL);
+    ASSERT(worker != NULL);
+
+    /* invoke must block until the callback has executed on the loop. */
+    _Atomic int ran = 0;
+    ASSERT_EQ(rtc_worker_invoke(worker, increment_cb, &ran), RTC_OK);
+    ASSERT_EQ(atomic_load_explicit(&ran, memory_order_relaxed), 1);
+
+    rtc_worker_destroy(worker);
+}
+
+static rtc_worker_t *g_reentrant_worker;
+
+static void reentrant_outer_cb(void *user) {
+    /* Already on the loop thread: a nested invoke must run inline rather
+     * than deadlock waiting for the loop to drain a queued task. */
+    rtc_worker_invoke(g_reentrant_worker, increment_cb, user);
+}
+
+TEST(worker_invoke_reentrant) {
+    rtc_worker_t *worker = rtc_worker_create(NULL);
+    ASSERT(worker != NULL);
+    g_reentrant_worker = worker;
+
+    _Atomic int ran = 0;
+    ASSERT_EQ(rtc_worker_invoke(worker, reentrant_outer_cb, &ran), RTC_OK);
+    ASSERT_EQ(atomic_load_explicit(&ran, memory_order_relaxed), 1);
+
+    rtc_worker_destroy(worker);
+}
+
+static _Atomic int g_io_count;
+
+static void io_ready_cb(rtc_socket_t fd, void *user) {
+    (void)user;
+    uint8_t buf[64];
+    struct sockaddr_storage from;
+    socklen_t fl = sizeof(from);
+    ssize_t n = recvfrom(fd, (char *)buf, sizeof(buf), 0, (struct sockaddr *)&from, &fl);
+    if (n > 0)
+        atomic_fetch_add_explicit(&g_io_count, 1, memory_order_relaxed);
+}
+
+TEST(worker_io_dispatch) {
+    rtc_worker_t *worker = rtc_worker_create(NULL);
+    ASSERT(worker != NULL);
+
+    rtc_socket_t s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ASSERT(s != RTC_INVALID_SOCKET);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    ASSERT_EQ(bind(s, (struct sockaddr *)&addr, sizeof(addr)), 0);
+    socklen_t alen = sizeof(addr);
+    ASSERT_EQ(getsockname(s, (struct sockaddr *)&addr, &alen), 0);
+    rtc_set_nonblocking(s);
+
+    g_io_count = 0;
+    ASSERT_EQ(rtc_worker_add_io(worker, s, io_ready_cb, NULL), RTC_OK);
+
+    rtc_socket_t sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ASSERT(sender != RTC_INVALID_SOCKET);
+    uint8_t b = 1;
+    ASSERT_EQ((int)sendto(sender, (const char *)&b, 1, 0, (struct sockaddr *)&addr, sizeof(addr)),
+              1);
+
+    /* The worker thread polls the socket and runs io_ready_cb. */
+    ASSERT(wait_for_atomic(&g_io_count, 1, 1000));
+
+    ASSERT_EQ(rtc_worker_remove_io(worker, s), RTC_OK);
+    rtc_close_socket(sender);
+    rtc_close_socket(s);
+    rtc_worker_destroy(worker);
+}
+
 int main(void) {
+    rtc_init();
     RUN_TEST(worker_create_destroy);
     RUN_TEST(worker_close_idempotent);
     RUN_TEST(worker_invalid_stats_args);
     RUN_TEST(worker_timer_fires);
     RUN_TEST(worker_timer_cancel);
     RUN_TEST(worker_rejects_timer_after_close);
+    RUN_TEST(worker_post_runs);
+    RUN_TEST(worker_invoke_sync);
+    RUN_TEST(worker_invoke_reentrant);
+    RUN_TEST(worker_io_dispatch);
+    rtc_cleanup();
     TEST_SUMMARY();
 }

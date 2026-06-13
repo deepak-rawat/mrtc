@@ -29,6 +29,10 @@ static uint8_t g_recv_buf[256];
 static rtc_mutex_t g_mutex;
 static rtc_cond_t g_cond;
 
+/* Passive packet I/O owns no thread; the test drives reception by
+ * draining this socket from wait_for_recv(). */
+static rtc_packet_io_t *g_drain_target;
+
 static void test_recv_callback(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                                const rtc_addr_t *from, void *user) {
     (void)from;
@@ -43,45 +47,19 @@ static void test_recv_callback(rtc_pkt_type_t type, const uint8_t *data, size_t 
     rtc_mutex_unlock(&g_mutex);
 }
 
-/* Wait for recv_count to reach target, with timeout */
+/* Drain the socket under test until recv_count reaches target or timeout.
+ * The recv callback fires synchronously inside rtc_packet_io_drain(). */
 static bool wait_for_recv(int target, int timeout_ms) {
-    rtc_mutex_lock(&g_mutex);
     uint64_t deadline = rtc_time_ms() + (uint64_t)timeout_ms;
-    while (g_recv_count < target) {
-        uint64_t now = rtc_time_ms();
-        if (now >= deadline) {
-            rtc_mutex_unlock(&g_mutex);
+    for (;;) {
+        if (g_drain_target)
+            rtc_packet_io_drain(g_drain_target);
+        if (g_recv_count >= target)
+            return true;
+        if (rtc_time_ms() >= deadline)
             return false;
-        }
-        rtc_cond_wait_timeout(&g_cond, &g_mutex, (uint32_t)(deadline - now));
+        SLEEP_MS(2);
     }
-    rtc_mutex_unlock(&g_mutex);
-    return true;
-}
-
-static _Atomic int g_timer_count;
-
-static void test_timer_callback(void *user) {
-    (void)user;
-    rtc_mutex_lock(&g_mutex);
-    g_timer_count++;
-    rtc_cond_signal(&g_cond);
-    rtc_mutex_unlock(&g_mutex);
-}
-
-static bool wait_for_timer(int target, int timeout_ms) {
-    rtc_mutex_lock(&g_mutex);
-    uint64_t deadline = rtc_time_ms() + (uint64_t)timeout_ms;
-    while (g_timer_count < target) {
-        uint64_t now = rtc_time_ms();
-        if (now >= deadline) {
-            rtc_mutex_unlock(&g_mutex);
-            return false;
-        }
-        rtc_cond_wait_timeout(&g_cond, &g_mutex, (uint32_t)(deadline - now));
-    }
-    rtc_mutex_unlock(&g_mutex);
-    return true;
 }
 
 /* Helper: get the transport's local address for sending to self.
@@ -109,7 +87,6 @@ TEST(transport_init_close) {
     int rc = rtc_packet_io_init(&t, NULL, NULL);
     ASSERT_EQ(rc, RTC_OK);
     ASSERT(rtc_packet_io_get_socket(&t) != RTC_INVALID_SOCKET);
-    ASSERT(t.running);
 
     /* Verify socket is bound (has a port). transport is AF_INET6
      * dual-stack; sin_port and sin6_port share an offset so reading via
@@ -124,7 +101,6 @@ TEST(transport_init_close) {
     printf("    transport bound to port %u\n", port);
 
     rtc_packet_io_close(&t);
-    ASSERT(!t.running);
 
     printf("    init -> close lifecycle OK\n");
 }
@@ -134,6 +110,7 @@ TEST(transport_recv_packet) {
     g_recv_count = 0;
     int rc = rtc_packet_io_init(&t, test_recv_callback, NULL);
     ASSERT_EQ(rc, RTC_OK);
+    g_drain_target = &t;
 
     /* Send a STUN-like packet (first byte 0x00) to transport's own port */
     rtc_addr_t self;
@@ -163,6 +140,7 @@ TEST(transport_classify_types) {
     rtc_packet_io_t t;
     int rc = rtc_packet_io_init(&t, test_recv_callback, NULL);
     ASSERT_EQ(rc, RTC_OK);
+    g_drain_target = &t;
 
     rtc_addr_t self;
     get_loopback_addr(&t, &self);
@@ -196,46 +174,6 @@ TEST(transport_classify_types) {
     rtc_packet_io_close(&t);
 }
 
-TEST(transport_timer_fires) {
-    rtc_packet_io_t t;
-    int rc = rtc_packet_io_init(&t, NULL, NULL);
-    ASSERT_EQ(rc, RTC_OK);
-
-    g_timer_count = 0;
-    uint64_t now = rtc_time_ms();
-    rtc_timer_id_t id = rtc_packet_io_add_timer(&t, now + 100, test_timer_callback, NULL);
-    ASSERT(id != RTC_TIMER_HANDLE_INVALID);
-
-    /* Wait for timer (should fire within ~200ms) */
-    bool fired = wait_for_timer(1, 500);
-    ASSERT(fired);
-    ASSERT_EQ(g_timer_count, 1);
-
-    printf("    timer fired after ~100ms\n");
-    rtc_packet_io_close(&t);
-}
-
-TEST(transport_timer_cancel) {
-    rtc_packet_io_t t;
-    int rc = rtc_packet_io_init(&t, NULL, NULL);
-    ASSERT_EQ(rc, RTC_OK);
-
-    g_timer_count = 0;
-    uint64_t now = rtc_time_ms();
-    rtc_timer_id_t id = rtc_packet_io_add_timer(&t, now + 100, test_timer_callback, NULL);
-    ASSERT(id != RTC_TIMER_HANDLE_INVALID);
-
-    /* Cancel immediately */
-    rtc_packet_io_cancel_timer(&t, id);
-
-    /* Wait longer than the timer would have fired */
-    SLEEP_MS(300);
-    ASSERT_EQ(g_timer_count, 0);
-
-    printf("    cancelled timer did not fire\n");
-    rtc_packet_io_close(&t);
-}
-
 TEST(transport_send_to_remote) {
     rtc_packet_io_t sender, receiver;
     g_recv_count = 0;
@@ -243,6 +181,7 @@ TEST(transport_send_to_remote) {
     ASSERT_EQ(rc, RTC_OK);
     rc = rtc_packet_io_init(&receiver, test_recv_callback, NULL);
     ASSERT_EQ(rc, RTC_OK);
+    g_drain_target = &receiver;
 
     /* Get receiver's loopback address */
     rtc_addr_t recv_addr;
@@ -273,6 +212,7 @@ TEST(transport_classify_rtcp) {
     rtc_packet_io_t t;
     int rc = rtc_packet_io_init(&t, test_recv_callback, NULL);
     ASSERT_EQ(rc, RTC_OK);
+    g_drain_target = &t;
 
     rtc_addr_t self;
     get_loopback_addr(&t, &self);
@@ -368,6 +308,7 @@ TEST(transport_v4_sender_seen_as_v4) {
     g_recv_from_family = -1;
     int rc = rtc_packet_io_init(&t, family_capturing_recv, NULL);
     ASSERT_EQ(rc, RTC_OK);
+    g_drain_target = &t;
 
     /* Read bound port via sockaddr_storage. */
     struct sockaddr_storage local_ss;
@@ -411,6 +352,7 @@ TEST(transport_v6_sender_seen_as_v6) {
     g_recv_from_family = -1;
     int rc = rtc_packet_io_init(&t, family_capturing_recv, NULL);
     ASSERT_EQ(rc, RTC_OK);
+    g_drain_target = &t;
 
     struct sockaddr_storage local_ss;
     socklen_t llen = sizeof(local_ss);
@@ -490,6 +432,7 @@ TEST(transport_stats_counters) {
     g_recv_count = 0;
     int rc = rtc_packet_io_init(&t, test_recv_callback, NULL);
     ASSERT_EQ(rc, RTC_OK);
+    g_drain_target = &t;
 
     /* Send a packet to ourselves. */
     rtc_addr_t self;
@@ -562,6 +505,7 @@ TEST(transport_recv_burst) {
     g_recv_count = 0;
     int rc = rtc_packet_io_init(&t, test_recv_callback, NULL);
     ASSERT_EQ(rc, RTC_OK);
+    g_drain_target = &t;
 
     rtc_addr_t self;
     get_loopback_addr(&t, &self);
@@ -613,8 +557,6 @@ int main(void) {
     RUN_TEST(transport_init_close);
     RUN_TEST(transport_recv_packet);
     RUN_TEST(transport_classify_types);
-    RUN_TEST(transport_timer_fires);
-    RUN_TEST(transport_timer_cancel);
     RUN_TEST(transport_send_to_remote);
     RUN_TEST(transport_classify_rtcp);
     RUN_TEST(transport_v6_dualstack_socket);
