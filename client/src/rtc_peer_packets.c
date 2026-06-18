@@ -25,8 +25,8 @@ static struct rtc_rtp_receiver *demux_rtp_receiver(rtc_peer_connection_t *pc,
 
     for (int i = 0; i < pc->transceiver_count; i++) {
         struct rtc_rtp_receiver *rx = &pc->transceivers[i].receiver;
-        if (rx->active && rx->on_frame && rx->codec.payload_type == pkt->header.payload_type) {
-            rx->ssrc = pkt->header.ssrc;
+        if (rtc_rtp_recv_stream_can_receive(rx->stream, pkt->header.payload_type)) {
+            rtc_rtp_recv_stream_set_ssrc(rx->stream, pkt->header.ssrc);
             rtc_u32_map_set(&pc->recv_map, pkt->header.ssrc, rx);
             return rx;
         }
@@ -60,12 +60,8 @@ void peer_handle_plain_rtp(rtc_peer_connection_t *pc, const rtc_rtp_packet_t *pk
         return;
 
     struct rtc_rtp_receiver *r = demux_rtp_receiver(pc, pkt);
-    if (r) {
-        rtc_rtcp_stats_on_rtp_recv(&r->rtcp_stats, pkt->header.seq, pkt->header.timestamp,
-                                   pkt->header.ssrc, r->codec.clock_rate);
-        r->on_frame(pkt->payload, pkt->payload_len, pkt->header.seq, pkt->header.timestamp,
-                    pkt->header.ssrc, pkt->header.marker, r->on_frame_user);
-    }
+    if (r)
+        rtc_rtp_recv_stream_on_packet(r->stream, pkt);
 
 #ifdef MRTC_ENABLE_TWCC
     record_twcc_arrival(pc, pkt);
@@ -81,7 +77,7 @@ static void handle_rtcp_sr(rtc_peer_connection_t *pc, const uint8_t *buf, size_t
     struct rtc_rtp_receiver *r =
         (struct rtc_rtp_receiver *)rtc_u32_map_get(&pc->recv_map, rtcp.sender_ssrc);
     if (r)
-        rtc_rtcp_stats_on_sr_recv(&r->rtcp_stats, &rtcp.sr);
+        rtc_rtp_recv_stream_on_sr(r->stream, &rtcp.sr);
 }
 
 static void handle_rtcp_rr(rtc_peer_connection_t *pc, const uint8_t *buf, size_t pkt_len) {
@@ -102,9 +98,8 @@ static void handle_rtcp_rr(rtc_peer_connection_t *pc, const uint8_t *buf, size_t
         /* Route to per-sender rate controller via send_map */
         struct rtc_rtp_sender *sender =
             (struct rtc_rtp_sender *)rtc_u32_map_get(&pc->send_map, rr->ssrc);
-        if (sender && sender->rate_ctrl) {
-            rtc_rate_control_on_rtcp_rr(sender->rate_ctrl, rr->fraction_lost, rtt_ms,
-                                        (int)rr->jitter);
+        if (sender && rtc_rtp_send_stream_on_rr(sender->stream, rr, rtt_ms)) {
+            continue;
         } else if (pc->rate_ctrl) {
             rtc_rate_control_on_rtcp_rr(pc->rate_ctrl, rr->fraction_lost, rtt_ms, (int)rr->jitter);
         }
@@ -121,7 +116,7 @@ static void handle_rtcp_nack(rtc_peer_connection_t *pc, const uint8_t *buf, size
     struct rtc_rtp_sender *sender =
         (struct rtc_rtp_sender *)rtc_u32_map_get(&pc->send_map, nack.media_ssrc);
     if (sender)
-        rtc_rtp_sender_handle_nack(sender, nack.lost_seqs, nack.lost_count);
+        rtc_rtp_send_stream_handle_nack(sender->stream, nack.lost_seqs, nack.lost_count);
 }
 
 #ifdef MRTC_ENABLE_TWCC
@@ -165,7 +160,7 @@ static void handle_rtcp_psfb(rtc_peer_connection_t *pc, uint8_t fmt, const uint8
     struct rtc_rtp_sender *sender =
         (struct rtc_rtp_sender *)rtc_u32_map_get(&pc->send_map, media_ssrc);
     if (sender)
-        rtc_rtp_sender_handle_pli(sender);
+        rtc_rtp_send_stream_handle_pli(sender->stream);
 }
 
 void peer_handle_plain_rtcp(rtc_peer_connection_t *pc, const uint8_t *buf, size_t pkt_len) {
@@ -209,8 +204,8 @@ void peer_rtcp_timer(void *user) {
     /* Build and send RTCP for each active transceiver */
     for (int i = 0; i < pc->transceiver_count; i++) {
         struct rtc_rtp_transceiver *t = &pc->transceivers[i];
-        rtc_rtp_sender_emit_sr_logical(&t->sender, pc->runtime_transport);
-        rtc_rtp_receiver_emit_rr_logical(&t->receiver, pc->runtime_transport);
+        rtc_rtp_send_stream_emit_sr(t->sender.stream, pc->runtime_transport);
+        rtc_rtp_recv_stream_emit_rr(t->receiver.stream, pc->runtime_transport);
     }
 
     /* Re-arm timer */

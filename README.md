@@ -76,6 +76,12 @@ The `rtc/` component produces two static libraries:
   WebRTC-style `RTCPeerConnection` facade (tracks, data channels,
   stats). Links `libmrtc` publicly.
 
+The client facade keeps the public WebRTC-style sender/receiver APIs stable,
+while RTP/RTCP sender and receiver protocol state is implemented by the low-level
+rtc RTP stream API. This keeps packet accounting, NACK/PLI feedback handling, and
+SR/RR emission in the rtc protocol layer without requiring applications to use
+those stream helpers directly.
+
 ## ICE / NAT Traversal
 
 Local host candidates are gathered from all active non-loopback interfaces and

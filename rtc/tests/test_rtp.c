@@ -11,7 +11,37 @@
  */
 #include <rtc/rtc.h>
 #include "rtc/rtc_rtp.h"
+#include "rtc/rtc_rtp_stream.h"
 #include "test_harness.h"
+
+static int g_frame_count;
+static uint16_t g_frame_seq;
+static uint32_t g_frame_ssrc;
+static int g_nack_count;
+static int g_pli_count;
+
+static void stream_on_frame(const uint8_t *payload, size_t len, uint16_t seq, uint32_t timestamp,
+                            uint32_t ssrc, bool marker, void *user) {
+    (void)payload;
+    (void)len;
+    (void)timestamp;
+    (void)marker;
+    (void)user;
+    g_frame_count++;
+    g_frame_seq = seq;
+    g_frame_ssrc = ssrc;
+}
+
+static void stream_on_nack(const uint16_t *lost_seqs, int count, void *user) {
+    (void)lost_seqs;
+    (void)user;
+    g_nack_count += count;
+}
+
+static void stream_on_pli(void *user) {
+    (void)user;
+    g_pli_count++;
+}
 
 TEST(rtp_build_basic) {
     uint8_t payload[] = "Hello RTP";
@@ -135,6 +165,61 @@ TEST(rtp_parse_too_short) {
     printf("    correctly rejected %zu-byte packet\n", sizeof(short_data));
 }
 
+TEST(rtp_recv_stream_on_packet) {
+    g_frame_count = 0;
+    g_frame_seq = 0;
+    g_frame_ssrc = 0;
+
+    rtc_rtp_recv_stream_t *receiver = rtc_rtp_recv_stream_create(&(rtc_rtp_recv_stream_config_t){
+        .payload_type = 96,
+        .clock_rate = 90000,
+        .local_ssrc = 0x11111111,
+    });
+    ASSERT(receiver != NULL);
+    rtc_rtp_recv_stream_set_active(receiver, true);
+    rtc_rtp_recv_stream_on_frame(receiver, stream_on_frame, NULL);
+
+    uint8_t payload[] = {0x01, 0x02, 0x03};
+    rtc_rtp_packet_t pkt;
+    ASSERT_EQ(rtc_rtp_build(&pkt, 96, 55, 9000, 0x22222222, true, payload, sizeof(payload)),
+              RTC_OK);
+    rtc_rtp_recv_stream_on_packet(receiver, &pkt);
+
+    ASSERT_EQ(g_frame_count, 1);
+    ASSERT_EQ(g_frame_seq, 55);
+    ASSERT_EQ(g_frame_ssrc, 0x22222222u);
+    const rtc_rtcp_stats_t *stats = rtc_rtp_recv_stream_stats(receiver);
+    ASSERT_EQ(stats->packets_received, 1);
+    ASSERT_EQ(stats->remote_ssrc, 0x22222222u);
+
+    rtc_rtp_recv_stream_destroy(receiver);
+    printf("    receive stream: stats updated and frame callback fired\n");
+}
+
+TEST(rtp_send_stream_feedback) {
+    g_nack_count = 0;
+    g_pli_count = 0;
+
+    rtc_rtp_send_stream_t *sender = rtc_rtp_send_stream_create(&(rtc_rtp_send_stream_config_t){
+        .payload_type = 96,
+        .clock_rate = 90000,
+    });
+    ASSERT(sender != NULL);
+    rtc_rtp_send_stream_on_nack(sender, stream_on_nack, NULL);
+    rtc_rtp_send_stream_on_pli(sender, stream_on_pli, NULL);
+
+    uint16_t lost[] = {10, 11, 12};
+    rtc_rtp_send_stream_handle_nack(sender, lost, 3);
+    ASSERT_EQ(g_nack_count, 3);
+
+    rtc_rtp_send_stream_handle_pli(sender);
+    rtc_rtp_send_stream_handle_pli(sender);
+    ASSERT_EQ(g_pli_count, 1);
+
+    rtc_rtp_send_stream_destroy(sender);
+    printf("    send stream: NACK notify + PLI rate limit OK\n");
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  RTP Component Tests\n");
@@ -148,6 +233,8 @@ int main(void) {
     RUN_TEST(rtp_roundtrip);
     RUN_TEST(rtp_session_tracking);
     RUN_TEST(rtp_parse_too_short);
+    RUN_TEST(rtp_recv_stream_on_packet);
+    RUN_TEST(rtp_send_stream_feedback);
 
     rtc_cleanup();
     TEST_SUMMARY();

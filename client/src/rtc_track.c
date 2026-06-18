@@ -13,70 +13,8 @@
 
 int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t len,
                         uint32_t samples, bool marker) {
-    if (!sender || !sender->active)
-        return RTC_ERR_INVALID;
-    if (!sender->transport)
-        return RTC_ERR_INVALID;
-    /* setParameters({active:false}) suspends transmission. Return OK so
-     * callers can keep feeding frames without treating it as an error. */
-    if (!sender->send_active)
-        return RTC_OK;
-
-    /* Build RTP packet */
-    rtc_rtp_packet_t pkt;
-    int rc;
-#ifdef MRTC_ENABLE_TWCC
-    uint16_t twcc_seq = 0;
-    bool tagged = (sender->twcc && sender->twcc_ext_id != 0);
-    if (tagged) {
-        rtc_twcc_sender_t *twcc = (rtc_twcc_sender_t *)sender->twcc;
-        twcc_seq = atomic_fetch_add(&twcc->next_seq, 1);
-        rtc_rtp_ext_t exts[1];
-        rtc_rtp_ext_make_transport_cc(&exts[0], sender->twcc_ext_id, twcc_seq);
-        rc = rtc_rtp_session_send_with_ext(&sender->rtp_session, &pkt, exts, 1, payload, len,
-                                           samples, marker);
-    } else {
-        rc = rtc_rtp_session_send(&sender->rtp_session, &pkt, payload, len, samples, marker);
-    }
-#else
-    rc = rtc_rtp_session_send(&sender->rtp_session, &pkt, payload, len, samples, marker);
-#endif
-    if (rc != RTC_OK)
-        return rc;
-
-    /* Update RTCP sender stats */
-    rtc_rtcp_stats_on_rtp_send(&sender->rtcp_stats, pkt.header.timestamp, len);
-
-    size_t pkt_len = pkt.buf_len;
-    rc = rtc_transport_send_rtp(sender->transport, pkt.buf, &pkt_len, sizeof(pkt.buf));
-    if (rc != RTC_OK)
-        return rc;
-
-    /* Record send-time + wire size in TWCC sender ring */
-#ifdef MRTC_ENABLE_TWCC
-    if (tagged) {
-        rtc_twcc_sender_t *twcc = (rtc_twcc_sender_t *)sender->twcc;
-        rtc_twcc_sent_pkt_t *e = &twcc->ring[twcc_seq & (RTC_TWCC_SENDER_RING - 1)];
-        e->seq = twcc_seq;
-        e->size = (uint16_t)pkt_len;
-        e->send_time_us = rtc_time_us();
-        e->used = true;
-    }
-#endif
-
-    /* Store post-SRTP packet in NACK buffer for retransmission.
-     * Stash the TWCC seq (if any) so retransmits can invalidate the
-     * matching slot in the TWCC sender ring; otherwise BWE would pair
-     * the retransmit's arrival time with the original's send time. */
-    if (sender->nack_buf) {
-#ifdef MRTC_ENABLE_TWCC
-        rtc_nack_buf_store(sender->nack_buf, pkt.buf, pkt_len, pkt.header.seq, tagged, twcc_seq);
-#else
-        rtc_nack_buf_store(sender->nack_buf, pkt.buf, pkt_len, pkt.header.seq, false, 0);
-#endif
-    }
-
-    return RTC_OK;
+    return sender ? rtc_rtp_send_stream_send(sender->stream, payload, len, samples, marker)
+                  : RTC_ERR_INVALID;
 }
 
 const rtc_codec_t *rtc_rtp_sender_get_codec(const rtc_rtp_sender_t *sender) {
@@ -88,47 +26,21 @@ rtc_kind_t rtc_rtp_sender_kind(const rtc_rtp_sender_t *sender) {
 }
 
 int rtc_rtp_sender_get_target_bitrate(const rtc_rtp_sender_t *sender) {
-#ifdef MRTC_ENABLE_RATE_CONTROL
-    if (!sender || !sender->rate_ctrl)
-        return sender && sender->max_bitrate_bps ? (int)(sender->max_bitrate_bps / 1000) : 0;
-    int kbps = rtc_rate_control_get_bitrate(sender->rate_ctrl);
-    if (sender->max_bitrate_bps) {
-        int cap_kbps = (int)(sender->max_bitrate_bps / 1000);
-        if (cap_kbps > 0 && kbps > cap_kbps)
-            kbps = cap_kbps;
-    }
-    return kbps;
-#else
-    if (sender && sender->max_bitrate_bps)
-        return (int)(sender->max_bitrate_bps / 1000);
-    (void)sender;
-    return 0;
-#endif
+    return sender ? rtc_rtp_send_stream_get_target_bitrate(sender->stream) : 0;
 }
 
 bool rtc_rtp_sender_should_keyframe(rtc_rtp_sender_t *sender) {
-#ifdef MRTC_ENABLE_RATE_CONTROL
-    if (!sender || !sender->rate_ctrl)
-        return false;
-    return rtc_rate_control_should_keyframe(sender->rate_ctrl);
-#else
-    (void)sender;
-    return false;
-#endif
+    return sender ? rtc_rtp_send_stream_should_keyframe(sender->stream) : false;
 }
 
 void rtc_rtp_sender_on_nack(rtc_rtp_sender_t *sender, rtc_on_nack_fn fn, void *user) {
-    if (!sender)
-        return;
-    sender->on_nack = fn;
-    sender->on_nack_user = user;
+    if (sender)
+        rtc_rtp_send_stream_on_nack(sender->stream, fn, user);
 }
 
 void rtc_rtp_sender_on_pli(rtc_rtp_sender_t *sender, rtc_on_pli_fn fn, void *user) {
-    if (!sender)
-        return;
-    sender->on_pli = fn;
-    sender->on_pli_user = user;
+    if (sender)
+        rtc_rtp_send_stream_on_pli(sender->stream, fn, user);
 }
 
 int rtc_rtp_sender_get_parameters(const rtc_rtp_sender_t *sender, rtc_rtp_send_params_t *params) {
@@ -136,85 +48,22 @@ int rtc_rtp_sender_get_parameters(const rtc_rtp_sender_t *sender, rtc_rtp_send_p
         return RTC_ERR_INVALID;
     memset(params, 0, sizeof(*params));
     params->encoding_count = 1;
-    params->encodings[0].active = sender->send_active;
-    params->encodings[0].max_bitrate_bps = sender->max_bitrate_bps;
+    params->encodings[0].active = rtc_rtp_send_stream_send_active(sender->stream);
+    params->encodings[0].max_bitrate_bps = rtc_rtp_send_stream_max_bitrate(sender->stream);
     return RTC_OK;
 }
 
 int rtc_rtp_sender_set_parameters(rtc_rtp_sender_t *sender, const rtc_rtp_send_params_t *params) {
     if (!sender || !params || params->encoding_count != 1)
         return RTC_ERR_INVALID;
-    sender->send_active = params->encodings[0].active;
-    sender->max_bitrate_bps = params->encodings[0].max_bitrate_bps;
+    rtc_rtp_send_stream_set_send_active(sender->stream, params->encodings[0].active);
+    rtc_rtp_send_stream_set_max_bitrate(sender->stream, params->encodings[0].max_bitrate_bps);
     return RTC_OK;
 }
 
-/* Internal handlers called by the peer connection on RTCP feedback. */
-
-/* Minimum interval between honored PLIs from the same remote (ms). Protects
- * the encoder against keyframe storms from a buggy or hostile peer. */
-#define RTC_PLI_MIN_INTERVAL_MS 500
-
-void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_seqs, int count) {
-    if (!sender || !lost_seqs || count <= 0)
-        return;
-    if (!sender->nack_buf || !sender->transport)
-        goto notify;
-
-    for (int i = 0; i < count; i++) {
-        const uint8_t *pkt;
-        size_t pkt_len;
-        uint16_t twcc_seq = 0;
-        if (!rtc_nack_buf_retransmit(sender->nack_buf, lost_seqs[i], &pkt, &pkt_len, &twcc_seq))
-            continue; /* not in buffer or per-seq retransmit cap hit */
-        rtc_transport_send_protected_rtp(sender->transport, pkt, pkt_len);
-#ifdef MRTC_ENABLE_TWCC
-        /* The retransmit carries the original TWCC seq. Drop it from the
-         * sender ring so handle_rtcp_twcc skips this seq when feedback
-         * arrives — otherwise BWE pairs the retransmit's arrival time
-         * with the original's send time and underestimates bandwidth. */
-        if (twcc_seq != 0 && sender->twcc) {
-            rtc_twcc_sender_t *twcc = (rtc_twcc_sender_t *)sender->twcc;
-            rtc_twcc_sender_invalidate(twcc, twcc_seq);
-        }
-#else
-        (void)twcc_seq;
-#endif
-    }
-
-notify:
-    /* Notify application callback */
-    if (sender->on_nack)
-        sender->on_nack(lost_seqs, count, sender->on_nack_user);
-}
-
-void rtc_rtp_sender_handle_pli(rtc_rtp_sender_t *sender) {
-    if (!sender)
-        return;
-
-    /* Rate-limit: a peer can legitimately request a keyframe, but at most
-     * once per RTC_PLI_MIN_INTERVAL_MS. Otherwise the encoder would be
-     * forced into back-to-back keyframes, blowing the bitrate budget. */
-    uint64_t now = rtc_time_ms();
-    if (now - sender->last_pli_handled_ms < RTC_PLI_MIN_INTERVAL_MS)
-        return;
-    sender->last_pli_handled_ms = now;
-
-    /* Request keyframe via rate controller */
-#ifdef MRTC_ENABLE_RATE_CONTROL
-    if (sender->rate_ctrl)
-        atomic_store_explicit(&sender->rate_ctrl->keyframe_requested, true, memory_order_release);
-#endif
-
-    if (sender->on_pli)
-        sender->on_pli(sender->on_pli_user);
-}
-
 void rtc_rtp_receiver_on_frame(rtc_rtp_receiver_t *receiver, rtc_on_frame_fn fn, void *user) {
-    if (!receiver)
-        return;
-    receiver->on_frame = fn;
-    receiver->on_frame_user = user;
+    if (receiver)
+        rtc_rtp_recv_stream_on_frame(receiver->stream, fn, user);
 }
 
 rtc_kind_t rtc_rtp_receiver_kind(const rtc_rtp_receiver_t *receiver) {
@@ -258,105 +107,51 @@ void rtc_rtp_transceiver_init_slot(struct rtc_rtp_transceiver *t, int mid_index,
     /* Sender */
     t->sender.codec = *codec;
     t->sender.kind = kind;
-    t->sender.active = true;
-    t->sender.send_active = true;
-    t->sender.max_bitrate_bps = 0;
-    rtc_rtp_session_init(&t->sender.rtp_session, codec->payload_type, codec->clock_rate);
-    rtc_rtcp_stats_init(&t->sender.rtcp_stats, t->sender.rtp_session.ssrc);
+    t->sender.stream = rtc_rtp_send_stream_create(&(rtc_rtp_send_stream_config_t){
+        .payload_type = codec->payload_type,
+        .clock_rate = codec->clock_rate,
+    });
 
     /* Receiver (activated when remote description arrives). RTCP stats are
      * initialized with the sender SSRC so the rtcp_stats struct is valid;
      * the real receiver SSRC is patched in once it is learned from SDP. */
     t->receiver.codec = *codec;
     t->receiver.kind = kind;
-    t->receiver.active = false;
-    rtc_rtcp_stats_init(&t->receiver.rtcp_stats, t->sender.rtp_session.ssrc);
+    t->receiver.stream = rtc_rtp_recv_stream_create(&(rtc_rtp_recv_stream_config_t){
+        .payload_type = codec->payload_type,
+        .clock_rate = codec->clock_rate,
+        .local_ssrc = rtc_rtp_send_stream_ssrc(t->sender.stream),
+    });
 }
 
 void rtc_rtp_transceiver_close_resources(struct rtc_rtp_transceiver *t) {
-    struct rtc_rtp_sender *s = &t->sender;
-#ifdef MRTC_ENABLE_RATE_CONTROL
-    if (s->rate_ctrl) {
-        rtc_rate_control_destroy(s->rate_ctrl);
-        s->rate_ctrl = NULL;
-    }
-#endif
-    if (s->nack_buf) {
-        rtc_nack_buf_destroy(s->nack_buf);
-        s->nack_buf = NULL;
-    }
+    if (!t)
+        return;
+    rtc_rtp_send_stream_destroy(t->sender.stream);
+    rtc_rtp_recv_stream_destroy(t->receiver.stream);
+    t->sender.stream = NULL;
+    t->receiver.stream = NULL;
 }
 
 void rtc_rtp_sender_attach_logical(struct rtc_rtp_sender *s, rtc_transport_t *transport) {
-    if (!s || !s->active)
-        return;
-    s->transport = transport;
+    if (s)
+        rtc_rtp_send_stream_attach_transport(s->stream, transport);
 }
 
 void rtc_rtp_sender_attach_twcc(struct rtc_rtp_sender *s, void *twcc_sender, uint8_t ext_id) {
-#ifdef MRTC_ENABLE_TWCC
-    if (!s || !s->active || ext_id == 0)
-        return;
-    s->twcc = twcc_sender;
-    s->twcc_ext_id = ext_id;
-#else
-    (void)s;
-    (void)twcc_sender;
-    (void)ext_id;
-#endif
+    if (s)
+        rtc_rtp_send_stream_attach_twcc(s->stream, twcc_sender, ext_id);
 }
 
 void rtc_rtp_sender_arm_video(struct rtc_rtp_sender *s) {
-    if (!s || !s->active || s->kind != RTC_KIND_VIDEO)
+    if (!s || s->kind != RTC_KIND_VIDEO)
         return;
-#ifdef MRTC_ENABLE_RATE_CONTROL
-    rtc_rate_control_config_t rc_cfg = {
-        .target_bitrate_kbps = 500,
-        .min_bitrate_kbps = 100,
-        .max_bitrate_kbps = 2500,
-    };
-    s->rate_ctrl = rtc_rate_control_create(&rc_cfg);
-#endif
-    s->nack_buf = rtc_nack_buf_create(NACK_BUF_DEFAULT_SIZE);
+    rtc_rtp_send_stream_arm_video(s->stream);
 }
 
 void rtc_rtp_receiver_activate(struct rtc_rtp_receiver *r) {
     if (r)
-        r->active = true;
-}
-
-/* SR / RR build + SRTCP protect + send. The scratch buffer is sized to hold
- * the largest RTCP packet plus the SRTCP trailer added by the transport. */
-void rtc_rtp_sender_emit_sr_logical(struct rtc_rtp_sender *s, rtc_transport_t *transport) {
-    if (!s || !s->active || !transport || s->rtcp_stats.packets_sent == 0)
-        return;
-    rtc_rtcp_packet_t pkt;
-    if (rtc_rtcp_build_sr(&pkt, &s->rtcp_stats) != RTC_OK)
-        return;
-    uint8_t buf[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
-    if (pkt.buf_len > sizeof(buf))
-        return;
-    memcpy(buf, pkt.buf, pkt.buf_len);
-    size_t len = pkt.buf_len;
-    if (rtc_transport_send_rtcp(transport, buf, &len, sizeof(buf)) != RTC_OK)
-        return;
-    s->rtcp_stats.last_report_time = rtc_time_ms();
-}
-
-void rtc_rtp_receiver_emit_rr_logical(struct rtc_rtp_receiver *r, rtc_transport_t *transport) {
-    if (!r || !r->active || !transport || r->rtcp_stats.packets_received == 0)
-        return;
-    rtc_rtcp_packet_t pkt;
-    if (rtc_rtcp_build_rr(&pkt, &r->rtcp_stats) != RTC_OK)
-        return;
-    uint8_t buf[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
-    if (pkt.buf_len > sizeof(buf))
-        return;
-    memcpy(buf, pkt.buf, pkt.buf_len);
-    size_t len = pkt.buf_len;
-    if (rtc_transport_send_rtcp(transport, buf, &len, sizeof(buf)) != RTC_OK)
-        return;
-    r->rtcp_stats.last_report_time = rtc_time_ms();
+        rtc_rtp_recv_stream_set_active(r->stream, true);
 }
 
 void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc_sdp_media_t *m) {
@@ -385,7 +180,7 @@ void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc
     m->clockrate = (int)t->sender.codec.clock_rate;
     m->channels = t->sender.codec.channels;
     m->mid_index = t->mid_index;
-    m->ssrc = t->sender.rtp_session.ssrc;
+    m->ssrc = rtc_rtp_send_stream_ssrc(t->sender.stream);
 
 #ifdef MRTC_ENABLE_TWCC
     if (m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) {

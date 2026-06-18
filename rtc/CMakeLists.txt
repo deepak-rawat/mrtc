@@ -17,6 +17,7 @@ set(RTC_PROTOCOL_SOURCES
     src/rtc_srtp.c
     src/rtc_sdp.c
     src/rtc_rtp.c
+    src/rtc_rtp_stream.c
     src/rtc_rtp_ext.c
     src/rtc_rtcp.c
     src/rtc_nack_buf.c

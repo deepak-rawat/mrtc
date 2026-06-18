@@ -346,14 +346,14 @@ static void peer_runtime_complete_connection(rtc_peer_connection_t *pc) {
 
     for (int i = 0; i < pc->transceiver_count; i++) {
         struct rtc_rtp_sender *s = &pc->transceivers[i].sender;
-        if (!s->active)
+        if (!rtc_rtp_send_stream_is_active(s->stream))
             continue;
         rtc_rtp_sender_attach_logical(s, pc->runtime_transport);
 #ifdef MRTC_ENABLE_TWCC
         if (pc->twcc_ext_id_send != 0) {
             rtc_rtp_sender_attach_twcc(s, &pc->twcc_sender, pc->twcc_ext_id_send);
             if (pc->twcc_local_ssrc == 0)
-                pc->twcc_local_ssrc = s->rtp_session.ssrc;
+                pc->twcc_local_ssrc = rtc_rtp_send_stream_ssrc(s->stream);
         }
 #endif
         rtc_rtp_sender_arm_video(s);
@@ -593,7 +593,7 @@ rtc_rtp_sender_t *rtc_peer_connection_add_track(rtc_peer_connection_t *pc, rtc_k
 
     /* Eager SSRC → sender map: SSRC is known now, register so RTCP RR
      * report blocks naming this SSRC can be demuxed back to this sender. */
-    rtc_u32_map_set(&pc->send_map, t->sender.rtp_session.ssrc, &t->sender);
+    rtc_u32_map_set(&pc->send_map, rtc_rtp_send_stream_ssrc(t->sender.stream), &t->sender);
 
     pc->transceiver_count++;
     return &t->sender;
@@ -616,8 +616,8 @@ rtc_rtp_transceiver_t *rtc_peer_connection_add_transceiver(rtc_peer_connection_t
         t->direction = init->direction;
     /* Sender active only for sendrecv/sendonly. */
     if (t->direction == RTC_DIR_RECVONLY || t->direction == RTC_DIR_INACTIVE)
-        t->sender.active = false;
-    rtc_u32_map_set(&pc->send_map, t->sender.rtp_session.ssrc, &t->sender);
+        rtc_rtp_send_stream_set_active(t->sender.stream, false);
+    rtc_u32_map_set(&pc->send_map, rtc_rtp_send_stream_ssrc(t->sender.stream), &t->sender);
 
     pc->transceiver_count++;
     return (rtc_rtp_transceiver_t *)t;
@@ -633,7 +633,7 @@ int rtc_peer_connection_remove_track(rtc_peer_connection_t *pc, rtc_rtp_sender_t
         struct rtc_rtp_transceiver *t = &pc->transceivers[i];
         if (&t->sender != sender)
             continue;
-        t->sender.active = false;
+        rtc_rtp_send_stream_set_active(t->sender.stream, false);
         switch (t->direction) {
             case RTC_DIR_SENDRECV:
                 t->direction = RTC_DIR_RECVONLY;
@@ -792,7 +792,7 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
     /* Activate receivers and fire on_track */
     for (int i = 0; i < pc->transceiver_count; i++) {
         struct rtc_rtp_receiver *r = &pc->transceivers[i].receiver;
-        if (!r->active) {
+        if (!rtc_rtp_recv_stream_is_active(r->stream)) {
             rtc_rtp_receiver_activate(r);
             if (pc->on_track)
                 pc->on_track((rtc_rtp_receiver_t *)r, pc->on_track_user);
@@ -811,7 +811,7 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
         for (int j = 0; j < pc->transceiver_count; j++) {
             struct rtc_rtp_transceiver *t = &pc->transceivers[j];
             if (t->mid_index == m->mid_index) {
-                t->receiver.ssrc = m->ssrc;
+                rtc_rtp_recv_stream_set_ssrc(t->receiver.stream, m->ssrc);
                 rtc_u32_map_set(&pc->recv_map, m->ssrc, &t->receiver);
                 break;
             }
@@ -1023,16 +1023,18 @@ int rtc_peer_connection_get_stats(const rtc_peer_connection_t *pc, rtc_stats_rep
         s->kind = t->sender.kind;
         s->dir = t->direction;
 
-        if (t->sender.active) {
-            s->out_ssrc = t->sender.rtp_session.ssrc;
-            s->out_packets_sent = t->sender.rtcp_stats.packets_sent;
-            s->out_bytes_sent = t->sender.rtcp_stats.octets_sent;
+        if (rtc_rtp_send_stream_is_active(t->sender.stream)) {
+            const rtc_rtcp_stats_t *sender_stats = rtc_rtp_send_stream_stats(t->sender.stream);
+            s->out_ssrc = rtc_rtp_send_stream_ssrc(t->sender.stream);
+            s->out_packets_sent = sender_stats->packets_sent;
+            s->out_bytes_sent = sender_stats->octets_sent;
         }
-        if (t->receiver.active) {
-            s->in_ssrc = t->receiver.ssrc;
-            s->in_packets_received = t->receiver.rtcp_stats.packets_received;
-            s->in_packets_lost = t->receiver.rtcp_stats.packets_lost;
-            s->in_jitter_q16 = t->receiver.rtcp_stats.jitter;
+        if (rtc_rtp_recv_stream_is_active(t->receiver.stream)) {
+            const rtc_rtcp_stats_t *receiver_stats = rtc_rtp_recv_stream_stats(t->receiver.stream);
+            s->in_ssrc = rtc_rtp_recv_stream_ssrc(t->receiver.stream);
+            s->in_packets_received = receiver_stats->packets_received;
+            s->in_packets_lost = receiver_stats->packets_lost;
+            s->in_jitter_q16 = receiver_stats->jitter;
         }
     }
     return RTC_OK;

@@ -19,6 +19,7 @@
 #include "rtc/rtc_nack_buf.h"
 #include "rtc_client_runtime.h"
 #include "rtc/rtc_listener.h"
+#include "rtc/rtc_rtp_stream.h"
 #include "rtc/rtc_transport.h"
 #include "rtc/rtc_worker.h"
 
@@ -39,45 +40,15 @@
 /* Internal transceiver structs; layout shared with rtc_track.c. */
 
 struct rtc_rtp_sender {
+    rtc_rtp_send_stream_t *stream;
     rtc_codec_t codec;
     rtc_kind_t kind;
-    rtc_rtp_session_t rtp_session;
-    rtc_transport_t *transport;
-    rtc_rtcp_stats_t rtcp_stats;
-#ifdef MRTC_ENABLE_RATE_CONTROL
-    rtc_rate_controller_t *rate_ctrl;
-#endif
-    rtc_nack_buf_t *nack_buf;
-    bool active;
-
-    /* App-set send parameters (RTCRtpSendParameters subset). 0 = unbounded. */
-    uint32_t max_bitrate_bps;
-    bool send_active; /* defaults to true; setParameters can suspend */
-
-    /* Feedback callbacks */
-    rtc_on_nack_fn on_nack;
-    void *on_nack_user;
-    rtc_on_pli_fn on_pli;
-    void *on_pli_user;
-
-    /* Rate limiters for inbound feedback (transport thread only). */
-    uint64_t last_pli_handled_ms;
-
-#ifdef MRTC_ENABLE_TWCC
-    /* Transport-CC tagging (set after SDP negotiation) */
-    void *twcc;          /* borrowed rtc_twcc_sender_t* */
-    uint8_t twcc_ext_id; /* 0 = not negotiated */
-#endif
 };
 
 struct rtc_rtp_receiver {
+    rtc_rtp_recv_stream_t *stream;
     rtc_codec_t codec;
     rtc_kind_t kind;
-    rtc_on_frame_fn on_frame;
-    void *on_frame_user;
-    uint32_t ssrc;
-    rtc_rtcp_stats_t rtcp_stats;
-    bool active;
 };
 
 struct rtc_rtp_transceiver {
@@ -197,9 +168,6 @@ static inline void peer_set_connection(rtc_peer_connection_t *pc, rtc_connection
         pc->on_connection_state(s, pc->on_connection_state_user);
 }
 
-void rtc_rtp_sender_handle_nack(rtc_rtp_sender_t *sender, const uint16_t *lost_seqs, int count);
-void rtc_rtp_sender_handle_pli(rtc_rtp_sender_t *sender);
-
 /* Internal transceiver helpers from rtc_track.c.
  * These operate on a single transceiver/sender/receiver. The peer connection
  * owns the array of transceivers and the SSRC maps; it loops over slots and
@@ -226,10 +194,6 @@ void rtc_rtp_sender_arm_video(struct rtc_rtp_sender *s);
 
 /* Flip a receiver to active (called after remote description is set). */
 void rtc_rtp_receiver_activate(struct rtc_rtp_receiver *r);
-
-/* Build SR / RR for a single sender or receiver, SRTCP-protect, send. */
-void rtc_rtp_sender_emit_sr_logical(struct rtc_rtp_sender *s, rtc_transport_t *transport);
-void rtc_rtp_receiver_emit_rr_logical(struct rtc_rtp_receiver *r, rtc_transport_t *transport);
 
 /* Serialize a single transceiver into an SDP m= section. */
 void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc_sdp_media_t *m);
