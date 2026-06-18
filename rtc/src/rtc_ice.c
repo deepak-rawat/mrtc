@@ -31,24 +31,6 @@ static void write_u32_be(uint8_t *p, uint32_t v) {
     p[3] = v & 0xFF;
 }
 
-/* Compute ICE priority per RFC 8445 section 5.1.2.1 */
-static uint32_t ice_candidate_priority(rtc_ice_candidate_type_t type, int local_pref,
-                                       int component) {
-    uint32_t type_pref;
-    switch (type) {
-        case ICE_CANDIDATE_HOST:
-            type_pref = 126;
-            break;
-        case ICE_CANDIDATE_SRFLX:
-            type_pref = 100;
-            break;
-        default:
-            type_pref = 0;
-            break;
-    }
-    return (type_pref << 24) | ((uint32_t)local_pref << 8) | (256 - (uint32_t)component);
-}
-
 int rtc_ice_init(rtc_ice_agent_t *agent, rtc_packet_io_t *transport, const char *stun_server,
                  uint16_t stun_port) {
     memset(agent, 0, sizeof(*agent));
@@ -141,7 +123,7 @@ static int ice_gather_host(rtc_ice_agent_t *agent) {
             dst->sin_addr = sin->sin_addr;
             dst->sin_port = htons(port);
             c->addr.len = sizeof(struct sockaddr_in);
-            c->priority = ice_candidate_priority(ICE_CANDIDATE_HOST, 65535, 1);
+            c->priority = rtc_ice_candidate_priority(ICE_CANDIDATE_HOST, 65535, 1);
             snprintf(c->foundation, sizeof(c->foundation), "H%d", agent->local_candidate_count);
             agent->local_candidate_count++;
 
@@ -180,7 +162,7 @@ static int ice_gather_host(rtc_ice_agent_t *agent) {
         dst->sin_addr = sin->sin_addr;
         dst->sin_port = htons(port);
         c->addr.len = sizeof(struct sockaddr_in);
-        c->priority = ice_candidate_priority(ICE_CANDIDATE_HOST, 65535, 1);
+        c->priority = rtc_ice_candidate_priority(ICE_CANDIDATE_HOST, 65535, 1);
         snprintf(c->foundation, sizeof(c->foundation), "H%d", agent->local_candidate_count);
         agent->local_candidate_count++;
 
@@ -215,7 +197,7 @@ static int ice_gather_srflx(rtc_ice_agent_t *agent) {
     c->type = ICE_CANDIDATE_SRFLX;
     c->component = 1;
     c->addr = mapped;
-    c->priority = ice_candidate_priority(ICE_CANDIDATE_SRFLX, 65535, 1);
+    c->priority = rtc_ice_candidate_priority(ICE_CANDIDATE_SRFLX, 65535, 1);
     snprintf(c->foundation, sizeof(c->foundation), "S%d", agent->local_candidate_count);
     agent->local_candidate_count++;
 
@@ -322,7 +304,7 @@ int rtc_ice_send_check(rtc_ice_agent_t *agent) {
     snprintf(username, sizeof(username), "%s:%s", agent->remote_ufrag, agent->ufrag);
 
     rtc_stun_msg_t req;
-    uint32_t prio = ice_candidate_priority(ICE_CANDIDATE_HOST, 65535, 1);
+    uint32_t prio = rtc_ice_candidate_priority(ICE_CANDIDATE_HOST, 65535, 1);
     int rc =
         rtc_stun_build_binding_request(&req, username, agent->remote_pwd, prio, agent->controlling,
                                        agent->tie_breaker, agent->controlling);

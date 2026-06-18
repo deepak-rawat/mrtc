@@ -479,6 +479,54 @@ int rtc_transport_add_remote_candidate(rtc_transport_t *transport,
     return tx_op_invoke(transport, tx_add_candidate_impl, (void *)candidate);
 }
 
+int rtc_transport_candidate_from_ice(rtc_transport_candidate_t *out,
+                                     const rtc_ice_candidate_t *in) {
+    if (!out || !in)
+        return RTC_ERR_INVALID;
+    memset(out, 0, sizeof(*out));
+
+    char ip[64];
+    uint16_t port = 0;
+    int rc = rtc_addr_to_string(&in->addr, ip, sizeof(ip), &port);
+    if (rc != RTC_OK)
+        return rc;
+
+    size_t flen = strlen(in->foundation);
+    if (flen >= sizeof(out->foundation))
+        flen = sizeof(out->foundation) - 1;
+    memcpy(out->foundation, in->foundation, flen);
+    out->foundation[flen] = '\0';
+    size_t ilen = strlen(ip);
+    if (ilen >= sizeof(out->address))
+        ilen = sizeof(out->address) - 1;
+    memcpy(out->address, ip, ilen);
+    out->address[ilen] = '\0';
+    memcpy(out->protocol, "udp", sizeof("udp"));
+    out->port = port;
+    out->type = RTC_TRANSPORT_CANDIDATE_HOST;
+    if (in->type == ICE_CANDIDATE_SRFLX)
+        out->type = RTC_TRANSPORT_CANDIDATE_SRFLX;
+    else if (in->type == ICE_CANDIDATE_RELAY)
+        out->type = RTC_TRANSPORT_CANDIDATE_RELAY;
+
+    if (in->has_related_addr) {
+        char related_ip[64];
+        uint16_t related_port = 0;
+        rc = rtc_addr_to_string(&in->related_addr, related_ip, sizeof(related_ip), &related_port);
+        if (rc != RTC_OK)
+            return rc;
+        size_t rlen = strlen(related_ip);
+        if (rlen >= sizeof(out->related_address))
+            rlen = sizeof(out->related_address) - 1;
+        memcpy(out->related_address, related_ip, rlen);
+        out->related_address[rlen] = '\0';
+        out->related_port = related_port;
+        out->has_related_address = true;
+    }
+
+    return RTC_OK;
+}
+
 static int tx_start_ice_impl(rtc_transport_t *transport, void *arg) {
     (void)arg;
     if (transport->ice_mode != RTC_ICE_MODE_FULL)

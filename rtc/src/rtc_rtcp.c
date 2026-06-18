@@ -114,6 +114,25 @@ void rtc_rtcp_stats_on_rtp_send(rtc_rtcp_stats_t *stats, uint32_t timestamp, siz
     stats->rtp_timestamp = timestamp;
 }
 
+void rtc_rtcp_stats_on_sr_recv(rtc_rtcp_stats_t *stats, const rtc_rtcp_sr_t *sr) {
+    if (!stats || !sr)
+        return;
+    stats->last_sr_ntp = (sr->ntp_sec & 0xFFFF) << 16 | (sr->ntp_frac >> 16);
+    stats->last_sr_recv_time = rtc_time_ms();
+}
+
+int rtc_rtcp_rtt_from_rr(const rtc_rtcp_rr_block_t *rr) {
+    if (!rr || rr->last_sr == 0)
+        return 0;
+    uint64_t now_ms = rtc_time_ms();
+    uint32_t now_sec = (uint32_t)(now_ms / 1000);
+    uint32_t now_frac = (uint32_t)((now_ms % 1000) * 4294967ULL);
+    uint32_t now_compact = (now_sec & 0xFFFF) << 16 | (now_frac >> 16);
+    uint32_t rtt_ntp = now_compact - rr->last_sr - rr->delay_since_sr;
+    int rtt_ms = (int)((rtt_ntp * 1000ULL) >> 16);
+    return rtt_ms < 0 ? 0 : rtt_ms;
+}
+
 int rtc_rtcp_build_sr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats) {
     if (!pkt || !stats)
         return RTC_ERR_INVALID;

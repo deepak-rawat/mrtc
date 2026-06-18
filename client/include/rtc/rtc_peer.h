@@ -44,6 +44,8 @@ typedef struct {
 typedef struct {
     rtc_ice_server_t ice_servers[4];
     int ice_server_count;
+    const char *stun_server;
+    uint16_t stun_port;
 } rtc_config_t;
 
 typedef enum {

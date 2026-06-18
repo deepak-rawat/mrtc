@@ -195,6 +195,10 @@ TEST(peer_add_ice_candidate) {
     ASSERT_EQ(rtc_peer_connection_add_ice_candidate(pc, &cand), RTC_OK);
     ASSERT_EQ(rtc_peer_connection_add_ice_candidate(pc, NULL), RTC_OK);
 
+    strcpy(cand.candidate, "candidate:S0 1 udp 1694498815 203.0.113.10 40000 typ srflx "
+                           "raddr 10.0.0.2 rport 50000");
+    ASSERT_EQ(rtc_peer_connection_add_ice_candidate(pc, &cand), RTC_OK);
+
     strcpy(cand.candidate, "candidate:bad");
     ASSERT(rtc_peer_connection_add_ice_candidate(pc, &cand) != RTC_OK);
 

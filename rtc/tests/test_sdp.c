@@ -100,7 +100,8 @@ TEST(sdp_parse) {
                            "a=rtcp-mux\r\n"
                            "a=rtpmap:111 opus/48000/2\r\n"
                            "a=candidate:H0 1 udp 2130706431 10.0.0.1 5000 typ host\r\n"
-                           "a=candidate:S1 1 udp 1694498815 203.0.113.5 6000 typ srflx\r\n";
+                           "a=candidate:S1 1 udp 1694498815 203.0.113.5 6000 typ srflx "
+                           "raddr 10.0.0.1 rport 5000\r\n";
 
     rtc_sdp_t sdp;
     memset(&sdp, 0, sizeof(sdp));
@@ -134,6 +135,10 @@ TEST(sdp_parse) {
     rtc_addr_to_string(&c1->addr, ip, sizeof(ip), &port);
     ASSERT_STR_EQ(ip, "203.0.113.5");
     ASSERT_EQ(port, 6000);
+    ASSERT(c1->has_related_addr);
+    rtc_addr_to_string(&c1->related_addr, ip, sizeof(ip), &port);
+    ASSERT_STR_EQ(ip, "10.0.0.1");
+    ASSERT_EQ(port, 5000);
 
     printf("    parsed: ufrag=%s codec=%s/%d/%d candidates=%zu\n", sdp.ice_ufrag, sdp.codec_name,
            sdp.clockrate, sdp.channels, rtc_sdp_candidate_count(&sdp));
@@ -171,6 +176,8 @@ TEST(sdp_roundtrip) {
     cand1.priority = 1694498815;
     strcpy(cand1.foundation, "S1");
     rtc_addr_from_string(&cand1.addr, "8.8.8.8", 54321);
+    rtc_addr_from_string(&cand1.related_addr, "192.168.1.50", 12345);
+    cand1.has_related_addr = true;
     rtc_sdp_add_candidate(&orig, &cand1);
 
     rtc_ice_candidate_t cand2 = {0};
@@ -216,6 +223,10 @@ TEST(sdp_roundtrip) {
     ASSERT_STR_EQ(ip, "8.8.8.8");
     ASSERT_EQ(port, 54321);
     ASSERT_EQ(pc1->type, ICE_CANDIDATE_SRFLX);
+    ASSERT(pc1->has_related_addr);
+    rtc_addr_to_string(&pc1->related_addr, ip, sizeof(ip), &port);
+    ASSERT_STR_EQ(ip, "192.168.1.50");
+    ASSERT_EQ(port, 12345);
 
     const rtc_ice_candidate_t *pc2 = rtc_sdp_get_candidate(&parsed, 2);
     rtc_addr_to_string(&pc2->addr, ip, sizeof(ip), &port);
@@ -318,6 +329,33 @@ TEST(sdp_extmap_roundtrip) {
     rtc_sdp_close(&parsed);
 }
 
+TEST(sdp_candidate_helpers) {
+    ASSERT_EQ(rtc_ice_candidate_priority(ICE_CANDIDATE_HOST, 65535, 1), 2130706431u);
+    ASSERT_EQ(rtc_ice_candidate_priority(ICE_CANDIDATE_SRFLX, 65535, 1), 1694498815u);
+
+    rtc_ice_candidate_t cand;
+    memset(&cand, 0, sizeof(cand));
+    cand.type = ICE_CANDIDATE_SRFLX;
+    cand.component = 1;
+    cand.priority = rtc_ice_candidate_priority(cand.type, 65535, cand.component);
+    strcpy(cand.foundation, "S0");
+    ASSERT_EQ(rtc_addr_from_string(&cand.addr, "203.0.113.7", 40000), RTC_OK);
+    ASSERT_EQ(rtc_addr_from_string(&cand.related_addr, "10.1.2.3", 50000), RTC_OK);
+    cand.has_related_addr = true;
+
+    char line[256];
+    ASSERT_EQ(rtc_ice_candidate_to_string(&cand, line, sizeof(line)), RTC_OK);
+    ASSERT_STR_EQ(line, "candidate:S0 1 udp 1694498815 203.0.113.7 40000 typ srflx "
+                        "raddr 10.1.2.3 rport 50000");
+
+    rtc_ice_candidate_t parsed;
+    ASSERT_EQ(rtc_sdp_parse_candidate_line(line, &parsed), RTC_OK);
+    ASSERT_EQ(parsed.type, ICE_CANDIDATE_SRFLX);
+    ASSERT(parsed.has_related_addr);
+
+    printf("    candidate helpers: priority + srflx raddr/rport OK\n");
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  SDP Component Tests\n");
@@ -332,6 +370,7 @@ int main(void) {
     RUN_TEST(sdp_roundtrip);
     RUN_TEST(sdp_many_candidates);
     RUN_TEST(sdp_extmap_roundtrip);
+    RUN_TEST(sdp_candidate_helpers);
 
     rtc_cleanup();
     TEST_SUMMARY();

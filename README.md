@@ -76,6 +76,35 @@ The `rtc/` component produces two static libraries:
   WebRTC-style `RTCPeerConnection` facade (tracks, data channels,
   stats). Links `libmrtc` publicly.
 
+## ICE / NAT Traversal
+
+Local host candidates are gathered from all active non-loopback interfaces and
+included in offers/answers immediately. For peers behind NAT, configure a STUN
+server so mrtc can also gather server-reflexive candidates and trickle them via
+`rtc_peer_connection_on_ice_candidate` after `set_local_desc`.
+
+```c
+rtc_config_t config = {0};
+config.stun_server = "stun.l.google.com";
+config.stun_port = 19302;
+
+rtc_peer_connection_t *pc = rtc_peer_connection_create(&config);
+```
+
+The existing `ice_servers` form is also accepted:
+
+```c
+rtc_config_t config = {0};
+config.ice_servers[0].urls[0] = "stun:stun.l.google.com:19302";
+config.ice_servers[0].url_count = 1;
+config.ice_server_count = 1;
+```
+
+Applications should forward every non-NULL candidate callback over signaling and
+treat a NULL candidate as end-of-candidates. With STUN configured, that NULL
+sentinel may arrive asynchronously after `rtc_peer_connection_set_local_desc`
+returns.
+
 ## Running
 
 ```bash

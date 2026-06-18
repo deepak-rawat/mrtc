@@ -28,9 +28,11 @@ typedef enum {
 typedef struct {
     rtc_ice_candidate_type_t type;
     rtc_addr_t addr;
+    rtc_addr_t related_addr;
     uint32_t priority;
     int component;
-    char foundation[8];
+    bool has_related_addr;
+    char foundation[32];
 } rtc_ice_candidate_t;
 
 #define SDP_MAX_MEDIA      4
@@ -128,6 +130,8 @@ int rtc_sdp_add_candidate(rtc_sdp_t *sdp, const rtc_ice_candidate_t *c);
 size_t rtc_sdp_candidate_count(const rtc_sdp_t *sdp);
 const rtc_ice_candidate_t *rtc_sdp_get_candidate(const rtc_sdp_t *sdp, size_t idx);
 int rtc_sdp_parse_candidate_line(const char *line, rtc_ice_candidate_t *out);
+uint32_t rtc_ice_candidate_priority(rtc_ice_candidate_type_t type, int local_pref, int component);
+int rtc_ice_candidate_to_string(const rtc_ice_candidate_t *candidate, char *buf, size_t len);
 
 /* extmap helpers */
 int rtc_sdp_media_add_extmap(rtc_sdp_media_t *m, uint8_t id, const char *uri);

@@ -93,6 +93,7 @@ struct rtc_peer_connection {
     /* Private logical runtime used by the peer facade. */
     rtc_client_runtime_t *runtime;
     rtc_transport_t *runtime_transport;
+    bool runtime_registered;
     rtc_worker_timer_t runtime_connect_timer;
     rtc_worker_timer_t runtime_rtcp_timer;
 #ifdef MRTC_ENABLE_TWCC

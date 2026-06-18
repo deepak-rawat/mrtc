@@ -169,29 +169,10 @@ int rtc_sdp_generate(rtc_sdp_t *sdp) {
     size_t ncand = rtc_vec_len(&sdp->candidates);
     for (size_t i = 0; i < ncand; i++) {
         const rtc_ice_candidate_t *c = (const rtc_ice_candidate_t *)rtc_vec_at(&sdp->candidates, i);
-        char ip[64];
-        uint16_t port;
-        if (rtc_addr_to_string(&c->addr, ip, sizeof(ip), &port) != RTC_OK)
+        char cand_line[256];
+        if (rtc_ice_candidate_to_string(c, cand_line, sizeof(cand_line)) != RTC_OK)
             continue;
-
-        const char *type_str;
-        switch (c->type) {
-            case ICE_CANDIDATE_HOST:
-                type_str = "host";
-                break;
-            case ICE_CANDIDATE_SRFLX:
-                type_str = "srflx";
-                break;
-            case ICE_CANDIDATE_RELAY:
-                type_str = "relay";
-                break;
-            default:
-                type_str = "host";
-                break;
-        }
-
-        SDP_WRITE(&p, &remain, "a=candidate:%s %d udp %u %s %u typ %s\r\n", c->foundation,
-                  c->component, c->priority, ip, port, type_str);
+        SDP_WRITE(&p, &remain, "a=%s\r\n", cand_line);
     }
 
     sdp->raw_len = (size_t)(p - sdp->raw);
@@ -235,12 +216,12 @@ int rtc_sdp_parse_candidate_line(const char *line, rtc_ice_candidate_t *out) {
 
     rtc_ice_candidate_t c;
     memset(&c, 0, sizeof(c));
-    char foundation[8] = {0}, transport[8] = {0}, type_str[8] = {0};
+    char foundation[32] = {0}, transport[8] = {0}, type_str[8] = {0};
     char ip[64] = {0};
     int component = 0;
     unsigned int priority = 0, port = 0;
 
-    int parsed = sscanf(p, "%7s %d %7s %u %63s %u typ %7s", foundation, &component, transport,
+    int parsed = sscanf(p, "%31s %d %7s %u %63s %u typ %7s", foundation, &component, transport,
                         &priority, ip, &port, type_str);
     if (parsed < 7)
         return RTC_ERR_SDP;
@@ -266,7 +247,94 @@ int rtc_sdp_parse_candidate_line(const char *line, rtc_ice_candidate_t *out) {
     if (rc != RTC_OK)
         return rc;
 
+    const char *related = strstr(p, " raddr ");
+    if (related) {
+        char related_ip[64] = {0};
+        unsigned int related_port = 0;
+        if (sscanf(related, " raddr %63s rport %u", related_ip, &related_port) == 2) {
+            if (related_port == 0 || related_port > 65535)
+                return RTC_ERR_SDP;
+            rc = rtc_addr_from_string(&c.related_addr, related_ip, (uint16_t)related_port);
+            if (rc != RTC_OK)
+                return rc;
+            c.has_related_addr = true;
+        }
+    }
+
     *out = c;
+    return RTC_OK;
+}
+
+uint32_t rtc_ice_candidate_priority(rtc_ice_candidate_type_t type, int local_pref, int component) {
+    uint32_t type_pref;
+    switch (type) {
+        case ICE_CANDIDATE_HOST:
+            type_pref = 126;
+            break;
+        case ICE_CANDIDATE_SRFLX:
+            type_pref = 100;
+            break;
+        case ICE_CANDIDATE_RELAY:
+            type_pref = 0;
+            break;
+        default:
+            type_pref = 0;
+            break;
+    }
+    if (local_pref < 0)
+        local_pref = 0;
+    if (local_pref > 65535)
+        local_pref = 65535;
+    if (component < 1)
+        component = 1;
+    if (component > 255)
+        component = 255;
+    return (type_pref << 24) | ((uint32_t)local_pref << 8) | (256u - (uint32_t)component);
+}
+
+int rtc_ice_candidate_to_string(const rtc_ice_candidate_t *candidate, char *buf, size_t len) {
+    if (!candidate || !buf || len == 0)
+        return RTC_ERR_INVALID;
+
+    char ip[64];
+    uint16_t port = 0;
+    int rc = rtc_addr_to_string(&candidate->addr, ip, sizeof(ip), &port);
+    if (rc != RTC_OK)
+        return rc;
+
+    const char *type_str;
+    switch (candidate->type) {
+        case ICE_CANDIDATE_HOST:
+            type_str = "host";
+            break;
+        case ICE_CANDIDATE_SRFLX:
+            type_str = "srflx";
+            break;
+        case ICE_CANDIDATE_RELAY:
+            type_str = "relay";
+            break;
+        default:
+            return RTC_ERR_INVALID;
+    }
+
+    int n = snprintf(buf, len, "candidate:%s %d udp %u %s %u typ %s", candidate->foundation,
+                     candidate->component, candidate->priority, ip, port, type_str);
+    if (n < 0 || (size_t)n >= len)
+        return RTC_ERR_NOMEM;
+
+    if (candidate->has_related_addr) {
+        char related_ip[64];
+        uint16_t related_port = 0;
+        rc = rtc_addr_to_string(&candidate->related_addr, related_ip, sizeof(related_ip),
+                                &related_port);
+        if (rc != RTC_OK)
+            return rc;
+        size_t used = (size_t)n;
+        int rn = snprintf(buf + used, len - used, " raddr %s rport %u", related_ip, related_port);
+        if (rn < 0 || (size_t)rn >= len - used)
+            return RTC_ERR_NOMEM;
+    }
+
     return RTC_OK;
 }
 

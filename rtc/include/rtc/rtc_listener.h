@@ -6,6 +6,7 @@
 
 #include "rtc_transport.h"
 #include "rtc_worker.h"
+#include "rtc_sdp.h"
 
 typedef struct rtc_listener rtc_listener_t;
 
@@ -15,7 +16,12 @@ typedef struct {
     uint16_t udp_port;
     bool enable_udp;
     bool enable_tcp;
+    const char *stun_server;
+    uint16_t stun_port;
 } rtc_listener_config_t;
+
+typedef void (*rtc_listener_on_candidate_fn)(const rtc_transport_candidate_t *cand, void *user);
+typedef void (*rtc_listener_on_gathering_done_fn)(void *user);
 
 typedef struct {
     bool closed;
@@ -34,6 +40,14 @@ void rtc_listener_destroy(rtc_listener_t *listener);
 int rtc_listener_get_local_addr(rtc_listener_t *listener, rtc_addr_t *out);
 int rtc_listener_get_candidates(rtc_listener_t *listener, rtc_transport_candidate_t *out,
                                 int *count);
+bool rtc_listener_gathering_complete(rtc_listener_t *listener);
+void rtc_listener_set_on_candidate(rtc_listener_t *listener, rtc_listener_on_candidate_fn fn,
+                                   void *user);
+void rtc_listener_set_on_gathering_done(rtc_listener_t *listener,
+                                        rtc_listener_on_gathering_done_fn fn, void *user);
+int rtc_listener_candidate_to_ice(const rtc_transport_candidate_t *candidate, int local_pref,
+                                  rtc_ice_candidate_t *out);
+int rtc_listener_fill_sdp_candidates(rtc_listener_t *listener, rtc_sdp_t *sdp);
 int rtc_listener_get_stats(rtc_listener_t *listener, rtc_listener_stats_t *out);
 
 #endif /* RTC_LISTENER_H */

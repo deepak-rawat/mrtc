@@ -13,6 +13,8 @@
 static int peer_dc_send(const uint8_t *data, size_t len, void *user);
 
 static void peer_runtime_close(rtc_peer_connection_t *pc);
+static void peer_runtime_on_listener_candidate(const rtc_transport_candidate_t *cand, void *user);
+static void peer_runtime_on_listener_done(void *user);
 static void peer_runtime_connect_timer(void *user);
 static void peer_runtime_on_rtp(const rtc_rtp_packet_t *pkt, void *user);
 static void peer_runtime_on_rtcp(const uint8_t *data, size_t len, void *user);
@@ -26,8 +28,72 @@ static rtc_listener_t *peer_runtime_listener(rtc_peer_connection_t *pc) {
     return rtc_client_runtime_listener(pc->runtime);
 }
 
-static int peer_runtime_init(rtc_peer_connection_t *pc) {
-    pc->runtime = rtc_client_runtime_acquire();
+static void copy_string(char *dst, size_t dst_len, const char *src) {
+    if (dst_len == 0)
+        return;
+    if (!src)
+        src = "";
+    size_t len = strlen(src);
+    if (len >= dst_len)
+        len = dst_len - 1;
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
+static void peer_runtime_parse_stun_url(const char *url, rtc_client_runtime_config_t *out) {
+    if (!url || !out || out->stun_server[0] != '\0')
+        return;
+    const char *host = url;
+    if (strncmp(host, "stun:", 5) == 0)
+        host += 5;
+    else if (strncmp(host, "stuns:", 6) == 0)
+        host += 6;
+    if (strncmp(host, "//", 2) == 0)
+        host += 2;
+
+    char tmp[256];
+    copy_string(tmp, sizeof(tmp), host);
+    char *slash = strchr(tmp, '/');
+    if (slash)
+        *slash = '\0';
+
+    char *colon = strrchr(tmp, ':');
+    if (colon && strchr(tmp, ']') == NULL) {
+        *colon = '\0';
+        int port = atoi(colon + 1);
+        if (port > 0 && port <= 65535)
+            out->stun_port = (uint16_t)port;
+    }
+    if (tmp[0] != '\0')
+        copy_string(out->stun_server, sizeof(out->stun_server), tmp);
+}
+
+static void peer_runtime_config_from_peer(const rtc_config_t *config,
+                                          rtc_client_runtime_config_t *out) {
+    memset(out, 0, sizeof(*out));
+    out->stun_port = 3478;
+    if (!config)
+        return;
+    if (config->stun_server) {
+        copy_string(out->stun_server, sizeof(out->stun_server), config->stun_server);
+        if (config->stun_port)
+            out->stun_port = config->stun_port;
+        return;
+    }
+    for (int i = 0; i < config->ice_server_count && i < 4; i++) {
+        const rtc_ice_server_t *server = &config->ice_servers[i];
+        for (int j = 0; j < server->url_count && j < 4; j++) {
+            peer_runtime_parse_stun_url(server->urls[j], out);
+            if (out->stun_server[0] != '\0')
+                return;
+        }
+    }
+}
+
+static int peer_runtime_init(rtc_peer_connection_t *pc, const rtc_config_t *config) {
+    rtc_client_runtime_config_t runtime_config;
+    peer_runtime_config_from_peer(config, &runtime_config);
+    pc->runtime = rtc_client_runtime_acquire(&runtime_config);
     if (!pc->runtime)
         return RTC_ERR_NOMEM;
 
@@ -37,6 +103,14 @@ static int peer_runtime_init(rtc_peer_connection_t *pc) {
         peer_runtime_close(pc);
         return RTC_ERR_GENERIC;
     }
+
+    int rc = rtc_client_runtime_register_peer(pc->runtime, peer_runtime_on_listener_candidate,
+                                              peer_runtime_on_listener_done, pc);
+    if (rc != RTC_OK) {
+        peer_runtime_close(pc);
+        return rc;
+    }
+    pc->runtime_registered = true;
 
     pc->runtime_transport = rtc_transport_create(worker, &(rtc_transport_config_t){
                                                              .listener = listener,
@@ -63,7 +137,11 @@ static int peer_runtime_init(rtc_peer_connection_t *pc) {
 }
 
 static void peer_runtime_close(rtc_peer_connection_t *pc) {
-    rtc_worker_t *worker = peer_runtime_worker(pc);
+    rtc_worker_t *worker = pc->runtime ? peer_runtime_worker(pc) : NULL;
+    if (pc->runtime && pc->runtime_registered) {
+        rtc_client_runtime_unregister_peer(pc->runtime, pc);
+        pc->runtime_registered = false;
+    }
     if (worker && pc->runtime_connect_timer != RTC_WORKER_TIMER_INVALID) {
         rtc_worker_cancel_timer(worker, pc->runtime_connect_timer);
         pc->runtime_connect_timer = RTC_WORKER_TIMER_INVALID;
@@ -88,6 +166,117 @@ static void peer_runtime_close(rtc_peer_connection_t *pc) {
     }
 }
 
+static bool peer_candidate_addr_equal(const rtc_ice_candidate_t *a, const rtc_ice_candidate_t *b) {
+    char aip[64];
+    char bip[64];
+    uint16_t aport = 0;
+    uint16_t bport = 0;
+    if (rtc_addr_to_string(&a->addr, aip, sizeof(aip), &aport) != RTC_OK ||
+        rtc_addr_to_string(&b->addr, bip, sizeof(bip), &bport) != RTC_OK)
+        return false;
+    return aport == bport && strcmp(aip, bip) == 0;
+}
+
+static bool peer_local_sdp_has_candidate(rtc_peer_connection_t *pc,
+                                         const rtc_ice_candidate_t *candidate) {
+    size_t count = rtc_sdp_candidate_count(&pc->local_sdp);
+    for (size_t i = 0; i < count; i++) {
+        const rtc_ice_candidate_t *existing = rtc_sdp_get_candidate(&pc->local_sdp, i);
+        if (!existing || existing->type != candidate->type ||
+            strcmp(existing->foundation, candidate->foundation) != 0 ||
+            !peer_candidate_addr_equal(existing, candidate)) {
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
+static void peer_emit_ice_candidate(rtc_peer_connection_t *pc,
+                                    const rtc_ice_candidate_t *candidate) {
+    if (!pc->on_ice_candidate)
+        return;
+
+    char cand_line[sizeof(((rtc_ice_candidate_desc_t *)0)->candidate)];
+    if (rtc_ice_candidate_to_string(candidate, cand_line, sizeof(cand_line)) != RTC_OK)
+        return;
+
+    int n_emit = pc->transceiver_count > 0 ? pc->transceiver_count : 1;
+    for (int j = 0; j < n_emit; j++) {
+        rtc_ice_candidate_desc_t cand_desc;
+        memset(&cand_desc, 0, sizeof(cand_desc));
+        copy_string(cand_desc.candidate, sizeof(cand_desc.candidate), cand_line);
+
+        if (pc->transceiver_count > 0) {
+            const struct rtc_rtp_transceiver *t = &pc->transceivers[j];
+            copy_string(cand_desc.mid, sizeof(cand_desc.mid), t->mid);
+            cand_desc.mid_index = t->mid_index;
+        } else {
+            cand_desc.mid[0] = '0';
+            cand_desc.mid[1] = '\0';
+            cand_desc.mid_index = 0;
+        }
+
+        pc->on_ice_candidate(&cand_desc, pc->on_ice_candidate_user);
+    }
+}
+
+static int peer_add_local_transport_candidate(rtc_peer_connection_t *pc,
+                                              const rtc_transport_candidate_t *candidate,
+                                              int local_pref, bool emit) {
+    rtc_ice_candidate_t ice_candidate;
+    int rc = rtc_listener_candidate_to_ice(candidate, local_pref, &ice_candidate);
+    if (rc != RTC_OK)
+        return rc;
+    if (peer_local_sdp_has_candidate(pc, &ice_candidate))
+        return RTC_OK;
+    rc = rtc_sdp_add_candidate(&pc->local_sdp, &ice_candidate);
+    if (rc != RTC_OK)
+        return rc;
+    if (emit)
+        peer_emit_ice_candidate(pc, &ice_candidate);
+    return RTC_OK;
+}
+
+static void peer_replay_listener_candidates(rtc_peer_connection_t *pc) {
+    rtc_listener_t *listener = peer_runtime_listener(pc);
+    if (!listener)
+        return;
+    rtc_transport_candidate_t candidates[ICE_MAX_CANDIDATES];
+    int count = ICE_MAX_CANDIDATES;
+    int rc = rtc_listener_get_candidates(listener, candidates, &count);
+    if (rc != RTC_OK && rc != RTC_ERR_NOMEM)
+        return;
+    int host_index = 0;
+    int srflx_index = 0;
+    for (int i = 0; i < count; i++) {
+        int local_pref = 65535;
+        if (candidates[i].type == RTC_TRANSPORT_CANDIDATE_HOST)
+            local_pref -= host_index++;
+        else if (candidates[i].type == RTC_TRANSPORT_CANDIDATE_SRFLX)
+            local_pref -= srflx_index++;
+        (void)peer_add_local_transport_candidate(pc, &candidates[i], local_pref, false);
+    }
+}
+
+static void peer_runtime_on_listener_candidate(const rtc_transport_candidate_t *cand, void *user) {
+    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+    if (!pc || !cand || !pc->has_local_desc || pc->connection_state == RTC_CONNECTION_CLOSED)
+        return;
+    (void)peer_add_local_transport_candidate(pc, cand, 65535, true);
+}
+
+static void peer_runtime_on_listener_done(void *user) {
+    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
+    if (!pc || !pc->has_local_desc || pc->connection_state == RTC_CONNECTION_CLOSED)
+        return;
+    if (pc->ice_gathering_state == RTC_ICE_GATHERING_COMPLETE)
+        return;
+    peer_set_ice_gathering(pc, RTC_ICE_GATHERING_COMPLETE);
+    if (pc->on_ice_candidate)
+        pc->on_ice_candidate(NULL, pc->on_ice_candidate_user);
+}
+
 static int peer_runtime_fill_sdp_transport(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
     rtc_listener_t *listener = peer_runtime_listener(pc);
     if (!pc->runtime_transport || !listener)
@@ -106,29 +295,7 @@ static int peer_runtime_fill_sdp_transport(rtc_peer_connection_t *pc, rtc_sdp_t 
         return rc;
     memcpy(sdp->fingerprint, dtls.fingerprint, sizeof(sdp->fingerprint));
 
-    rtc_transport_candidate_t candidates[ICE_MAX_CANDIDATES];
-    int count = ICE_MAX_CANDIDATES;
-    rc = rtc_listener_get_candidates(listener, candidates, &count);
-    if (rc != RTC_OK)
-        return rc;
-
-    for (int i = 0; i < count; i++) {
-        rtc_ice_candidate_t c;
-        memset(&c, 0, sizeof(c));
-        c.type = ICE_CANDIDATE_HOST;
-        c.component = 1;
-        c.priority = 2130706431u;
-        size_t flen = strlen(candidates[i].foundation);
-        if (flen >= sizeof(c.foundation))
-            flen = sizeof(c.foundation) - 1;
-        memcpy(c.foundation, candidates[i].foundation, flen);
-        c.foundation[flen] = '\0';
-        rc = rtc_addr_from_string(&c.addr, candidates[i].address, candidates[i].port);
-        if (rc != RTC_OK)
-            return rc;
-        rtc_sdp_add_candidate(sdp, &c);
-    }
-    return RTC_OK;
+    return rtc_listener_fill_sdp_candidates(listener, sdp);
 }
 
 static int peer_runtime_add_remote_candidate(rtc_peer_connection_t *pc,
@@ -136,30 +303,10 @@ static int peer_runtime_add_remote_candidate(rtc_peer_connection_t *pc,
     if (!pc->runtime_transport || !candidate)
         return RTC_ERR_INVALID;
 
-    char ip[64];
-    uint16_t port = 0;
-    if (rtc_addr_to_string(&candidate->addr, ip, sizeof(ip), &port) != RTC_OK)
-        return RTC_ERR_INVALID;
-
     rtc_transport_candidate_t tc;
-    memset(&tc, 0, sizeof(tc));
-    size_t flen = strlen(candidate->foundation);
-    if (flen >= sizeof(tc.foundation))
-        flen = sizeof(tc.foundation) - 1;
-    memcpy(tc.foundation, candidate->foundation, flen);
-    tc.foundation[flen] = '\0';
-    size_t ilen = strlen(ip);
-    if (ilen >= sizeof(tc.address))
-        ilen = sizeof(tc.address) - 1;
-    memcpy(tc.address, ip, ilen);
-    tc.address[ilen] = '\0';
-    memcpy(tc.protocol, "udp", sizeof("udp"));
-    tc.port = port;
-    tc.type = RTC_TRANSPORT_CANDIDATE_HOST;
-    if (candidate->type == ICE_CANDIDATE_SRFLX)
-        tc.type = RTC_TRANSPORT_CANDIDATE_SRFLX;
-    else if (candidate->type == ICE_CANDIDATE_RELAY)
-        tc.type = RTC_TRANSPORT_CANDIDATE_RELAY;
+    int rc = rtc_transport_candidate_from_ice(&tc, candidate);
+    if (rc != RTC_OK)
+        return rc;
     return rtc_transport_add_remote_candidate(pc->runtime_transport, &tc);
 }
 
@@ -359,7 +506,7 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
 
     int rc = RTC_OK;
 
-    rc = peer_runtime_init(pc);
+    rc = peer_runtime_init(pc, config);
     if (rc != RTC_OK) {
         free(pc);
         return NULL;
@@ -590,58 +737,20 @@ int rtc_peer_connection_set_local_desc(rtc_peer_connection_t *pc, const rtc_desc
             peer_set_signaling(pc, RTC_SIGNALING_STABLE);
     }
 
-    /* Fire ICE gathering callbacks for already-gathered candidates.
-     * Each candidate must be associated with an m-line via its mid. With
-     * BUNDLE the remote will dedupe to a single ICE transport; without
-     * BUNDLE each m-line needs its own copy. Emit one event per
-     * (candidate × transceiver). If there are no transceivers (e.g.,
-     * data-channel-only), emit once with the default mid "0". */
+    /* Fire ICE gathering callbacks for candidates already cached by the
+     * shared listener. Later srflx candidates arrive through the listener
+     * callback chain and are emitted as trickle candidates. */
     peer_set_ice_gathering(pc, RTC_ICE_GATHERING_GATHERING);
+    peer_replay_listener_candidates(pc);
     size_t local_candidate_count = rtc_sdp_candidate_count(&pc->local_sdp);
     for (size_t i = 0; i < local_candidate_count; i++) {
-        if (!pc->on_ice_candidate)
-            continue;
-
         const rtc_ice_candidate_t *c = rtc_sdp_get_candidate(&pc->local_sdp, i);
         if (!c)
             continue;
-        char ip[64];
-        uint16_t port;
-        rtc_addr_to_string(&c->addr, ip, sizeof(ip), &port);
-
-        const char *ctype = "host";
-        if (c->type == ICE_CANDIDATE_SRFLX)
-            ctype = "srflx";
-
-        char cand_line[sizeof(((rtc_ice_candidate_desc_t *)0)->candidate)];
-        snprintf(cand_line, sizeof(cand_line), "candidate:%s 1 udp %u %s %u typ %s", c->foundation,
-                 c->priority, ip, port, ctype);
-
-        int n_emit = pc->transceiver_count > 0 ? pc->transceiver_count : 1;
-        for (int j = 0; j < n_emit; j++) {
-            rtc_ice_candidate_desc_t cand_desc;
-            memset(&cand_desc, 0, sizeof(cand_desc));
-            memcpy(cand_desc.candidate, cand_line, sizeof(cand_desc.candidate));
-
-            if (pc->transceiver_count > 0) {
-                const struct rtc_rtp_transceiver *t = &pc->transceivers[j];
-                size_t mlen = strnlen(t->mid, sizeof(cand_desc.mid) - 1);
-                memcpy(cand_desc.mid, t->mid, mlen);
-                cand_desc.mid[mlen] = '\0';
-                cand_desc.mid_index = t->mid_index;
-            } else {
-                cand_desc.mid[0] = '0';
-                cand_desc.mid[1] = '\0';
-                cand_desc.mid_index = 0;
-            }
-
-            pc->on_ice_candidate(&cand_desc, pc->on_ice_candidate_user);
-        }
+        peer_emit_ice_candidate(pc, c);
     }
-    /* End-of-candidates */
-    peer_set_ice_gathering(pc, RTC_ICE_GATHERING_COMPLETE);
-    if (pc->on_ice_candidate)
-        pc->on_ice_candidate(NULL, pc->on_ice_candidate_user);
+    if (rtc_listener_gathering_complete(peer_runtime_listener(pc)))
+        peer_runtime_on_listener_done(pc);
 
     /* Try to start connection if both descriptions set */
     peer_try_connect(pc);

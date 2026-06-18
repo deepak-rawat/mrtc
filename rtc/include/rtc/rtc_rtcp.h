@@ -119,6 +119,12 @@ void rtc_rtcp_stats_on_rtp_recv(rtc_rtcp_stats_t *stats, uint16_t seq, uint32_t 
 /* Update sender stats when an RTP packet is sent */
 void rtc_rtcp_stats_on_rtp_send(rtc_rtcp_stats_t *stats, uint32_t timestamp, size_t payload_len);
 
+/* Update receiver stats when an RTCP Sender Report is received. */
+void rtc_rtcp_stats_on_sr_recv(rtc_rtcp_stats_t *stats, const rtc_rtcp_sr_t *sr);
+
+/* Compute RTT in milliseconds from an RR block (RFC 3550 section 6.4.1). */
+int rtc_rtcp_rtt_from_rr(const rtc_rtcp_rr_block_t *rr);
+
 /* Build a Sender Report */
 int rtc_rtcp_build_sr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats);
 

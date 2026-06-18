@@ -169,3 +169,32 @@ staging it for commit:
 
 Do this for every C/C++ file you modified in the change before `git add`. Do
 not invoke `clang-format` from the terminal — it is not available.
+
+## Explaining Code
+
+When asked to explain a component, subsystem, or flow, default to a
+**worked-example / "life-of-a-packet" walkthrough** rather than an abstract
+description. Specifically:
+
+- **Lead with the one idea** (and an analogy where it helps) before any detail.
+- **Trace one concrete case end-to-end** — follow a single packet / request /
+  call through the code from entry to exit.
+- **Use concrete example values** (real-looking IPs, ports, ufrags, ssrcs,
+  hex ids), not placeholders like `X` / `foo`.
+- **Show each function call in sequence** and, where useful, its actual
+  arguments.
+- **Show how state changes after each step** (struct fields, the route maps,
+  buffers, flags) so the reader sees cause and effect.
+- **Annotate which thread** each step runs on (worker loop vs app thread).
+- Include a **Mermaid sequence/flow diagram** and a **cause → effect summary
+  table**.
+- Call out **design rationale and trade-offs** as you go (why this lock, why
+  this key, why marshalled), and be honest about costs and edge cases.
+- Distinguish **public API** (what an app author calls) from **internal API**
+  (what other library code calls on their behalf).
+
+Keep abstract/theoretical descriptions secondary — the concrete trace is the
+backbone of the explanation. Scale the depth to the request; when asked for
+"more detail," add argument-level values, before/after state, byte-level wire
+format, error paths, and multiple concurrent actors.
+

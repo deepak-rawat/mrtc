@@ -25,6 +25,8 @@ static rtc_cond_t g_route_cond;
 static int g_route_count;
 static rtc_pkt_type_t g_route_type;
 static int g_route_user_value;
+static int g_candidate_count;
+static int g_gathering_done_count;
 
 static void route_callback(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                            const rtc_addr_t *from, void *user) {
@@ -46,6 +48,17 @@ static void reset_route_state(void) {
     g_route_type = RTC_PKT_UNKNOWN;
     g_route_user_value = 0;
     rtc_mutex_unlock(&g_route_mutex);
+}
+
+static void candidate_callback(const rtc_transport_candidate_t *cand, void *user) {
+    (void)cand;
+    (void)user;
+    g_candidate_count++;
+}
+
+static void gathering_done_callback(void *user) {
+    (void)user;
+    g_gathering_done_count++;
 }
 
 static bool wait_for_route(int target, int timeout_ms) {
@@ -127,16 +140,28 @@ TEST(listener_create_candidate) {
 
     int count = 0;
     ASSERT_EQ(rtc_listener_get_candidates(listener, NULL, &count), RTC_OK);
-    ASSERT_EQ(count, 1);
+    ASSERT(count >= 1);
 
-    rtc_transport_candidate_t candidates[1];
-    count = 1;
+    rtc_transport_candidate_t candidates[ICE_MAX_CANDIDATES];
+    count = ICE_MAX_CANDIDATES;
     ASSERT_EQ(rtc_listener_get_candidates(listener, candidates, &count), RTC_OK);
-    ASSERT_EQ(count, 1);
+    ASSERT(count >= 1);
     ASSERT_STR_EQ(candidates[0].address, "203.0.113.10");
     ASSERT_STR_EQ(candidates[0].protocol, "udp");
     ASSERT_EQ(candidates[0].port, local_port);
     ASSERT_EQ(candidates[0].type, RTC_TRANSPORT_CANDIDATE_HOST);
+    ASSERT(rtc_listener_gathering_complete(listener));
+
+    int small_count = 0;
+    ASSERT_EQ(rtc_listener_get_candidates(listener, candidates, &small_count), RTC_ERR_NOMEM);
+    ASSERT_EQ(small_count, count);
+
+    g_candidate_count = 0;
+    g_gathering_done_count = 0;
+    rtc_listener_set_on_candidate(listener, candidate_callback, NULL);
+    rtc_listener_set_on_gathering_done(listener, gathering_done_callback, NULL);
+    ASSERT_EQ(g_candidate_count, count);
+    ASSERT_EQ(g_gathering_done_count, 1);
 
     rtc_listener_destroy(listener);
     rtc_worker_destroy(worker);

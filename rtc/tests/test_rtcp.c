@@ -240,6 +240,32 @@ TEST(rtcp_sr_no_reports) {
     printf("    SR with no report blocks: pkts=%u\n", parsed.sr.sender_pkt_count);
 }
 
+TEST(rtcp_sr_recv_and_rtt_helpers) {
+    rtc_rtcp_stats_t stats;
+    rtc_rtcp_stats_init(&stats, 0x11111111);
+
+    rtc_rtcp_sr_t sr;
+    memset(&sr, 0, sizeof(sr));
+    sr.ntp_sec = 0x12345678;
+    sr.ntp_frac = 0x9ABCDEF0;
+    rtc_rtcp_stats_on_sr_recv(&stats, &sr);
+    ASSERT_EQ(stats.last_sr_ntp, 0x56789ABCu);
+    ASSERT(stats.last_sr_recv_time > 0);
+
+    uint64_t now_ms = rtc_time_ms();
+    uint32_t now_sec = (uint32_t)(now_ms / 1000);
+    uint32_t now_frac = (uint32_t)((now_ms % 1000) * 4294967ULL);
+    uint32_t now_compact = (now_sec & 0xFFFF) << 16 | (now_frac >> 16);
+
+    rtc_rtcp_rr_block_t rr;
+    memset(&rr, 0, sizeof(rr));
+    rr.last_sr = now_compact - (uint32_t)((100ULL * 65536ULL) / 1000ULL);
+    int rtt_ms = rtc_rtcp_rtt_from_rr(&rr);
+    ASSERT(rtt_ms >= 90 && rtt_ms <= 200);
+
+    printf("    SR receive + RTT helpers: rtt=%dms\n", rtt_ms);
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  RTCP Component Tests\n");
@@ -257,6 +283,7 @@ int main(void) {
     RUN_TEST(rtcp_is_rtcp);
     RUN_TEST(rtcp_parse_invalid);
     RUN_TEST(rtcp_sr_no_reports);
+    RUN_TEST(rtcp_sr_recv_and_rtt_helpers);
 
     rtc_cleanup();
     TEST_SUMMARY();

@@ -6,6 +6,7 @@
 
 #include "rtc_common.h"
 #include "rtc_rtp.h"
+#include "rtc_sdp.h"
 #include "rtc_worker.h"
 
 #define RTC_ICE_UFRAG_MAX                   8
@@ -30,9 +31,12 @@ typedef enum {
 typedef struct {
     char foundation[32];
     char address[64];
+    char related_address[64];
     uint16_t port;
+    uint16_t related_port;
     char protocol[8];
     rtc_transport_candidate_type_t type;
+    bool has_related_address;
 } rtc_transport_candidate_t;
 
 typedef enum {
@@ -91,6 +95,7 @@ int rtc_transport_set_remote_ice_parameters(rtc_transport_t *transport,
                                             const rtc_ice_parameters_t *remote);
 int rtc_transport_add_remote_candidate(rtc_transport_t *transport,
                                        const rtc_transport_candidate_t *candidate);
+int rtc_transport_candidate_from_ice(rtc_transport_candidate_t *out, const rtc_ice_candidate_t *in);
 int rtc_transport_start_ice(rtc_transport_t *transport);
 int rtc_transport_start_dtls(rtc_transport_t *transport);
 int rtc_transport_set_dtls_role(rtc_transport_t *transport, rtc_transport_dtls_role_t role);

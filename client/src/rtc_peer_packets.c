@@ -78,27 +78,10 @@ static void handle_rtcp_sr(rtc_peer_connection_t *pc, const uint8_t *buf, size_t
     rtc_rtcp_packet_t rtcp;
     if (rtc_rtcp_parse(&rtcp, buf, pkt_len) != RTC_OK)
         return;
-    uint32_t lsr = (rtcp.sr.ntp_sec & 0xFFFF) << 16 | (rtcp.sr.ntp_frac >> 16);
     struct rtc_rtp_receiver *r =
         (struct rtc_rtp_receiver *)rtc_u32_map_get(&pc->recv_map, rtcp.sender_ssrc);
-    if (r) {
-        r->rtcp_stats.last_sr_ntp = lsr;
-        r->rtcp_stats.last_sr_recv_time = rtc_time_ms();
-    }
-}
-
-/* Compact-NTP RTT from RFC 3550 §6.4.1: RTT = now - last_sr - delay_since_sr,
- * all in the 16.16 compact NTP format. */
-static int rtt_from_rr(const rtc_rtcp_rr_block_t *rr) {
-    if (rr->last_sr == 0)
-        return 0;
-    uint64_t now_ms = rtc_time_ms();
-    uint32_t now_sec = (uint32_t)(now_ms / 1000);
-    uint32_t now_frac = (uint32_t)((now_ms % 1000) * 4294967ULL);
-    uint32_t now_compact = (now_sec & 0xFFFF) << 16 | (now_frac >> 16);
-    uint32_t rtt_ntp = now_compact - rr->last_sr - rr->delay_since_sr;
-    int rtt_ms = (int)((rtt_ntp * 1000ULL) >> 16);
-    return rtt_ms < 0 ? 0 : rtt_ms;
+    if (r)
+        rtc_rtcp_stats_on_sr_recv(&r->rtcp_stats, &rtcp.sr);
 }
 
 static void handle_rtcp_rr(rtc_peer_connection_t *pc, const uint8_t *buf, size_t pkt_len) {
@@ -113,7 +96,7 @@ static void handle_rtcp_rr(rtc_peer_connection_t *pc, const uint8_t *buf, size_t
 
     for (int i = 0; i < rtcp.report_count; i++) {
         const rtc_rtcp_rr_block_t *rr = &rtcp.reports[i];
-        int rtt_ms = rtt_from_rr(rr);
+        int rtt_ms = rtc_rtcp_rtt_from_rr(rr);
 
 #ifdef MRTC_ENABLE_RATE_CONTROL
         /* Route to per-sender rate controller via send_map */
