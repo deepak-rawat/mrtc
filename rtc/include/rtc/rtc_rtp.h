@@ -44,6 +44,15 @@ typedef struct {
     size_t buf_len;
 } rtc_rtp_packet_t;
 
+/* Deliver a parsed inbound RTP packet to a bound consumer (e.g. a receive
+ * stream or an SFU producer). `user` is the value bound for the packet SSRC. */
+typedef void (*rtc_rtp_sink_fn)(const rtc_rtp_packet_t *pkt, void *user);
+
+/* Resolve an as-yet-unbound SSRC to a consumer pointer, typically by matching
+ * the payload type. Returning non-NULL auto-binds the SSRC so subsequent
+ * packets dispatch in O(1). Returning NULL drops the packet. */
+typedef void *(*rtc_rtp_resolve_fn)(const rtc_rtp_packet_t *pkt, void *user);
+
 /* Serialize RTP header + payload into packet buffer */
 int rtc_rtp_build(rtc_rtp_packet_t *pkt, uint8_t pt, uint16_t seq, uint32_t ts, uint32_t ssrc,
                   bool marker, const uint8_t *payload, size_t payload_len);

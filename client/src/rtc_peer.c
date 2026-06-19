@@ -16,7 +16,6 @@ static void peer_runtime_close(rtc_peer_connection_t *pc);
 static void peer_runtime_on_listener_candidate(const rtc_transport_candidate_t *cand, void *user);
 static void peer_runtime_on_listener_done(void *user);
 static void peer_runtime_connect_timer(void *user);
-static void peer_runtime_on_rtp(const rtc_rtp_packet_t *pkt, void *user);
 static void peer_runtime_on_rtcp(const uint8_t *data, size_t len, void *user);
 static void peer_runtime_on_data(const uint8_t *data, size_t len, void *user);
 
@@ -120,14 +119,11 @@ static int peer_runtime_init(rtc_peer_connection_t *pc, const rtc_config_t *conf
         peer_runtime_close(pc);
         return RTC_ERR_GENERIC;
     }
-    rtc_transport_on_rtp(pc->runtime_transport, peer_runtime_on_rtp, pc);
+    rtc_transport_set_rtp_router(pc->runtime_transport, peer_rtp_sink, peer_rtp_resolve, pc);
     rtc_transport_on_rtcp(pc->runtime_transport, peer_runtime_on_rtcp, pc);
     rtc_transport_on_data(pc->runtime_transport, peer_runtime_on_data, pc);
     pc->runtime_connect_timer = RTC_WORKER_TIMER_INVALID;
     pc->runtime_rtcp_timer = RTC_WORKER_TIMER_INVALID;
-#ifdef MRTC_ENABLE_TWCC
-    pc->runtime_twcc_fb_timer = RTC_WORKER_TIMER_INVALID;
-#endif
 
     rtc_dtls_parameters_t dtls;
     if (rtc_transport_get_dtls_parameters(pc->runtime_transport, &dtls) == RTC_OK)
@@ -150,12 +146,6 @@ static void peer_runtime_close(rtc_peer_connection_t *pc) {
         rtc_worker_cancel_timer(worker, pc->runtime_rtcp_timer);
         pc->runtime_rtcp_timer = RTC_WORKER_TIMER_INVALID;
     }
-#ifdef MRTC_ENABLE_TWCC
-    if (worker && pc->runtime_twcc_fb_timer != RTC_WORKER_TIMER_INVALID) {
-        rtc_worker_cancel_timer(worker, pc->runtime_twcc_fb_timer);
-        pc->runtime_twcc_fb_timer = RTC_WORKER_TIMER_INVALID;
-    }
-#endif
     if (pc->runtime_transport) {
         rtc_transport_destroy(pc->runtime_transport);
         pc->runtime_transport = NULL;
@@ -350,11 +340,9 @@ static void peer_runtime_complete_connection(rtc_peer_connection_t *pc) {
             continue;
         rtc_rtp_sender_attach_logical(s, pc->runtime_transport);
 #ifdef MRTC_ENABLE_TWCC
-        if (pc->twcc_ext_id_send != 0) {
-            rtc_rtp_sender_attach_twcc(s, &pc->twcc_sender, pc->twcc_ext_id_send);
-            if (pc->twcc_local_ssrc == 0)
-                pc->twcc_local_ssrc = rtc_rtp_send_stream_ssrc(s->stream);
-        }
+        if (pc->twcc_ext_id != 0)
+            rtc_rtp_sender_attach_twcc(s, rtc_transport_twcc_sender(pc->runtime_transport),
+                                       pc->twcc_ext_id);
 #endif
         rtc_rtp_sender_arm_video(s);
     }
@@ -367,12 +355,6 @@ static void peer_runtime_complete_connection(rtc_peer_connection_t *pc) {
 
     pc->runtime_rtcp_timer = rtc_worker_add_timer(
         peer_runtime_worker(pc), rtc_time_ms() + RTCP_INTERVAL_MS, peer_rtcp_timer, pc);
-#ifdef MRTC_ENABLE_TWCC
-    if (pc->twcc_ext_id_recv != 0) {
-        pc->runtime_twcc_fb_timer = rtc_worker_add_timer(
-            peer_runtime_worker(pc), rtc_time_ms() + TWCC_FB_INTERVAL_MS, peer_twcc_fb_timer, pc);
-    }
-#endif
 
     peer_set_ice_connection(pc, RTC_ICE_CONNECTION_CONNECTED);
     peer_set_connection(pc, RTC_CONNECTION_CONNECTED);
@@ -412,14 +394,9 @@ static void peer_runtime_connect_timer(void *user) {
                                                      peer_runtime_connect_timer, pc);
 }
 
-static void peer_runtime_on_rtp(const rtc_rtp_packet_t *pkt, void *user) {
-    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
-    peer_handle_plain_rtp(pc, pkt);
-}
-
 static void peer_runtime_on_rtcp(const uint8_t *data, size_t len, void *user) {
     rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
-    peer_handle_plain_rtcp(pc, data, len);
+    rtc_rtcp_router_handle(&pc->rtcp_router, data, len);
 }
 
 static void peer_runtime_on_data(const uint8_t *data, size_t len, void *user) {
@@ -512,21 +489,13 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
         return NULL;
     }
 
-    /* Initialize SSRC → receiver lookup map */
-    if (rtc_u32_map_init(&pc->recv_map) != RTC_OK) {
+    /* Initialize the RTCP feedback router (resolves SR recipients via the
+     * transport RTP demux; routes RR/NACK/PLI to send streams). */
+    if (rtc_rtcp_router_init(&pc->rtcp_router, pc->runtime_transport) != RTC_OK) {
         peer_runtime_close(pc);
         free(pc);
         return NULL;
     }
-
-    /* Initialize SSRC → sender lookup map */
-    if (rtc_u32_map_init(&pc->send_map) != RTC_OK) {
-        rtc_u32_map_free(&pc->recv_map);
-        peer_runtime_close(pc);
-        free(pc);
-        return NULL;
-    }
-
     RTC_LOG_INFO("Peer connection created");
     return pc;
 }
@@ -540,27 +509,13 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc) {
     peer_runtime_close(pc);
 
     rtc_dc_manager_close(&pc->dc_manager);
-    rtc_u32_map_free(&pc->recv_map);
-    rtc_u32_map_free(&pc->send_map);
+    rtc_rtcp_router_close(&pc->rtcp_router);
     rtc_sdp_close(&pc->local_sdp);
     rtc_sdp_close(&pc->remote_sdp);
-#ifdef MRTC_ENABLE_RATE_CONTROL
-    if (pc->rate_ctrl) {
-        rtc_rate_control_destroy(pc->rate_ctrl);
-        pc->rate_ctrl = NULL;
-    }
-#endif
     /* Destroy per-sender resources */
     for (int i = 0; i < pc->transceiver_count; i++) {
         rtc_rtp_transceiver_close_resources(&pc->transceivers[i]);
     }
-
-#ifdef MRTC_ENABLE_TWCC
-    if (pc->bwe) {
-        rtc_bwe_destroy(pc->bwe);
-        pc->bwe = NULL;
-    }
-#endif
 
     pc->connection_state = RTC_CONNECTION_CLOSED;
     pc->signaling_state = RTC_SIGNALING_CLOSED;
@@ -591,9 +546,9 @@ rtc_rtp_sender_t *rtc_peer_connection_add_track(rtc_peer_connection_t *pc, rtc_k
     struct rtc_rtp_transceiver *t = &pc->transceivers[pc->transceiver_count];
     rtc_rtp_transceiver_init_slot(t, pc->transceiver_count, kind, codec);
 
-    /* Eager SSRC → sender map: SSRC is known now, register so RTCP RR
-     * report blocks naming this SSRC can be demuxed back to this sender. */
-    rtc_u32_map_set(&pc->send_map, rtc_rtp_send_stream_ssrc(t->sender.stream), &t->sender);
+    /* SSRC is fixed at creation, so register for RTCP feedback now. */
+    rtc_rtcp_router_add_sender(&pc->rtcp_router, rtc_rtp_send_stream_ssrc(t->sender.stream),
+                               t->sender.stream);
 
     pc->transceiver_count++;
     return &t->sender;
@@ -617,7 +572,8 @@ rtc_rtp_transceiver_t *rtc_peer_connection_add_transceiver(rtc_peer_connection_t
     /* Sender active only for sendrecv/sendonly. */
     if (t->direction == RTC_DIR_RECVONLY || t->direction == RTC_DIR_INACTIVE)
         rtc_rtp_send_stream_set_active(t->sender.stream, false);
-    rtc_u32_map_set(&pc->send_map, rtc_rtp_send_stream_ssrc(t->sender.stream), &t->sender);
+    rtc_rtcp_router_add_sender(&pc->rtcp_router, rtc_rtp_send_stream_ssrc(t->sender.stream),
+                               t->sender.stream);
 
     pc->transceiver_count++;
     return (rtc_rtp_transceiver_t *)t;
@@ -799,11 +755,12 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
         }
     }
 
-    /* Eager SSRC → receiver map population from remote SDP. Walk parsed
+    /* Eager SSRC → receive-stream binding from remote SDP. Walk parsed
      * m= sections; for each that carried a=ssrc, find the matching
-     * transceiver by mid_index and register its receiver under that SSRC.
-     * Lazy first-packet population in peer_handle_plain_rtp remains as a
-     * defensive fallback for peers that omit a=ssrc lines. */
+     * transceiver by mid_index and bind its receive stream into the
+     * transport RTP demux under that SSRC. The payload-type resolver
+     * (peer_rtp_resolve) remains as a defensive fallback for peers that
+     * omit a=ssrc lines. */
     for (int i = 0; i < pc->remote_sdp.media_count; i++) {
         const rtc_sdp_media_t *m = &pc->remote_sdp.media[i];
         if (m->ssrc == 0)
@@ -812,7 +769,7 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
             struct rtc_rtp_transceiver *t = &pc->transceivers[j];
             if (t->mid_index == m->mid_index) {
                 rtc_rtp_recv_stream_set_ssrc(t->receiver.stream, m->ssrc);
-                rtc_u32_map_set(&pc->recv_map, m->ssrc, &t->receiver);
+                rtc_transport_bind_rtp(pc->runtime_transport, m->ssrc, t->receiver.stream);
                 break;
             }
         }
@@ -826,20 +783,15 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
             continue;
         uint8_t id = rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC);
         if (id != 0) {
-            pc->twcc_ext_id_send = id;
-            pc->twcc_ext_id_recv = id;
-            if (pc->twcc_remote_ssrc == 0)
-                pc->twcc_remote_ssrc = m->ssrc;
-            rtc_twcc_sender_init(&pc->twcc_sender);
-            rtc_twcc_receiver_init(&pc->twcc_receiver);
-            if (!pc->bwe) {
-                rtc_bwe_config_t bcfg = {
-                    .initial_bps = 500000,
-                    .min_bps = 100000,
-                    .max_bps = 4000000,
-                };
-                pc->bwe = rtc_bwe_create(&bcfg);
+            pc->twcc_ext_id = id;
+            uint32_t local_ssrc = 0;
+            for (int k = 0; k < pc->transceiver_count; k++) {
+                if (rtc_rtp_send_stream_is_active(pc->transceivers[k].sender.stream)) {
+                    local_ssrc = rtc_rtp_send_stream_ssrc(pc->transceivers[k].sender.stream);
+                    break;
+                }
             }
+            rtc_transport_enable_twcc(pc->runtime_transport, id, local_ssrc, NULL);
             RTC_LOG_INFO("Peer: transport-cc negotiated (ext id=%u)", (unsigned)id);
             break;
         }
@@ -969,8 +921,7 @@ void rtc_peer_connection_on_bitrate_estimate(rtc_peer_connection_t *pc,
     if (!pc)
         return;
 #ifdef MRTC_ENABLE_TWCC
-    pc->on_bitrate_estimate = fn;
-    pc->on_bitrate_estimate_user = user;
+    rtc_transport_on_bitrate_estimate(pc->runtime_transport, fn, user);
 #else
     (void)fn;
     (void)user;

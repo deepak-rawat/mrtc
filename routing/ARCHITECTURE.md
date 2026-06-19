@@ -37,8 +37,7 @@ routers, producers, or consumers; they create core transports directly.
 
 ```
 UDP -> mrtc transport -> SRTP unprotect -> RTP parse
-    -> routing transport callback
-    -> SSRC lookup
+    -> transport RTP demux (SSRC -> producer)
     -> producer stats + consumer fan-out
     -> consumer re-packetize/re-SSRC
     -> mrtc transport SRTP protect + send
@@ -46,8 +45,12 @@ UDP -> mrtc transport -> SRTP unprotect -> RTP parse
 
 ## Ownership
 
-- Core transport owns network, ICE, DTLS, SRTP, and callbacks.
-- Routing owns producer registration and SSRC-to-producer lookup.
+- Core transport owns network, ICE, DTLS, SRTP, and the SSRC -> consumer
+  RTP demux. The router binds each producer's SSRC into its transport via
+  `rtc_transport_bind_rtp()`; there is no router-side SSRC map, mutex, or
+  global transport registry anymore — the worker loop serializes bind /
+  unbind / dispatch.
+- Routing owns producer registration (bind/unbind into the transport).
 - Producers own consumer lists.
 - Consumers own outbound RTP parameters and forwarding counters.
 

@@ -7,6 +7,12 @@
 #include "rtc_dtls.h"
 #include "rtc/rtc_rtp.h"
 #include "rtc/rtc_sdp.h"
+#include "rtc_rtp_demux.h"
+#ifdef MRTC_ENABLE_TWCC
+#  include "rtc/rtc_rtcp.h"
+#  include "rtc/rtc_rtp_ext.h"
+#  include "rtc_twcc_receiver.h"
+#endif
 #include "rtc_srtp.h"
 #include "rtc_stun.h"
 #include "rtc_worker_internal.h"
@@ -32,6 +38,7 @@ struct rtc_transport {
     rtc_srtp_ctx_t srtp_recv;
     rtc_transport_rtp_fn on_rtp;
     void *on_rtp_user;
+    rtc_rtp_demux_t rtp_demux;
     rtc_transport_rtcp_fn on_rtcp;
     void *on_rtcp_user;
     rtc_transport_data_fn on_data;
@@ -53,10 +60,28 @@ struct rtc_transport {
     _Atomic uint64_t packets_received;
     _Atomic uint64_t bytes_received;
     _Atomic uint64_t dtls_packets_received;
+#ifdef MRTC_ENABLE_TWCC
+    bool twcc_enabled;
+    uint8_t twcc_ext_id;
+    uint32_t twcc_local_ssrc;
+    uint32_t twcc_remote_ssrc;
+    bool twcc_have_packets;
+    rtc_twcc_sender_t twcc_sender;
+    rtc_twcc_receiver_t twcc_receiver;
+    rtc_bwe_t *bwe;
+    rtc_worker_timer_t twcc_fb_timer;
+    rtc_transport_bitrate_fn on_bitrate;
+    void *on_bitrate_user;
+#endif
 };
 
 static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                                 const rtc_addr_t *from, void *user);
+#ifdef MRTC_ENABLE_TWCC
+static void transport_record_twcc_arrival(rtc_transport_t *transport, const rtc_rtp_packet_t *pkt);
+static bool transport_consume_twcc_feedback(rtc_transport_t *transport, const uint8_t *buf,
+                                            size_t len);
+#endif
 
 /* Marshal a control/query operation onto the worker loop thread so all
  * per-transport protocol state (ICE, DTLS/SSL, SRTP) is mutated by a
@@ -263,20 +288,38 @@ static void transport_handle_rtp(rtc_transport_t *transport, const uint8_t *data
     if (rtc_rtp_parse(&pkt, buf, pkt_len) != RTC_OK)
         return;
 
-    if (transport->on_rtp)
+    bool delivered = false;
+    if (transport->rtp_demux.ready)
+        delivered = rtc_rtp_demux_dispatch(&transport->rtp_demux, &pkt);
+    if (!delivered && transport->on_rtp)
         transport->on_rtp(&pkt, transport->on_rtp_user);
+
+#ifdef MRTC_ENABLE_TWCC
+    transport_record_twcc_arrival(transport, &pkt);
+#endif
 }
 
 static void transport_handle_rtcp(rtc_transport_t *transport, const uint8_t *data, size_t len) {
     if (!atomic_load_explicit(&transport->srtp_ready, memory_order_acquire) ||
-        !transport->on_rtcp || len > SRTP_MAX_PACKET)
+        len > SRTP_MAX_PACKET)
+        return;
+    bool want = transport->on_rtcp != NULL;
+#ifdef MRTC_ENABLE_TWCC
+    want = want || transport->twcc_enabled;
+#endif
+    if (!want)
         return;
     uint8_t buf[SRTP_MAX_PACKET];
     memcpy(buf, data, len);
     size_t pkt_len = len;
     if (rtc_srtp_unprotect_rtcp(&transport->srtp_recv, buf, &pkt_len) != RTC_OK)
         return;
-    transport->on_rtcp(buf, pkt_len, transport->on_rtcp_user);
+#ifdef MRTC_ENABLE_TWCC
+    if (transport_consume_twcc_feedback(transport, buf, pkt_len))
+        return;
+#endif
+    if (transport->on_rtcp)
+        transport->on_rtcp(buf, pkt_len, transport->on_rtcp_user);
 }
 
 static void transport_read_app_data(rtc_transport_t *transport) {
@@ -371,6 +414,9 @@ rtc_transport_t *rtc_transport_create(rtc_worker_t *worker, const rtc_transport_
     transport->listener = cfg->listener;
     transport->dtls_timer = RTC_WORKER_TIMER_INVALID;
     transport->ice_timer = RTC_WORKER_TIMER_INVALID;
+#ifdef MRTC_ENABLE_TWCC
+    transport->twcc_fb_timer = RTC_WORKER_TIMER_INVALID;
+#endif
     transport->ice_mode = cfg->ice_mode;
     transport->enable_sctp = cfg->enable_sctp;
     transport->enable_twcc = cfg->enable_twcc;
@@ -615,6 +661,17 @@ static int tx_close_impl(rtc_transport_t *transport, void *arg) {
     }
     transport_cancel_ice_timer(transport);
     transport_cancel_dtls_timer(transport);
+    rtc_rtp_demux_close(&transport->rtp_demux);
+#ifdef MRTC_ENABLE_TWCC
+    if (transport->twcc_fb_timer != RTC_WORKER_TIMER_INVALID) {
+        rtc_worker_cancel_timer(transport->worker, transport->twcc_fb_timer);
+        transport->twcc_fb_timer = RTC_WORKER_TIMER_INVALID;
+    }
+    if (transport->bwe) {
+        rtc_bwe_destroy(transport->bwe);
+        transport->bwe = NULL;
+    }
+#endif
     if (atomic_load_explicit(&transport->srtp_ready, memory_order_acquire)) {
         rtc_srtp_close(&transport->srtp_send);
         rtc_srtp_close(&transport->srtp_recv);
@@ -678,6 +735,225 @@ void rtc_transport_on_rtp(rtc_transport_t *transport, rtc_transport_rtp_fn fn, v
     tx_on_rtp_args_t args = {fn, user};
     tx_op_invoke(transport, tx_on_rtp_impl, &args);
 }
+
+typedef struct {
+    rtc_rtp_sink_fn sink;
+    rtc_rtp_resolve_fn resolve;
+    void *user;
+} tx_rtp_router_args_t;
+
+static int tx_set_rtp_router_impl(rtc_transport_t *transport, void *arg) {
+    tx_rtp_router_args_t *a = (tx_rtp_router_args_t *)arg;
+    if (!transport->rtp_demux.ready)
+        return rtc_rtp_demux_init(&transport->rtp_demux, a->sink, a->resolve, a->user);
+    transport->rtp_demux.sink = a->sink;
+    transport->rtp_demux.resolve = a->resolve;
+    transport->rtp_demux.resolve_user = a->user;
+    return RTC_OK;
+}
+
+void rtc_transport_set_rtp_router(rtc_transport_t *transport, rtc_rtp_sink_fn sink,
+                                  rtc_rtp_resolve_fn resolve, void *resolve_user) {
+    if (!transport || !sink)
+        return;
+    tx_rtp_router_args_t args = {sink, resolve, resolve_user};
+    tx_op_invoke(transport, tx_set_rtp_router_impl, &args);
+}
+
+typedef struct {
+    uint32_t ssrc;
+    void *user;
+} tx_bind_rtp_args_t;
+
+static int tx_bind_rtp_impl(rtc_transport_t *transport, void *arg) {
+    tx_bind_rtp_args_t *a = (tx_bind_rtp_args_t *)arg;
+    return rtc_rtp_demux_bind(&transport->rtp_demux, a->ssrc, a->user);
+}
+
+int rtc_transport_bind_rtp(rtc_transport_t *transport, uint32_t ssrc, void *user) {
+    if (!transport || !user)
+        return RTC_ERR_INVALID;
+    tx_bind_rtp_args_t args = {ssrc, user};
+    return tx_op_invoke(transport, tx_bind_rtp_impl, &args);
+}
+
+static int tx_unbind_rtp_impl(rtc_transport_t *transport, void *arg) {
+    uint32_t ssrc = *(const uint32_t *)arg;
+    rtc_rtp_demux_unbind(&transport->rtp_demux, ssrc);
+    return RTC_OK;
+}
+
+void rtc_transport_unbind_rtp(rtc_transport_t *transport, uint32_t ssrc) {
+    if (!transport)
+        return;
+    tx_op_invoke(transport, tx_unbind_rtp_impl, &ssrc);
+}
+
+typedef struct {
+    uint32_t ssrc;
+    void *result;
+} tx_rtp_bound_args_t;
+
+static int tx_rtp_bound_impl(rtc_transport_t *transport, void *arg) {
+    tx_rtp_bound_args_t *a = (tx_rtp_bound_args_t *)arg;
+    a->result = rtc_rtp_demux_get(&transport->rtp_demux, a->ssrc);
+    return RTC_OK;
+}
+
+void *rtc_transport_rtp_bound(rtc_transport_t *transport, uint32_t ssrc) {
+    if (!transport)
+        return NULL;
+    tx_rtp_bound_args_t args = {ssrc, NULL};
+    tx_op_invoke(transport, tx_rtp_bound_impl, &args);
+    return args.result;
+}
+
+#ifdef MRTC_ENABLE_TWCC
+static void transport_record_twcc_arrival(rtc_transport_t *transport, const rtc_rtp_packet_t *pkt) {
+    if (!transport->twcc_enabled || transport->twcc_ext_id == 0 || !pkt->header.extension ||
+        !pkt->ext_data || pkt->ext_len == 0)
+        return;
+    rtc_rtp_ext_t exts[RTC_RTP_EXT_MAX_ENTRIES];
+    size_t cnt = RTC_RTP_EXT_MAX_ENTRIES;
+    if (rtc_rtp_ext_parse_body(pkt->ext_data, pkt->ext_len, exts, &cnt) != RTC_OK)
+        return;
+    const rtc_rtp_ext_t *e = rtc_rtp_ext_find(exts, cnt, transport->twcc_ext_id);
+    if (!e)
+        return;
+    uint16_t tseq = rtc_rtp_ext_read_transport_cc(e);
+    rtc_twcc_receiver_on_packet(&transport->twcc_receiver, tseq, rtc_time_us());
+    if (transport->twcc_remote_ssrc == 0)
+        transport->twcc_remote_ssrc = pkt->header.ssrc;
+    transport->twcc_have_packets = true;
+}
+
+static bool transport_consume_twcc_feedback(rtc_transport_t *transport, const uint8_t *buf,
+                                            size_t len) {
+    if (!transport->twcc_enabled || !transport->bwe)
+        return false;
+    uint8_t pt, fmt;
+    if (!rtc_rtcp_get_pt_fmt(buf, len, &pt, &fmt) || pt != RTCP_PT_RTPFB || fmt != 15)
+        return false;
+    rtc_rtcp_twcc_t tw;
+    if (rtc_rtcp_parse_twcc(&tw, buf, len) != RTC_OK)
+        return true;
+    for (int i = 0; i < tw.item_count; i++) {
+        const rtc_twcc_sent_pkt_t *s =
+            rtc_twcc_sender_lookup(&transport->twcc_sender, tw.items[i].seq);
+        if (!s)
+            continue;
+        uint64_t recv_us = tw.items[i].received ? tw.items[i].recv_time_us : 0;
+        rtc_bwe_on_packet_feedback(transport->bwe, s->send_time_us, recv_us, s->size);
+    }
+    return true;
+}
+
+static void transport_twcc_fb_timer(void *user) {
+    rtc_transport_t *transport = (rtc_transport_t *)user;
+    transport->twcc_fb_timer = RTC_WORKER_TIMER_INVALID;
+    if (atomic_load_explicit(&transport->closed, memory_order_acquire))
+        return;
+    if (transport->twcc_have_packets && transport->twcc_receiver.have_base) {
+        uint8_t fb[RTCP_MAX_PACKET];
+        size_t fb_len = 0;
+        if (rtc_twcc_receiver_build_feedback(&transport->twcc_receiver, transport->twcc_local_ssrc,
+                                             transport->twcc_remote_ssrc, fb, sizeof(fb),
+                                             &fb_len) == RTC_OK) {
+            uint8_t out[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
+            if (fb_len <= sizeof(out)) {
+                memcpy(out, fb, fb_len);
+                size_t out_len = fb_len;
+                (void)rtc_transport_send_rtcp(transport, out, &out_len, sizeof(out));
+            }
+        }
+        transport->twcc_have_packets = false;
+    }
+    transport->twcc_fb_timer = rtc_worker_add_timer(transport->worker, rtc_time_ms() + 100,
+                                                    transport_twcc_fb_timer, transport);
+}
+
+static void transport_bwe_trampoline(uint32_t bitrate_bps, void *user) {
+    rtc_transport_t *transport = (rtc_transport_t *)user;
+    if (transport->on_bitrate)
+        transport->on_bitrate(bitrate_bps, transport->on_bitrate_user);
+}
+
+typedef struct {
+    uint8_t ext_id;
+    uint32_t local_ssrc;
+    const rtc_bwe_config_t *bwe_cfg;
+} tx_enable_twcc_args_t;
+
+static int tx_enable_twcc_impl(rtc_transport_t *transport, void *arg) {
+    tx_enable_twcc_args_t *a = (tx_enable_twcc_args_t *)arg;
+    if (!transport->enable_twcc)
+        return RTC_ERR_INVALID;
+    if (transport->twcc_enabled)
+        return RTC_OK;
+    transport->twcc_ext_id = a->ext_id;
+    transport->twcc_local_ssrc = a->local_ssrc;
+    rtc_twcc_sender_init(&transport->twcc_sender);
+    rtc_twcc_receiver_init(&transport->twcc_receiver);
+    rtc_bwe_config_t cfg;
+    if (a->bwe_cfg) {
+        cfg = *a->bwe_cfg;
+    } else {
+        cfg.initial_bps = transport->initial_outgoing_bitrate_bps
+                              ? transport->initial_outgoing_bitrate_bps
+                              : 500000;
+        cfg.min_bps = 100000;
+        cfg.max_bps = 4000000;
+    }
+    transport->bwe = rtc_bwe_create(&cfg);
+    if (!transport->bwe)
+        return RTC_ERR_NOMEM;
+    rtc_bwe_on_bitrate_change(transport->bwe, transport_bwe_trampoline, transport);
+    transport->twcc_enabled = true;
+    if (transport->twcc_fb_timer == RTC_WORKER_TIMER_INVALID)
+        transport->twcc_fb_timer = rtc_worker_add_timer(transport->worker, rtc_time_ms() + 100,
+                                                        transport_twcc_fb_timer, transport);
+    return RTC_OK;
+}
+
+int rtc_transport_enable_twcc(rtc_transport_t *transport, uint8_t ext_id, uint32_t local_ssrc,
+                              const rtc_bwe_config_t *bwe_cfg) {
+    if (!transport || ext_id == 0)
+        return RTC_ERR_INVALID;
+    tx_enable_twcc_args_t args = {ext_id, local_ssrc, bwe_cfg};
+    return tx_op_invoke(transport, tx_enable_twcc_impl, &args);
+}
+
+rtc_twcc_sender_t *rtc_transport_twcc_sender(rtc_transport_t *transport) {
+    if (!transport || !transport->twcc_enabled)
+        return NULL;
+    return &transport->twcc_sender;
+}
+
+typedef struct {
+    rtc_transport_bitrate_fn fn;
+    void *user;
+} tx_on_bitrate_args_t;
+
+static int tx_on_bitrate_impl(rtc_transport_t *transport, void *arg) {
+    tx_on_bitrate_args_t *a = (tx_on_bitrate_args_t *)arg;
+    transport->on_bitrate = a->fn;
+    transport->on_bitrate_user = a->user;
+    return RTC_OK;
+}
+
+void rtc_transport_on_bitrate_estimate(rtc_transport_t *transport, rtc_transport_bitrate_fn fn,
+                                       void *user) {
+    if (!transport)
+        return;
+    tx_on_bitrate_args_t args = {fn, user};
+    tx_op_invoke(transport, tx_on_bitrate_impl, &args);
+}
+
+void rtc_transport_report_rtcp_loss(rtc_transport_t *transport, uint8_t fraction_lost) {
+    if (transport && transport->twcc_enabled && transport->bwe)
+        rtc_bwe_on_loss(transport->bwe, fraction_lost);
+}
+#endif /* MRTC_ENABLE_TWCC */
 
 typedef struct {
     rtc_transport_rtcp_fn fn;

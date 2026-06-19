@@ -95,17 +95,23 @@ runtime stack — it acquires a shared default `rtc_worker_t` and
 ```c
 struct rtc_peer_connection {
     rtc_client_runtime_t *runtime;        // shared worker + listener
-    rtc_transport_t *runtime_transport;   // private ICE/DTLS/SRTP endpoint
-    rtc_rtp_transceiver_t transceivers[8]; // media tracks
+    rtc_transport_t *runtime_transport;   // private ICE/DTLS/SRTP/RTP endpoint
+    rtc_rtp_transceiver_t transceivers[8]; // media tracks (core send/recv streams)
     rtc_dc_manager_t dc_manager;          // data channels
-    rtc_rate_controller_t *rate_ctrl;     // AIMD rate control (shared fallback)
+    rtc_rtcp_router_t rtcp_router;         // inbound RTCP -> stream routing
     rtc_desc_t local_desc, remote_desc;
-    rtc_twcc_sender_t twcc_sender;        // outbound transport-wide seq history
-    rtc_twcc_receiver_t twcc_receiver;    // inbound arrivals → feedback
-    rtc_bwe_t *bwe;                       // GCC bandwidth estimator (per peer)
+    uint8_t twcc_ext_id;                  // negotiated transport-cc id
     _Atomic rtc_connection_state_t state;
 };
 ```
+
+Inbound RTP no longer round-trips through the peer: the transport owns an
+SSRC -> receive-stream demux that the peer populates from SDP (and a
+payload-type resolver for un-signalled SSRCs), so a parsed packet goes
+transport -> receive stream -> app `on_frame` on the worker thread. The
+TWCC sender/receiver and the GCC bandwidth estimator live in the
+transport (it is transport-*wide* congestion control); the peer only
+negotiates the extension id and forwards the bitrate estimate.
 
 **Lifecycle:** create → add_track → create_offer → set_local_desc →
 (signal) → set_remote_desc → (auto: runtime ICE → DTLS → SRTP) → send
@@ -128,7 +134,11 @@ shared runtime and then calls `rtc_cleanup()`. Apps linking
 ### Track / Transceiver (`rtc_track.h/c`)
 
 RTP sender/receiver per media line. Opaque types — internal structs in
-[client/src/rtc_peer_internal.h](src/rtc_peer_internal.h).
+[client/src/rtc_peer_internal.h](src/rtc_peer_internal.h). The sender and
+receiver are thin handles over the core `rtc_rtp_send_stream` /
+`rtc_rtp_recv_stream`; the core streams stay codec-agnostic (payload type
++ clock rate only), so the WebRTC media model — `rtc_codec_t` descriptor
++ `rtc_kind_t` — lives on the facade and the calls just forward.
 
 - **`rtc_rtp_sender_t`** — takes encoded payload, builds RTP header, and
   sends through the peer's logical transport. The transport (in `libmrtc`)
@@ -184,21 +194,21 @@ SDP negotiation indicates they are in scope. The algorithms themselves
 are documented in [../rtc/ARCHITECTURE.md](../rtc/ARCHITECTURE.md).
 
 - **Per-sender AIMD rate control** — one `rtc_rate_controller_t` lives
-  inside each `rtc_rtp_sender_t`; the SSRC→sender hashmap routes each
-  parsed RTCP RR block to the originating sender.
-- **NACK retransmit buffer** — 512-packet ring buffer per video sender;
-  incoming Generic NACK blocks are served by re-sending the cached
-  post-SRTP wire packet through the runtime transport.
-- **Transport-Wide CC** — `rtc_twcc_sender_t` writes the transport-cc
-  extension into outbound RTP and records send time + wire size;
-  `rtc_twcc_receiver_t` records arrivals and the 100 ms peer-owned timer
-  emits an SRTCP-protected feedback packet.
-- **Bandwidth estimator** — one `rtc_bwe_t` per peer is created when
+  inside each send stream; the RTCP router routes each parsed RR block to
+  the originating send stream.
+- **NACK retransmit buffer** — 512-packet ring buffer per video send
+  stream; incoming Generic NACK blocks are served by re-sending the
+  cached post-SRTP wire packet through the runtime transport.
+- **Transport-Wide CC** — owned by the transport. The send stream writes
+  the transport-cc extension into outbound RTP and records send time +
+  wire size into the transport's TWCC sender ring; the transport records
+  arrivals and its 100 ms timer emits an SRTCP-protected feedback packet.
+- **Bandwidth estimator** — the transport owns one `rtc_bwe_t` when
   transport-cc is negotiated. Each parsed TWCC feedback item plus RR
-  `fraction_lost` is fed in; the resulting estimate is exposed to the
-  application via `rtc_peer_connection_on_bitrate_estimate()`. Apps
-  subscribe explicitly — the bitrate is *not* auto-wired to any media
-  encoder.
+  `fraction_lost` is fed in; the estimate is surfaced via the transport
+  and forwarded to the application through
+  `rtc_peer_connection_on_bitrate_estimate()`. Apps subscribe explicitly
+  — the bitrate is *not* auto-wired to any media encoder.
 
 ## Threading Model
 

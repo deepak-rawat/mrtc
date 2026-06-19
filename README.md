@@ -126,7 +126,7 @@ returns.
 
 ## Tests
 
-40 test executables. No external framework.
+42 test executables. No external framework.
 
 ```bash
 # Run all tests (from build/)

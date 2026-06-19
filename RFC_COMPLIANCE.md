@@ -596,7 +596,7 @@ Files: `client/src/rtc_peer.c`, `rtc/src/rtc_rtp.c`
 | RTP header extensions | `transport-cc` and abs-send-time helpers exist; `mid` and audio-level are not wired |
 | Reduced-size RTCP | Always full-size SR/RR |
 | Bandwidth adaptation based on RTCP | GCC/Transport-CC implemented; encoder auto-wiring remains app-owned |
-| SSRC multiplexing per spec | SSRC maps are used for peer sender/receiver demux |
+| SSRC multiplexing per spec | Per-transport SSRC → stream demux (`rtc_rtp_demux`), shared by peer + SFU |
 
 ---
 

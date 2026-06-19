@@ -19,25 +19,17 @@
 #include "rtc/rtc_nack_buf.h"
 #include "rtc_client_runtime.h"
 #include "rtc/rtc_listener.h"
+#include "rtc/rtc_rtcp_router.h"
 #include "rtc/rtc_rtp_stream.h"
 #include "rtc/rtc_transport.h"
 #include "rtc/rtc_worker.h"
-
-#ifdef MRTC_ENABLE_RATE_CONTROL
-#  include "rtc/rtc_rate_control.h"
-#endif
-
-#ifdef MRTC_ENABLE_TWCC
-#  include "rtc/rtc_twcc_sender.h"
-#  include "rtc/rtc_twcc_receiver.h"
-#  include "rtc/rtc_bwe.h"
-#endif
 
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Internal transceiver structs; layout shared with rtc_track.c. */
+/* Internal transceiver structs; layout shared with rtc_track.c. The core
+ * streams are codec-agnostic, so codec + kind live here on the facade. */
 
 struct rtc_rtp_sender {
     rtc_rtp_send_stream_t *stream;
@@ -67,9 +59,6 @@ struct rtc_peer_connection {
     bool runtime_registered;
     rtc_worker_timer_t runtime_connect_timer;
     rtc_worker_timer_t runtime_rtcp_timer;
-#ifdef MRTC_ENABLE_TWCC
-    rtc_worker_timer_t runtime_twcc_fb_timer;
-#endif
     char runtime_fingerprint[RTC_DTLS_FINGERPRINT_MAX];
     bool runtime_connected;
 
@@ -113,31 +102,15 @@ struct rtc_peer_connection {
     /* Connection started flag */
     bool connect_started;
 
-#ifdef MRTC_ENABLE_RATE_CONTROL
-    /* Shared rate controller fallback (created on connection, fed by RTCP RR) */
-    rtc_rate_controller_t *rate_ctrl;
-#endif
-
-    /* Fast SSRC → receiver lookup */
-    rtc_u32_map_t recv_map;
-
-    /* Fast SSRC → sender lookup */
-    rtc_u32_map_t send_map;
+    /* RTCP feedback router: SSRC → send stream, with receive streams resolved
+     * through the transport's RTP demux. Replaces the old peer send_map. */
+    rtc_rtcp_router_t rtcp_router;
 
 #ifdef MRTC_ENABLE_TWCC
-    /* Transport-Wide Congestion Control */
-    rtc_twcc_sender_t twcc_sender;
-    rtc_twcc_receiver_t twcc_receiver;
-    uint8_t twcc_ext_id_send;
-    uint8_t twcc_ext_id_recv;
-    uint32_t twcc_local_ssrc;
-    uint32_t twcc_remote_ssrc;
-    bool twcc_have_packets;
-
-    /* Bandwidth estimator (consumes TWCC feedback + RR loss) */
-    rtc_bwe_t *bwe;
-    rtc_on_bitrate_estimate_fn on_bitrate_estimate;
-    void *on_bitrate_estimate_user;
+    /* Negotiated transport-cc header extension id (0 = not negotiated). The
+     * TWCC sender/receiver, BWE, and 100 ms feedback timer all live in the
+     * runtime transport; the peer only carries the id needed to tag senders. */
+    uint8_t twcc_ext_id;
 #endif
 };
 
@@ -198,21 +171,14 @@ void rtc_rtp_receiver_activate(struct rtc_rtp_receiver *r);
 /* Serialize a single transceiver into an SDP m= section. */
 void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc_sdp_media_t *m);
 
-/* Entry points defined in rtc_peer_packets.c. */
-void peer_handle_plain_rtp(rtc_peer_connection_t *pc, const rtc_rtp_packet_t *pkt);
-void peer_handle_plain_rtcp(rtc_peer_connection_t *pc, const uint8_t *buf, size_t pkt_len);
+/* Inbound RTP dispatch, defined in rtc_peer_packets.c. The transport's RTP
+ * router resolves an SSRC to its receive stream (peer_rtp_resolve) and then
+ * delivers each packet straight to that stream (peer_rtp_sink). */
+void peer_rtp_sink(const rtc_rtp_packet_t *pkt, void *user);
+void *peer_rtp_resolve(const rtc_rtp_packet_t *pkt, void *user);
 
 /* RTCP send timer + interval. */
 #define RTCP_INTERVAL_MS 5000
 void peer_rtcp_timer(void *user);
-
-#ifdef MRTC_ENABLE_TWCC
-/* TWCC feedback send timer + interval. */
-#  define TWCC_FB_INTERVAL_MS 100
-void peer_twcc_fb_timer(void *user);
-
-/* BWE bitrate-change trampoline (registered with rtc_bwe_on_bitrate_change). */
-void peer_on_bwe_bitrate(uint32_t bitrate_bps, void *user);
-#endif
 
 #endif /* RTC_PEER_INTERNAL_H */

@@ -9,6 +9,11 @@
 #include "rtc_sdp.h"
 #include "rtc_worker.h"
 
+#ifdef MRTC_ENABLE_TWCC
+#  include "rtc_twcc_sender.h"
+#  include "rtc_bwe.h"
+#endif
+
 #define RTC_ICE_UFRAG_MAX                   8
 #define RTC_ICE_PWD_MAX                     24
 #define RTC_DTLS_FINGERPRINT_MAX            96
@@ -104,6 +109,49 @@ int rtc_transport_get_stats(rtc_transport_t *transport, rtc_transport_stats_t *o
 void rtc_transport_on_rtp(rtc_transport_t *transport, rtc_transport_rtp_fn fn, void *user);
 void rtc_transport_on_rtcp(rtc_transport_t *transport, rtc_transport_rtcp_fn fn, void *user);
 void rtc_transport_on_data(rtc_transport_t *transport, rtc_transport_data_fn fn, void *user);
+
+/* Inbound RTP demux router. With a router installed, parsed RTP packets are
+ * dispatched per-SSRC to the bound consumer via `sink`; an unknown SSRC is
+ * offered to `resolve` (may be NULL), which may return a consumer to auto-bind
+ * for O(1) dispatch thereafter. Packets the router does not deliver fall back
+ * to rtc_transport_on_rtp (the single-stream raw handler, e.g. loopback tests).
+ * bind / unbind / set run on the worker loop. */
+void rtc_transport_set_rtp_router(rtc_transport_t *transport, rtc_rtp_sink_fn sink,
+                                  rtc_rtp_resolve_fn resolve, void *resolve_user);
+int rtc_transport_bind_rtp(rtc_transport_t *transport, uint32_t ssrc, void *user);
+void rtc_transport_unbind_rtp(rtc_transport_t *transport, uint32_t ssrc);
+
+/* Look up the consumer currently bound to `ssrc` in the RTP router, or NULL.
+ * Worker-thread accessor: call only from a transport callback (e.g. on_rtcp),
+ * used to route RTCP Sender Reports back to the matching receive stream. */
+void *rtc_transport_rtp_bound(rtc_transport_t *transport, uint32_t ssrc);
+
+#ifdef MRTC_ENABLE_TWCC
+typedef void (*rtc_transport_bitrate_fn)(uint32_t bitrate_bps, void *user);
+
+/* Enable transport-wide congestion control once SDP negotiation has selected a
+ * transport-cc header extension id. The transport then tags nothing itself but
+ * owns the TWCC sender history, the receiver arrival window + 100 ms feedback
+ * timer, and the GCC bandwidth estimator. Requires cfg->enable_twcc at create.
+ * `local_ssrc` identifies the feedback sender; `bwe_cfg` may be NULL to use the
+ * transport's initial_outgoing_bitrate_bps. */
+int rtc_transport_enable_twcc(rtc_transport_t *transport, uint8_t ext_id, uint32_t local_ssrc,
+                              const rtc_bwe_config_t *bwe_cfg);
+
+/* Returns the TWCC sender history for outbound RTP tagging, or NULL when TWCC
+ * is not enabled. Send streams attach to it to write the transport-cc header
+ * extension and record post-protect wire size + send time. */
+rtc_twcc_sender_t *rtc_transport_twcc_sender(rtc_transport_t *transport);
+
+/* Subscribe to GCC bandwidth-estimate changes (fires on the worker loop). */
+void rtc_transport_on_bitrate_estimate(rtc_transport_t *transport, rtc_transport_bitrate_fn fn,
+                                       void *user);
+
+/* Feed an RTCP RR fraction-lost (0..255) into the loss-based estimator. Call
+ * from a transport on_rtcp callback (worker thread). No-op without TWCC. */
+void rtc_transport_report_rtcp_loss(rtc_transport_t *transport, uint8_t fraction_lost);
+#endif
+
 int rtc_transport_send_data(rtc_transport_t *transport, const uint8_t *data, size_t len);
 int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap);
 int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap);

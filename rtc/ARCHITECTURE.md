@@ -2,8 +2,9 @@
 
 `libmrtc` is the runtime transport core plus the protocol primitives:
 worker, shared UDP listener, logical transport, STUN / ICE, DTLS, SRTP,
-RTP / RTCP, SDP, NACK buffer, TWCC, BWE. It is always built and is the
-common base for both client peer connections and server-side routing.
+RTP / RTCP, RTP demux, RTCP router, SDP, NACK buffer, TWCC, BWE. It is
+always built and is the common base for both client peer connections and
+server-side routing.
 
 The WebRTC-style peer-connection facade lives in
 [`libmrtc_client`](../client/ARCHITECTURE.md). Server-side router / producer /
@@ -82,9 +83,11 @@ unconditionally:
   protocol helpers and signaling parameter types
 - `rtc_nack_buf.h`, `rtc_rate_control.h`, `rtc_twcc_*.h`, `rtc_bwe.h` — RTP control
   primitives shared by client and routing layers
+- `rtc_rtp_stream.h`, `rtc_rtcp_router.h` — composed RTP send/recv streams and
+  the RTCP feedback router (SSRC → stream routing), shared by client and routing
 
 Internal / private helpers (`rtc_ice.h`, `rtc_dtls.h`, `rtc_srtp.h`,
-`rtc_stun.h`, `rtc_turn.h`,
+`rtc_stun.h`, `rtc_turn.h`, `rtc_rtp_demux.h`,
 `rtc_packet_io.h`, `rtc_poller.h`, `rtc_timer_sched.h`) live in `src/`.
 
 ## Module Details
@@ -103,7 +106,15 @@ consumers.
   One listener can serve many logical transports on the same local port.
 - **`rtc_transport_t`** — one logical ICE / DTLS / SRTP endpoint over a
   shared listener. Handles ICE-lite responses, full ICE checks, DTLS,
-  SRTP / SRTCP, RTP / RTCP callbacks, and DTLS application data.
+  SRTP / SRTCP, and DTLS application data. On the media plane it owns an
+  **RTP demux router** (`rtc_rtp_demux_t`): consumers bind SSRC → stream
+  via `rtc_transport_bind_rtp()` and parsed RTP dispatches straight to the
+  bound stream on the worker thread (no callback hop back into the
+  consumer). It also owns **Transport-Wide CC**: the TWCC sender history,
+  the receiver arrival window + 100 ms feedback timer, and the GCC
+  bandwidth estimator, enabled via `rtc_transport_enable_twcc()` once SDP
+  negotiates the transport-cc extension. `rtc_transport_on_rtp()` remains
+  as a single-stream raw fallback for packets the demux did not route.
 
 The client `rtc_peer_connection_t` (in `libmrtc_client`) creates a
 private worker / listener / transport internally and exposes a
@@ -234,15 +245,34 @@ transport-wide seq).
 with jitter / loss / delay stats. Feedback messages: NACK / PLI / FIR
 (RFC 4585 + 5104) and Transport-CC (PT=205 FMT=15,
 draft-holmer-rmcat-transport-wide-cc) build + parse. SRTCP protect /
-unprotect for all outgoing / incoming RTCP. The client peer connection
-in `libmrtc_client` schedules a 5 s periodic timer for SR / RR per
-active transceiver and a 100 ms timer for TWCC feedback when negotiated.
+unprotect for all outgoing / incoming RTCP. Inbound RTCP is parsed and
+routed by `rtc_rtcp_router` (SR → the receive stream, RR / NACK / PLI /
+FIR → the named send stream); the client schedules a 5 s SR / RR emission
+timer per active transceiver, and the transport runs the 100 ms TWCC
+feedback timer when negotiated.
 
 Statistics tracked:
 ```
 Send: packets_sent, octets_sent, rtp_timestamp
 Recv: packets_received, jitter, last_transit, last_sr_ntp
 ```
+
+### RTP streams, demux & RTCP router (`rtc_rtp_stream.h`, `rtc_rtp_demux.h`, `rtc_rtcp_router.h`)
+
+- **`rtc_rtp_send_stream` / `rtc_rtp_recv_stream`** — composed RTP/RTCP
+  streams owning sequencing, RTCP stats, NACK retransmit, PLI rate
+  limiting, and SR / RR emission. Codec-agnostic: they track only payload
+  type + clock rate (the WebRTC codec descriptor + kind live on the client
+  facade).
+- **`rtc_rtp_demux`** — the single SSRC → consumer routing primitive. A
+  uniform sink plus an optional resolver (first-packet match, e.g. by
+  payload type, then auto-bind). Owned by the transport and reused by the
+  client peer connection (SSRC → receive stream) and the SFU router
+  (SSRC → producer), so neither carries its own SSRC map or callback hop.
+- **`rtc_rtcp_router`** — parses inbound compound RTCP and routes each
+  report to the right stream, using the transport's demux to resolve
+  receive streams and an SSRC → send-stream table for feedback. This is
+  the reusable glue that previously lived hand-written in the client.
 
 ### SDP (`rtc_sdp.h/c`)
 
@@ -289,12 +319,14 @@ Wire-level implementation of
 
 - **Sender ring** — 1024 entries of
   `(twcc_seq, send_time_us, wire_size)` keyed by `twcc_seq & (RING-1)`.
-  When the client peer's `rtc_rtp_sender_send()` runs it assigns the
-  next seq, writes the transport-cc extension into the RTP header, then
-  records the post-SRTP wire size + send time after protect.
+  When `rtc_rtp_sender_send()` runs, the send stream assigns the next seq
+  from the transport-owned ring, writes the transport-cc extension into
+  the RTP header, then records the post-SRTP wire size + send time after
+  protect.
 - **Receiver window** — 256 entries; `rtc_twcc_receiver_on_packet()`
-  records arrivals. The 100 ms feedback timer in the peer connection
-  calls `rtc_twcc_receiver_build_feedback()` which emits an RTCP
+  records arrivals (driven by the transport's inbound RTP path). The
+  100 ms feedback timer in the transport calls
+  `rtc_twcc_receiver_build_feedback()` which emits an RTCP
   PT=205/FMT=15 packet using run-length and 14×1-bit status-vector
   chunks plus 1- or 2-byte 250 µs receive deltas. The packet is then
   SRTCP-protected and sent.
@@ -320,9 +352,11 @@ Simplified Google Congestion Control (draft-ietf-rmcat-gcc):
   `[min_bps, max_bps]`.
 - Callback fires on >3% change or 1 s elapsed.
 
-The client peer connection owns one `rtc_bwe_t` per peer when
-transport-cc is negotiated and surfaces the result via
-`rtc_peer_connection_on_bitrate_estimate()`.
+The transport owns one `rtc_bwe_t` when transport-cc is negotiated
+(gated by its `enable_twcc` config and seeded by
+`initial_outgoing_bitrate_bps`) and surfaces the result via
+`rtc_transport_on_bitrate_estimate()`, which the client peer connection
+forwards to `rtc_peer_connection_on_bitrate_estimate()`.
 
 ## Threading Model
 
@@ -361,6 +395,8 @@ checks the atomic published flags `selected_remote_valid` and
 | `test_timer_sched` | Dynamic timer scheduler |
 | `test_rtcp` | SR/RR build/parse, jitter statistics |
 | `test_rtcp_feedback` | NACK / PLI / FIR build + parse |
+| `test_rtcp_router` | RTCP feedback routing (NACK / PLI) to send streams |
+| `test_rtp_demux` | SSRC → consumer demux: bind / resolve / dispatch |
 | `test_nack_buf` | NACK ring buffer store/lookup, wraparound |
 | `test_twcc` | TWCC sender ring, receiver window, feedback round-trip |
 | `test_bwe` | GCC steady increase, delay-induced decrease, loss clamp, callback |
