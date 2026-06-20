@@ -13,7 +13,7 @@ struct rtc_rtp_ext; /* forward decl, see rtc_rtp_ext.h */
 #define RTP_VERSION     2
 #define RTP_HEADER_SIZE 12
 #define RTP_MAX_PACKET  1400 /* safe MTU for RTP payload */
-#define RTP_SRTP_PAD    10   /* room for SRTP auth tag */
+#define RTP_SRTP_PAD    16   /* room for SRTP/GCM auth tag */
 #define RTP_MAX_EXT_LEN 64   /* max one-byte-form extension block (incl. 4-byte hdr) */
 
 /* RTP header (fixed 12 bytes) */

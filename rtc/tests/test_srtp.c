@@ -21,6 +21,10 @@ static const uint8_t test_key[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0
 static const uint8_t test_salt[14] = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
                                       0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D};
 
+/* AEAD_AES_128_GCM uses a 12-byte salt (RFC 7714 §11). */
+static const uint8_t test_gcm_salt[12] = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25,
+                                          0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B};
+
 TEST(srtp_init) {
     rtc_srtp_ctx_t ctx;
     int rc = rtc_srtp_init(&ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
@@ -244,6 +248,109 @@ TEST(srtp_per_ssrc_rollover) {
     rtc_srtp_close(&recv_ctx);
 }
 
+TEST(srtp_gcm_roundtrip) {
+    rtc_srtp_ctx_t send_ctx, recv_ctx;
+    ASSERT_EQ(rtc_srtp_init_profile(&send_ctx, RTC_SRTP_PROFILE_AEAD_AES_128_GCM, test_key,
+                                    sizeof(test_key), test_gcm_salt, sizeof(test_gcm_salt)),
+              RTC_OK);
+    ASSERT_EQ(rtc_srtp_init_profile(&recv_ctx, RTC_SRTP_PROFILE_AEAD_AES_128_GCM, test_key,
+                                    sizeof(test_key), test_gcm_salt, sizeof(test_gcm_salt)),
+              RTC_OK);
+
+    const uint8_t payload[] = "AEAD_AES_128_GCM round-trip payload!";
+    rtc_rtp_packet_t pkt;
+    rtc_rtp_build(&pkt, 96, 5, 1000, 0xABCDEF01, false, payload, sizeof(payload) - 1);
+
+    uint8_t buf[1500];
+    memcpy(buf, pkt.buf, pkt.buf_len);
+    size_t len = pkt.buf_len;
+
+    ASSERT_EQ(rtc_srtp_protect(&send_ctx, buf, &len, sizeof(buf)), RTC_OK);
+    /* GCM appends a 16-byte tag and leaves the header in the clear. */
+    ASSERT_EQ(len, pkt.buf_len + SRTP_GCM_TAG_LEN);
+    ASSERT_MEM_EQ(buf, pkt.buf, RTP_HEADER_SIZE);
+    bool encrypted = false;
+    for (size_t i = RTP_HEADER_SIZE; i < pkt.buf_len; i++) {
+        if (buf[i] != pkt.buf[i]) {
+            encrypted = true;
+            break;
+        }
+    }
+    ASSERT(encrypted);
+
+    ASSERT_EQ(rtc_srtp_unprotect(&recv_ctx, buf, &len), RTC_OK);
+    ASSERT_EQ(len, pkt.buf_len);
+    ASSERT_MEM_EQ(buf + RTP_HEADER_SIZE, payload, sizeof(payload) - 1);
+
+    printf("    GCM SRTP round-trip: payload restored, 16-byte tag\n");
+
+    rtc_srtp_close(&send_ctx);
+    rtc_srtp_close(&recv_ctx);
+}
+
+TEST(srtp_gcm_wrong_key_fails) {
+    rtc_srtp_ctx_t send_ctx, bad_ctx;
+    rtc_srtp_init_profile(&send_ctx, RTC_SRTP_PROFILE_AEAD_AES_128_GCM, test_key, sizeof(test_key),
+                          test_gcm_salt, sizeof(test_gcm_salt));
+    uint8_t bad_key[16] = {0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8,
+                           0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0};
+    rtc_srtp_init_profile(&bad_ctx, RTC_SRTP_PROFILE_AEAD_AES_128_GCM, bad_key, sizeof(bad_key),
+                          test_gcm_salt, sizeof(test_gcm_salt));
+
+    uint8_t payload[40];
+    memset(payload, 0x5A, sizeof(payload));
+    rtc_rtp_packet_t pkt;
+    rtc_rtp_build(&pkt, 96, 9, 0, 0x22223333, false, payload, sizeof(payload));
+    uint8_t buf[1500];
+    memcpy(buf, pkt.buf, pkt.buf_len);
+    size_t len = pkt.buf_len;
+    ASSERT_EQ(rtc_srtp_protect(&send_ctx, buf, &len, sizeof(buf)), RTC_OK);
+
+    ASSERT(rtc_srtp_unprotect(&bad_ctx, buf, &len) != RTC_OK);
+
+    printf("    GCM SRTP wrong key: correctly rejected\n");
+
+    rtc_srtp_close(&send_ctx);
+    rtc_srtp_close(&bad_ctx);
+}
+
+TEST(srtcp_gcm_roundtrip) {
+    rtc_srtp_ctx_t send_ctx, recv_ctx;
+    rtc_srtp_init_profile(&send_ctx, RTC_SRTP_PROFILE_AEAD_AES_128_GCM, test_key, sizeof(test_key),
+                          test_gcm_salt, sizeof(test_gcm_salt));
+    rtc_srtp_init_profile(&recv_ctx, RTC_SRTP_PROFILE_AEAD_AES_128_GCM, test_key, sizeof(test_key),
+                          test_gcm_salt, sizeof(test_gcm_salt));
+
+    rtc_rtcp_stats_t stats;
+    rtc_rtcp_stats_init(&stats, 0xDEADBEEF);
+    for (int i = 0; i < 20; i++)
+        rtc_rtcp_stats_on_rtp_send(&stats, (uint32_t)(i * 960), 160);
+
+    rtc_rtcp_packet_t rtcp_pkt;
+    ASSERT_EQ(rtc_rtcp_build_sr(&rtcp_pkt, &stats), RTC_OK);
+
+    uint8_t original[1500];
+    memcpy(original, rtcp_pkt.buf, rtcp_pkt.buf_len);
+    size_t original_len = rtcp_pkt.buf_len;
+
+    uint8_t buf[1500];
+    memcpy(buf, rtcp_pkt.buf, rtcp_pkt.buf_len);
+    size_t len = rtcp_pkt.buf_len;
+    ASSERT_EQ(rtc_srtp_protect_rtcp(&send_ctx, buf, &len, sizeof(buf)), RTC_OK);
+    /* GCM SRTCP adds a 16-byte tag + 4-byte SRTCP index. */
+    ASSERT_EQ(len, original_len + SRTP_GCM_TAG_LEN + 4);
+
+    ASSERT_EQ(rtc_srtp_unprotect_rtcp(&recv_ctx, buf, &len), RTC_OK);
+    ASSERT_EQ(len, original_len);
+    ASSERT_MEM_EQ(buf, original, original_len);
+
+    printf("    GCM SRTCP round-trip: %zu -> %zu -> %zu bytes\n", original_len, original_len + 20,
+           len);
+
+    rtc_srtp_close(&send_ctx);
+    rtc_srtp_close(&recv_ctx);
+}
+
 TEST(srtcp_roundtrip) {
     rtc_srtp_ctx_t send_ctx, recv_ctx;
     rtc_srtp_init(&send_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
@@ -408,6 +515,9 @@ int main(void) {
     RUN_TEST(srtp_wrong_key_fails);
     RUN_TEST(srtp_multiple_packets);
     RUN_TEST(srtp_per_ssrc_rollover);
+    RUN_TEST(srtp_gcm_roundtrip);
+    RUN_TEST(srtp_gcm_wrong_key_fails);
+    RUN_TEST(srtcp_gcm_roundtrip);
     RUN_TEST(srtcp_roundtrip);
     RUN_TEST(srtcp_wrong_key_fails);
     RUN_TEST(srtp_replay_rejected);

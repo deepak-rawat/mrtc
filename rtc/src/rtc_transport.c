@@ -281,14 +281,19 @@ static void transport_try_export_srtp(rtc_transport_t *transport) {
                                    ? transport->dtls.srtp_server_salt
                                    : transport->dtls.srtp_client_salt;
 
-    int rc = rtc_srtp_init(&transport->srtp_send, send_key, RTC_SRTP_MASTER_KEY_LEN, send_salt,
-                           RTC_SRTP_MASTER_SALT_LEN);
+    rtc_srtp_profile_t profile = transport->dtls.srtp_aead_gcm
+                                     ? RTC_SRTP_PROFILE_AEAD_AES_128_GCM
+                                     : RTC_SRTP_PROFILE_AES128_CM_SHA1_80;
+    size_t salt_len = transport->dtls.srtp_salt_len;
+
+    int rc = rtc_srtp_init_profile(&transport->srtp_send, profile, send_key,
+                                   RTC_SRTP_MASTER_KEY_LEN, send_salt, salt_len);
     if (rc != RTC_OK) {
         transport->dtls.state = RTC_DTLS_STATE_FAILED;
         return;
     }
-    rc = rtc_srtp_init(&transport->srtp_recv, recv_key, RTC_SRTP_MASTER_KEY_LEN, recv_salt,
-                       RTC_SRTP_MASTER_SALT_LEN);
+    rc = rtc_srtp_init_profile(&transport->srtp_recv, profile, recv_key, RTC_SRTP_MASTER_KEY_LEN,
+                               recv_salt, salt_len);
     if (rc != RTC_OK) {
         rtc_srtp_close(&transport->srtp_send);
         transport->dtls.state = RTC_DTLS_STATE_FAILED;

@@ -200,8 +200,9 @@ static int srtp_kdf(const uint8_t *master_key, const uint8_t *master_salt, size_
     return RTC_OK;
 }
 
-int rtc_srtp_init(rtc_srtp_ctx_t *ctx, const uint8_t *master_key, size_t key_len,
-                  const uint8_t *master_salt, size_t salt_len) {
+int rtc_srtp_init_profile(rtc_srtp_ctx_t *ctx, rtc_srtp_profile_t profile,
+                          const uint8_t *master_key, size_t key_len, const uint8_t *master_salt,
+                          size_t salt_len) {
     memset(ctx, 0, sizeof(*ctx));
 
     /* Init the per-context lock before any field that protect/unprotect
@@ -215,47 +216,60 @@ int rtc_srtp_init(rtc_srtp_ctx_t *ctx, const uint8_t *master_key, size_t key_len
     if (salt_len > SRTP_MAX_SALT_LEN)
         salt_len = SRTP_MAX_SALT_LEN;
 
+    ctx->profile = profile;
+    ctx->salt_len = salt_len;
     memcpy(ctx->master_key, master_key, key_len);
     memcpy(ctx->master_salt, master_salt, salt_len);
 
-    /* Derive session keys */
+    /* Session encryption key + salt (RTP). The session salt matches the master
+     * salt length (14 for AES-CM, 12 for GCM). */
     int rc;
     rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTP_ENCRYPTION, ctx->session_key,
                   SRTP_MAX_KEY_LEN);
     if (rc != RTC_OK)
         return rc;
-
     rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTP_SALT, ctx->session_salt,
-                  SRTP_MAX_SALT_LEN);
+                  salt_len);
     if (rc != RTC_OK)
         return rc;
 
-    uint8_t auth_key[20];
-    rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTP_AUTH, auth_key, 20);
-    if (rc != RTC_OK)
-        return rc;
-    memcpy(ctx->session_auth_key, auth_key, 20);
-
-    /* Derive RTCP session keys (labels 0x03-0x05) */
+    /* Session encryption key + salt (RTCP, labels 0x03 / 0x05). */
     rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTCP_ENCRYPTION,
                   ctx->rtcp_session_key, SRTP_MAX_KEY_LEN);
     if (rc != RTC_OK)
         return rc;
-
     rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTCP_SALT, ctx->rtcp_session_salt,
-                  SRTP_MAX_SALT_LEN);
+                  salt_len);
     if (rc != RTC_OK)
         return rc;
 
-    uint8_t rtcp_auth_key[20];
-    rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTCP_AUTH, rtcp_auth_key, 20);
-    if (rc != RTC_OK)
-        return rc;
-    memcpy(ctx->rtcp_session_auth_key, rtcp_auth_key, 20);
+    /* AES-CM needs separate HMAC-SHA1 auth keys; GCM authenticates via the AEAD
+     * tag, so it has no auth keys. */
+    if (profile == RTC_SRTP_PROFILE_AES128_CM_SHA1_80) {
+        uint8_t auth_key[20];
+        rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTP_AUTH, auth_key, 20);
+        if (rc != RTC_OK)
+            return rc;
+        memcpy(ctx->session_auth_key, auth_key, 20);
+
+        uint8_t rtcp_auth_key[20];
+        rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTCP_AUTH, rtcp_auth_key, 20);
+        if (rc != RTC_OK)
+            return rc;
+        memcpy(ctx->rtcp_session_auth_key, rtcp_auth_key, 20);
+    }
 
     ctx->initialized = true;
-    RTC_LOG_INFO("SRTP: context initialized");
+    RTC_LOG_INFO("SRTP: context initialized (%s)",
+                 profile == RTC_SRTP_PROFILE_AEAD_AES_128_GCM ? "AEAD_AES_128_GCM"
+                                                              : "AES_CM_128_HMAC_SHA1_80");
     return RTC_OK;
+}
+
+int rtc_srtp_init(rtc_srtp_ctx_t *ctx, const uint8_t *master_key, size_t key_len,
+                  const uint8_t *master_salt, size_t salt_len) {
+    return rtc_srtp_init_profile(ctx, RTC_SRTP_PROFILE_AES128_CM_SHA1_80, master_key, key_len,
+                                 master_salt, salt_len);
 }
 
 /*
@@ -307,11 +321,266 @@ static int srtp_aes_cm(const uint8_t *session_key, const uint8_t *session_salt, 
     return RTC_OK;
 }
 
+/* ---- AEAD_AES_128_GCM (RFC 7714) ---- */
+
+/* SRTP IV (RFC 7714 §8.1): (0,0, SSRC, ROC, SEQ) XOR session salt. */
+static void srtp_gcm_rtp_iv(const uint8_t *salt, uint32_t ssrc, uint32_t roc, uint16_t seq,
+                            uint8_t iv[SRTP_GCM_IV_LEN]) {
+    uint8_t x[SRTP_GCM_IV_LEN] = {0};
+    x[2] = (ssrc >> 24) & 0xFF;
+    x[3] = (ssrc >> 16) & 0xFF;
+    x[4] = (ssrc >> 8) & 0xFF;
+    x[5] = ssrc & 0xFF;
+    x[6] = (roc >> 24) & 0xFF;
+    x[7] = (roc >> 16) & 0xFF;
+    x[8] = (roc >> 8) & 0xFF;
+    x[9] = roc & 0xFF;
+    x[10] = (seq >> 8) & 0xFF;
+    x[11] = seq & 0xFF;
+    for (int i = 0; i < SRTP_GCM_IV_LEN; i++)
+        iv[i] = x[i] ^ salt[i];
+}
+
+/* SRTCP IV (RFC 7714 §9.1): (0,0, SSRC, 0,0, SRTCP index) XOR session salt. */
+static void srtp_gcm_rtcp_iv(const uint8_t *salt, uint32_t ssrc, uint32_t index,
+                             uint8_t iv[SRTP_GCM_IV_LEN]) {
+    uint8_t x[SRTP_GCM_IV_LEN] = {0};
+    x[2] = (ssrc >> 24) & 0xFF;
+    x[3] = (ssrc >> 16) & 0xFF;
+    x[4] = (ssrc >> 8) & 0xFF;
+    x[5] = ssrc & 0xFF;
+    x[8] = (index >> 24) & 0xFF;
+    x[9] = (index >> 16) & 0xFF;
+    x[10] = (index >> 8) & 0xFF;
+    x[11] = index & 0xFF;
+    for (int i = 0; i < SRTP_GCM_IV_LEN; i++)
+        iv[i] = x[i] ^ salt[i];
+}
+
+/*
+ * AES-128-GCM AEAD. On encrypt: `data` is encrypted in place and the 16-byte
+ * `tag` is produced. On decrypt: `data` is decrypted in place and `tag` is
+ * verified (RTC_ERR_SRTP on mismatch). Two AAD chunks support SRTCP, whose
+ * associated data spans the header and the trailing E|index field.
+ */
+static int srtp_aes_gcm(const uint8_t *key, const uint8_t *iv, const uint8_t *aad1, size_t aad1_len,
+                        const uint8_t *aad2, size_t aad2_len, uint8_t *data, size_t data_len,
+                        uint8_t *tag, bool encrypt) {
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx)
+        return RTC_ERR_NOMEM;
+    int rc = RTC_ERR_SRTP;
+    int outl = 0;
+
+    if (encrypt) {
+        if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, NULL, NULL) != 1 ||
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, SRTP_GCM_IV_LEN, NULL) != 1 ||
+            EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv) != 1)
+            goto done;
+        if ((aad1_len && EVP_EncryptUpdate(ctx, NULL, &outl, aad1, (int)aad1_len) != 1) ||
+            (aad2_len && EVP_EncryptUpdate(ctx, NULL, &outl, aad2, (int)aad2_len) != 1))
+            goto done;
+        if (data_len && EVP_EncryptUpdate(ctx, data, &outl, data, (int)data_len) != 1)
+            goto done;
+        if (EVP_EncryptFinal_ex(ctx, data + outl, &outl) != 1 ||
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, SRTP_GCM_TAG_LEN, tag) != 1)
+            goto done;
+        rc = RTC_OK;
+    } else {
+        if (EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, NULL, NULL) != 1 ||
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, SRTP_GCM_IV_LEN, NULL) != 1 ||
+            EVP_DecryptInit_ex(ctx, NULL, NULL, key, iv) != 1)
+            goto done;
+        if ((aad1_len && EVP_DecryptUpdate(ctx, NULL, &outl, aad1, (int)aad1_len) != 1) ||
+            (aad2_len && EVP_DecryptUpdate(ctx, NULL, &outl, aad2, (int)aad2_len) != 1))
+            goto done;
+        if (data_len && EVP_DecryptUpdate(ctx, data, &outl, data, (int)data_len) != 1)
+            goto done;
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, SRTP_GCM_TAG_LEN, (void *)tag) != 1)
+            goto done;
+        rc = (EVP_DecryptFinal_ex(ctx, data + outl, &outl) == 1) ? RTC_OK : RTC_ERR_SRTP;
+    }
+done:
+    EVP_CIPHER_CTX_free(ctx);
+    return rc;
+}
+
+/* Compute the RTP header length (fixed 12 + CSRC + one-byte/two-byte extension
+ * block). Returns RTC_ERR_INVALID if it would exceed `len`. Caller holds lock. */
+static int srtp_rtp_header_len(const uint8_t *buf, size_t len, size_t *out_hdr_len) {
+    size_t hdr_len = 12 + (size_t)(buf[0] & 0x0F) * 4;
+    if (buf[0] & 0x10) {
+        if (hdr_len + 4 > len)
+            return RTC_ERR_INVALID;
+        uint16_t ext_words = ((uint16_t)buf[hdr_len + 2] << 8) | buf[hdr_len + 3];
+        hdr_len += 4 + (size_t)ext_words * 4;
+    }
+    if (hdr_len > len)
+        return RTC_ERR_INVALID;
+    *out_hdr_len = hdr_len;
+    return RTC_OK;
+}
+
+/* GCM SRTP protect (lock held). Layout out: header | ciphertext | tag(16). */
+static int srtp_protect_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_cap) {
+    if (*len > buf_cap || buf_cap - *len < SRTP_GCM_TAG_LEN)
+        return RTC_ERR_NOMEM;
+
+    uint16_t seq = ((uint16_t)buf[2] << 8) | buf[3];
+    uint32_t ssrc =
+        ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) | ((uint32_t)buf[10] << 8) | buf[11];
+
+    rtc_srtp_replay_entry_t *st =
+        srtp_entry_for_ssrc(ctx->rtp_send, SRTP_REPLAY_MAX_STREAMS, &ctx->send_lru_tick, ssrc);
+    if (!st->roc_init)
+        st->roc_init = true;
+    else if (seq < st->last_seq && (st->last_seq - seq) > 0x8000)
+        st->roc++;
+    st->last_seq = seq;
+    uint32_t roc = st->roc;
+
+    size_t hdr_len;
+    if (srtp_rtp_header_len(buf, *len, &hdr_len) != RTC_OK)
+        return RTC_ERR_INVALID;
+
+    uint8_t iv[SRTP_GCM_IV_LEN];
+    srtp_gcm_rtp_iv(ctx->session_salt, ssrc, roc, seq, iv);
+
+    int rc = srtp_aes_gcm(ctx->session_key, iv, buf, hdr_len, NULL, 0, buf + hdr_len,
+                          *len - hdr_len, buf + *len, true);
+    if (rc != RTC_OK)
+        return rc;
+    *len += SRTP_GCM_TAG_LEN;
+    return RTC_OK;
+}
+
+/* GCM SRTP unprotect (lock held). */
+static int srtp_unprotect_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
+    if (*len < 12 + SRTP_GCM_TAG_LEN)
+        return RTC_ERR_INVALID;
+    size_t body_len = *len - SRTP_GCM_TAG_LEN; /* header + ciphertext */
+    uint8_t *tag = buf + body_len;
+
+    uint16_t seq = ((uint16_t)buf[2] << 8) | buf[3];
+    uint32_t ssrc =
+        ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) | ((uint32_t)buf[10] << 8) | buf[11];
+
+    /* ROC estimate (non-allocating, pre-auth). */
+    rtc_srtp_replay_entry_t *known = srtp_find_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS, ssrc);
+    uint32_t roc = known ? known->roc : 0;
+    if (known && known->roc_init && seq < known->last_seq && (known->last_seq - seq) > 0x8000)
+        roc = known->roc + 1;
+
+    size_t hdr_len;
+    if (srtp_rtp_header_len(buf, body_len, &hdr_len) != RTC_OK)
+        return RTC_ERR_INVALID;
+
+    uint8_t iv[SRTP_GCM_IV_LEN];
+    srtp_gcm_rtp_iv(ctx->session_salt, ssrc, roc, seq, iv);
+
+    int rc = srtp_aes_gcm(ctx->session_key, iv, buf, hdr_len, NULL, 0, buf + hdr_len,
+                          body_len - hdr_len, tag, false);
+    if (rc != RTC_OK)
+        return rc;
+
+    uint64_t pkt_index = ((uint64_t)roc << 16) | seq;
+    rtc_srtp_replay_entry_t *st = srtp_entry_for_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS,
+                                                      &ctx->replay_lru_tick, ssrc);
+    int replay_rc = srtp_replay_check(&st->replay, pkt_index);
+    if (replay_rc != RTC_OK)
+        return replay_rc;
+
+    if (!st->roc_init || seq > st->last_seq || (st->last_seq - seq) > 0x8000) {
+        st->last_seq = seq;
+        st->roc = roc;
+        st->roc_init = true;
+    }
+    *len = body_len;
+    return RTC_OK;
+}
+
+/* GCM SRTCP protect (lock held). Layout out:
+ * header(8) | ciphertext | tag(16) | E|SRTCP-index(4). */
+static int srtp_protect_rtcp_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_cap) {
+    if (*len > buf_cap || buf_cap - *len < SRTP_GCM_TAG_LEN + 4)
+        return RTC_ERR_NOMEM;
+
+    uint32_t ssrc =
+        ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) | ((uint32_t)buf[6] << 8) | buf[7];
+    uint32_t index = ctx->srtcp_index & 0x7FFFFFFFu;
+    uint32_t e_index = index | 0x80000000u; /* E=1: encrypted */
+    uint8_t trailer[4] = {(uint8_t)(e_index >> 24), (uint8_t)(e_index >> 16),
+                          (uint8_t)(e_index >> 8), (uint8_t)e_index};
+
+    uint8_t iv[SRTP_GCM_IV_LEN];
+    srtp_gcm_rtcp_iv(ctx->rtcp_session_salt, ssrc, index, iv);
+
+    size_t ct_len = *len - 8;
+    int rc = srtp_aes_gcm(ctx->rtcp_session_key, iv, buf, 8, trailer, 4, buf + 8, ct_len, buf + *len,
+                          true);
+    if (rc != RTC_OK)
+        return rc;
+
+    size_t off = 8 + ct_len + SRTP_GCM_TAG_LEN;
+    memcpy(buf + off, trailer, 4);
+    *len = off + 4;
+    ctx->srtcp_index++;
+    return RTC_OK;
+}
+
+/* GCM SRTCP unprotect (lock held). */
+static int srtp_unprotect_rtcp_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
+    if (*len < 8 + SRTP_GCM_TAG_LEN + 4)
+        return RTC_ERR_INVALID;
+    size_t total = *len;
+    size_t idx_off = total - 4;
+    uint32_t e_index = ((uint32_t)buf[idx_off] << 24) | ((uint32_t)buf[idx_off + 1] << 16) |
+                       ((uint32_t)buf[idx_off + 2] << 8) | buf[idx_off + 3];
+    bool encrypted = (e_index & 0x80000000u) != 0;
+    uint32_t index = e_index & 0x7FFFFFFFu;
+    uint8_t trailer[4] = {buf[idx_off], buf[idx_off + 1], buf[idx_off + 2], buf[idx_off + 3]};
+
+    size_t tag_off = idx_off - SRTP_GCM_TAG_LEN;
+    uint8_t *tag = buf + tag_off;
+    uint32_t ssrc =
+        ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) | ((uint32_t)buf[6] << 8) | buf[7];
+
+    uint8_t iv[SRTP_GCM_IV_LEN];
+    srtp_gcm_rtcp_iv(ctx->rtcp_session_salt, ssrc, index, iv);
+
+    int rc;
+    if (encrypted) {
+        rc = srtp_aes_gcm(ctx->rtcp_session_key, iv, buf, 8, trailer, 4, buf + 8, tag_off - 8, tag,
+                          false);
+    } else {
+        /* Unencrypted: the whole packet body is authenticated cleartext. */
+        rc = srtp_aes_gcm(ctx->rtcp_session_key, iv, buf, tag_off, trailer, 4, NULL, 0, tag, false);
+    }
+    if (rc != RTC_OK)
+        return rc;
+
+    /* Replay check after auth (per-SSRC SRTCP index space). */
+    rtc_srtp_replay_entry_t *st = srtp_entry_for_ssrc(ctx->rtcp_replay, SRTP_REPLAY_MAX_STREAMS,
+                                                      &ctx->replay_lru_tick, ssrc);
+    int replay_rc = srtp_replay_check(&st->replay, (uint64_t)index);
+    if (replay_rc != RTC_OK)
+        return replay_rc;
+
+    *len = tag_off; /* header + decrypted payload */
+    return RTC_OK;
+}
+
 int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_cap) {
     if (!ctx->initialized)
         return RTC_ERR_SRTP;
     if (*len < 12)
         return RTC_ERR_INVALID; /* minimum RTP header */
+    if (ctx->profile == RTC_SRTP_PROFILE_AEAD_AES_128_GCM) {
+        rtc_mutex_lock(&ctx->lock);
+        int rc = srtp_protect_gcm(ctx, buf, len, buf_cap);
+        rtc_mutex_unlock(&ctx->lock);
+        return rc;
+    }
     /* Ensure room to append 80-bit auth tag without writing past buf_cap. */
     if (*len > buf_cap || buf_cap - *len < SRTP_AUTH_TAG_LEN)
         return RTC_ERR_NOMEM;
@@ -385,6 +654,12 @@ int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_
 int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     if (!ctx->initialized)
         return RTC_ERR_SRTP;
+    if (ctx->profile == RTC_SRTP_PROFILE_AEAD_AES_128_GCM) {
+        rtc_mutex_lock(&ctx->lock);
+        int rc = srtp_unprotect_gcm(ctx, buf, len);
+        rtc_mutex_unlock(&ctx->lock);
+        return rc;
+    }
     if (*len < 12 + SRTP_AUTH_TAG_LEN)
         return RTC_ERR_INVALID;
 
@@ -430,8 +705,8 @@ int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
      * replay rejection. Packet index = (ROC << 16) | seq. State is per-SSRC:
      * bundled streams share a key but not a sequence space. */
     uint64_t pkt_index = ((uint64_t)roc << 16) | seq;
-    rtc_srtp_replay_entry_t *st = srtp_entry_for_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS,
-                                                      &ctx->replay_lru_tick, ssrc);
+    rtc_srtp_replay_entry_t *st =
+        srtp_entry_for_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS, &ctx->replay_lru_tick, ssrc);
     int replay_rc = srtp_replay_check(&st->replay, pkt_index);
     if (replay_rc != RTC_OK) {
         rtc_mutex_unlock(&ctx->lock);
@@ -523,6 +798,12 @@ int rtc_srtp_protect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t
         return RTC_ERR_SRTP;
     if (*len < 8)
         return RTC_ERR_INVALID; /* minimum: RTCP header (4) + SSRC (4) */
+    if (ctx->profile == RTC_SRTP_PROFILE_AEAD_AES_128_GCM) {
+        rtc_mutex_lock(&ctx->lock);
+        int rc = srtp_protect_rtcp_gcm(ctx, buf, len, buf_cap);
+        rtc_mutex_unlock(&ctx->lock);
+        return rc;
+    }
     /* SRTCP appends 4-byte index + 10-byte auth tag. */
     if (*len > buf_cap || buf_cap - *len < 4 + SRTP_AUTH_TAG_LEN)
         return RTC_ERR_NOMEM;
@@ -575,6 +856,12 @@ int rtc_srtp_protect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t
 int rtc_srtp_unprotect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     if (!ctx->initialized)
         return RTC_ERR_SRTP;
+    if (ctx->profile == RTC_SRTP_PROFILE_AEAD_AES_128_GCM) {
+        rtc_mutex_lock(&ctx->lock);
+        int rc = srtp_unprotect_rtcp_gcm(ctx, buf, len);
+        rtc_mutex_unlock(&ctx->lock);
+        return rc;
+    }
     /* Minimum: 8 (header+SSRC) + 4 (SRTCP index) + 10 (auth tag) */
     if (*len < 8 + 4 + SRTP_AUTH_TAG_LEN)
         return RTC_ERR_INVALID;

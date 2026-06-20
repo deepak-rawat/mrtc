@@ -12,8 +12,8 @@
 #define RTC_ICE_UFRAG_MAX                   8
 #define RTC_ICE_PWD_MAX                     24
 #define RTC_DTLS_FINGERPRINT_MAX            96
-#define RTC_TRANSPORT_RTP_PROTECT_OVERHEAD  10
-#define RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD 14
+#define RTC_TRANSPORT_RTP_PROTECT_OVERHEAD  16 /* AES-GCM tag (RFC 7714) */
+#define RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD 20 /* GCM tag (16) + SRTCP index (4) */
 
 typedef struct rtc_transport rtc_transport_t;
 typedef struct rtc_listener rtc_listener_t;

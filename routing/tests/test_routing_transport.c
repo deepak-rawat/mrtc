@@ -33,6 +33,15 @@ static int listener_loopback_addr(rtc_listener_t *listener, rtc_addr_t *out) {
     return rtc_addr_from_string(out, "127.0.0.1", port);
 }
 
+/* Build a manual SRTP context that matches the profile the DTLS handshake
+ * negotiated (GCM uses a 12-byte salt and the AEAD path). */
+static int srtp_init_from_dtls(rtc_srtp_ctx_t *ctx, const rtc_dtls_transport_t *d,
+                               const uint8_t *key, const uint8_t *salt) {
+    rtc_srtp_profile_t prof = d->srtp_aead_gcm ? RTC_SRTP_PROFILE_AEAD_AES_128_GCM
+                                               : RTC_SRTP_PROFILE_AES128_CM_SHA1_80;
+    return rtc_srtp_init_profile(ctx, prof, key, RTC_SRTP_MASTER_KEY_LEN, salt, d->srtp_salt_len);
+}
+
 static rtc_socket_t make_bound_sender(void) {
     rtc_socket_t sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sender == RTC_INVALID_SOCKET)
@@ -486,8 +495,8 @@ TEST(transport_routes_srtp_to_producer) {
     ASSERT(producer != NULL);
 
     rtc_srtp_ctx_t client_srtp;
-    ASSERT_EQ(rtc_srtp_init(&client_srtp, client.srtp_client_key, RTC_SRTP_MASTER_KEY_LEN,
-                            client.srtp_client_salt, RTC_SRTP_MASTER_SALT_LEN),
+    ASSERT_EQ(srtp_init_from_dtls(&client_srtp, &client, client.srtp_client_key,
+                                  client.srtp_client_salt),
               RTC_OK);
 
     const uint8_t payload[] = {0x11, 0x22, 0x33, 0x44};
@@ -545,8 +554,8 @@ TEST(transport_invokes_raw_rtp_handler) {
     rtc_transport_on_rtp(transport, raw_rtp_callback, NULL);
 
     rtc_srtp_ctx_t client_srtp;
-    ASSERT_EQ(rtc_srtp_init(&client_srtp, client.srtp_client_key, RTC_SRTP_MASTER_KEY_LEN,
-                            client.srtp_client_salt, RTC_SRTP_MASTER_SALT_LEN),
+    ASSERT_EQ(srtp_init_from_dtls(&client_srtp, &client, client.srtp_client_key,
+                                  client.srtp_client_salt),
               RTC_OK);
 
     const uint8_t payload[] = {0x01, 0x02, 0x03};
@@ -599,8 +608,8 @@ TEST(transport_invokes_raw_rtcp_handler) {
     rtc_transport_on_rtcp(transport, raw_rtcp_callback, NULL);
 
     rtc_srtp_ctx_t client_srtp;
-    ASSERT_EQ(rtc_srtp_init(&client_srtp, client.srtp_client_key, RTC_SRTP_MASTER_KEY_LEN,
-                            client.srtp_client_salt, RTC_SRTP_MASTER_SALT_LEN),
+    ASSERT_EQ(srtp_init_from_dtls(&client_srtp, &client, client.srtp_client_key,
+                                  client.srtp_client_salt),
               RTC_OK);
     uint8_t rr[64] = {0x80, 201, 0x00, 0x01, 0x12, 0x34, 0x56, 0x78};
     size_t rr_len = 8;
@@ -735,11 +744,11 @@ TEST(transport_forwards_producer_rtp_to_consumer) {
 
     rtc_srtp_ctx_t pub_send;
     rtc_srtp_ctx_t sub_recv;
-    ASSERT_EQ(rtc_srtp_init(&pub_send, pub_client.srtp_client_key, RTC_SRTP_MASTER_KEY_LEN,
-                            pub_client.srtp_client_salt, RTC_SRTP_MASTER_SALT_LEN),
+    ASSERT_EQ(srtp_init_from_dtls(&pub_send, &pub_client, pub_client.srtp_client_key,
+                                  pub_client.srtp_client_salt),
               RTC_OK);
-    ASSERT_EQ(rtc_srtp_init(&sub_recv, sub_client.srtp_server_key, RTC_SRTP_MASTER_KEY_LEN,
-                            sub_client.srtp_server_salt, RTC_SRTP_MASTER_SALT_LEN),
+    ASSERT_EQ(srtp_init_from_dtls(&sub_recv, &sub_client, sub_client.srtp_server_key,
+                                  sub_client.srtp_server_salt),
               RTC_OK);
 
     const uint8_t payload[] = {0xDE, 0xAD, 0xBE, 0xEF};

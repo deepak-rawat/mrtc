@@ -55,6 +55,8 @@ typedef struct {
     uint8_t srtp_client_salt[RTC_SRTP_MASTER_SALT_LEN];
     uint8_t srtp_server_key[RTC_SRTP_MASTER_KEY_LEN];
     uint8_t srtp_server_salt[RTC_SRTP_MASTER_SALT_LEN];
+    bool srtp_aead_gcm;   /* true: AEAD_AES_128_GCM was negotiated, else AES-CM */
+    size_t srtp_salt_len; /* exported salt length (14 for CM, 12 for GCM) */
     bool srtp_keys_ready;
 } rtc_dtls_transport_t;
 

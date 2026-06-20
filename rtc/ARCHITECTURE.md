@@ -211,25 +211,30 @@ After:         dtls_export_srtp_keys() → client/server keys + salts
 
 ### SRTP (`rtc_srtp.h/c`)
 
-AES-128-CM encryption with HMAC-SHA1-80 authentication (RFC 3711).
+Two DTLS-SRTP protection profiles, selected by the handshake:
+`SRTP_AEAD_AES_128_GCM` (RFC 7714, preferred) and
+`SRTP_AES128_CM_SHA1_80` (RFC 3711, AES-128-CM + HMAC-SHA1-80).
 
-- Master key / salt derived from DTLS export
-- Per-packet: derive session key via PRF, encrypt payload, append auth
-  tag
-- Rollover counter (ROC) tracks sequence number wrap-around
+- Master key / salt derived from DTLS export (16-byte key; 14-byte salt
+  for AES-CM, 12-byte for GCM)
+- AES-CM: derive session keys via PRF, encrypt payload, append 80-bit
+  HMAC tag. GCM: single AEAD pass with the RTP header as associated data
+  and a 128-bit tag (no separate HMAC key)
+- Per-SSRC rollover counter (ROC) + replay window: bundled streams share
+  one key but keep independent sequence spaces
 
 **Thread safety.** `rtc_srtp_protect` / `rtc_srtp_unprotect` /
 `rtc_srtp_protect_rtcp` / `rtc_srtp_unprotect_rtcp` serialize on a
 per-context mutex (`rtc_srtp_ctx_t::lock`). Runtime transports own
 SRTP / SRTCP protection; RTP sends, RTCP SR / RR emission, TWCC
 feedback, and NACK retransmits can touch the same context from
-different runtime callbacks. Concurrent updates of `roc` / `last_seq`
-/ `srtcp_index` would otherwise reuse the AES-CM keystream, which
-breaks confidentiality. `init` and `close` are not thread-safe and
-must not race with protect / unprotect calls.
+different runtime callbacks. Concurrent updates of the per-SSRC rollover
+state / `srtcp_index` would otherwise reuse the keystream, which breaks
+confidentiality. `init` and `close` are not thread-safe and must not
+race with protect / unprotect calls.
 
-Key functions: `rtc_srtp_init()`, `rtc_srtp_protect()`,
-`rtc_srtp_unprotect()`.
+Key functions: `rtc_srtp_init()` / `rtc_srtp_init_profile()`,
+`rtc_srtp_protect()`, `rtc_srtp_unprotect()`.
 
 ### RTP / RTCP (`rtc_rtp.h/c`, `rtc_rtcp.h/c`, `rtc_rtp_ext.h/c`)
 

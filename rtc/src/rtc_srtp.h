@@ -13,8 +13,17 @@
 #define SRTP_MAX_KEY_LEN        16
 #define SRTP_MAX_SALT_LEN       14
 #define SRTP_AUTH_TAG_LEN       10
+#define SRTP_GCM_TAG_LEN        16 /* AEAD_AES_128_GCM auth tag (RFC 7714) */
+#define SRTP_GCM_SALT_LEN       12 /* AEAD_AES_128_GCM salt (RFC 7714 §11) */
+#define SRTP_GCM_IV_LEN         12 /* AEAD_AES_128_GCM IV (RFC 7714 §8.1/§9.1) */
 #define SRTP_MAX_PACKET         1500
 #define SRTP_REPLAY_WINDOW_SIZE 128 /* RFC 3711 §3.3.2 (at least 64; we use 128) */
+
+/* Negotiated SRTP protection profile (selected by DTLS-SRTP). */
+typedef enum {
+    RTC_SRTP_PROFILE_AES128_CM_SHA1_80 = 0, /* RFC 3711 AES-CM + HMAC-SHA1-80 */
+    RTC_SRTP_PROFILE_AEAD_AES_128_GCM = 1,  /* RFC 7714 AES-128-GCM */
+} rtc_srtp_profile_t;
 
 /* Key derivation labels (RFC 3711 section 4.3.1) */
 #define SRTP_LABEL_RTP_ENCRYPTION  0x00
@@ -45,10 +54,10 @@ typedef struct {
 typedef struct {
     uint32_t ssrc;
     bool in_use;
-    uint64_t lru_tick; /* set on each access; smallest is evicted when full */
-    uint32_t roc;      /* rollover counter for this SSRC */
-    uint16_t last_seq; /* last sequence number seen for this SSRC */
-    bool roc_init;     /* false until the first packet for this SSRC */
+    uint64_t lru_tick;        /* set on each access; smallest is evicted when full */
+    uint32_t roc;             /* rollover counter for this SSRC */
+    uint16_t last_seq;        /* last sequence number seen for this SSRC */
+    bool roc_init;            /* false until the first packet for this SSRC */
     rtc_srtp_replay_t replay; /* receive direction only */
 } rtc_srtp_replay_entry_t;
 
@@ -62,6 +71,10 @@ typedef struct {
 typedef struct {
     /* Serializes the four protect/unprotect entry points. */
     rtc_mutex_t lock;
+
+    /* Negotiated profile + session salt length (14 for CM, 12 for GCM). */
+    rtc_srtp_profile_t profile;
+    size_t salt_len;
 
     /* Master key + salt (from DTLS export) */
     uint8_t master_key[SRTP_MAX_KEY_LEN];
@@ -94,6 +107,12 @@ typedef struct {
 /* Initialize SRTP context with master key + salt */
 int rtc_srtp_init(rtc_srtp_ctx_t *ctx, const uint8_t *master_key, size_t key_len,
                   const uint8_t *master_salt, size_t salt_len);
+
+/* Initialize with an explicit protection profile. rtc_srtp_init() is the
+ * AES-CM-SHA1-80 shorthand. For AEAD_AES_128_GCM pass a 12-byte salt. */
+int rtc_srtp_init_profile(rtc_srtp_ctx_t *ctx, rtc_srtp_profile_t profile,
+                          const uint8_t *master_key, size_t key_len, const uint8_t *master_salt,
+                          size_t salt_len);
 
 /*
  * Protect an RTP packet in-place.
