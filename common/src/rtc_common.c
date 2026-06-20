@@ -188,6 +188,20 @@ uint64_t rtc_time_us(void) {
 #endif
 }
 
+uint64_t rtc_time_unix_ms(void) {
+#ifdef _WIN32
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    /* 100 ns ticks since 1601-01-01; 116444736000000000 ticks to 1970-01-01. */
+    uint64_t ticks = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    return (ticks - 116444736000000000ULL) / 10000ULL;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+#endif
+}
+
 #ifdef _WIN32
 
 static DWORD WINAPI win_thread_wrapper(LPVOID arg) {

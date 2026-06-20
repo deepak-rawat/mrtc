@@ -68,6 +68,8 @@ int rtc_random_string(char *buf, size_t len);
 uint64_t rtc_time_ms(void);
 /* Monotonic time in microseconds. */
 uint64_t rtc_time_us(void);
+/* Wall-clock time in milliseconds since the Unix epoch (for RTCP NTP). */
+uint64_t rtc_time_unix_ms(void);
 
 #ifdef _WIN32
 typedef HANDLE rtc_thread_t;

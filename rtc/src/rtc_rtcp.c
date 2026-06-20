@@ -26,12 +26,11 @@ static uint32_t read_u32(const uint8_t *p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | (uint32_t)p[3];
 }
 
-/* Get NTP timestamp (seconds since 1900-01-01). We approximate from ms clock. */
+/* NTP timestamp (seconds since 1900-01-01) from the wall clock. */
 static void get_ntp_time(uint32_t *sec, uint32_t *frac) {
-    uint64_t ms = rtc_time_ms();
-    /* NTP epoch offset from Unix: 2208988800 seconds.
-     * We use monotonic clock which is not wall-clock but sufficient for RTCP. */
-    *sec = (uint32_t)(ms / 1000);
+    uint64_t ms = rtc_time_unix_ms();
+    /* The NTP epoch (1900) precedes the Unix epoch (1970) by 2208988800 s. */
+    *sec = (uint32_t)(ms / 1000) + 2208988800u;
     uint32_t ms_frac = (uint32_t)(ms % 1000);
     /* Convert ms fraction to NTP fraction (2^32 / 1000) */
     *frac = (uint32_t)((uint64_t)ms_frac * 4294967ULL);
@@ -124,8 +123,10 @@ void rtc_rtcp_stats_on_sr_recv(rtc_rtcp_stats_t *stats, const rtc_rtcp_sr_t *sr)
 int rtc_rtcp_rtt_from_rr(const rtc_rtcp_rr_block_t *rr) {
     if (!rr || rr->last_sr == 0)
         return 0;
-    uint64_t now_ms = rtc_time_ms();
-    uint32_t now_sec = (uint32_t)(now_ms / 1000);
+    /* last_sr echoes the middle 32 bits of an SR NTP we emitted, so compute the
+     * current compact NTP on the same wall clock used by get_ntp_time(). */
+    uint64_t now_ms = rtc_time_unix_ms();
+    uint32_t now_sec = (uint32_t)(now_ms / 1000) + 2208988800u;
     uint32_t now_frac = (uint32_t)((now_ms % 1000) * 4294967ULL);
     uint32_t now_compact = (now_sec & 0xFFFF) << 16 | (now_frac >> 16);
     uint32_t rtt_ntp = now_compact - rr->last_sr - rr->delay_since_sr;

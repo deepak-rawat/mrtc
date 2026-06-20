@@ -252,8 +252,9 @@ TEST(rtcp_sr_recv_and_rtt_helpers) {
     ASSERT_EQ(stats.last_sr_ntp, 0x56789ABCu);
     ASSERT(stats.last_sr_recv_time > 0);
 
-    uint64_t now_ms = rtc_time_ms();
-    uint32_t now_sec = (uint32_t)(now_ms / 1000);
+    /* Build last_sr on the same wall clock rtc_rtcp_rtt_from_rr now uses. */
+    uint64_t now_ms = rtc_time_unix_ms();
+    uint32_t now_sec = (uint32_t)(now_ms / 1000) + 2208988800u;
     uint32_t now_frac = (uint32_t)((now_ms % 1000) * 4294967ULL);
     uint32_t now_compact = (now_sec & 0xFFFF) << 16 | (now_frac >> 16);
 
