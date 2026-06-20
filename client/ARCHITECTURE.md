@@ -194,8 +194,8 @@ SDP negotiation indicates they are in scope. The algorithms themselves
 are documented in [../rtc/ARCHITECTURE.md](../rtc/ARCHITECTURE.md).
 
 - **Per-sender AIMD rate control** — one `rtc_rate_controller_t` lives
-  inside each send stream; the RTCP router routes each parsed RR block to
-  the originating send stream.
+  inside each video send stream; the RTCP router routes each parsed RR
+  block to the originating send stream.
 - **NACK retransmit buffer** — 512-packet ring buffer per video send
   stream; incoming Generic NACK blocks are served by re-sending the
   cached post-SRTP wire packet through the runtime transport.

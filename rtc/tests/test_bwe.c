@@ -1,7 +1,7 @@
 /*
  * Tests for the BWE (GCC) estimator.
  */
-#include "rtc/rtc_bwe.h"
+#include "rtc_bwe.h"
 #include "test_harness.h"
 
 #include <stdio.h>

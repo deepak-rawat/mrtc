@@ -12,7 +12,6 @@
 #include "rtc_rtcp.h"
 #include "rtc_rtp.h"
 #include "rtc_transport.h"
-#include "rtc_twcc_sender.h"
 
 typedef struct rtc_rtp_send_stream rtc_rtp_send_stream_t;
 typedef struct rtc_rtp_recv_stream rtc_rtp_recv_stream_t;
@@ -47,8 +46,7 @@ const rtc_rtcp_stats_t *rtc_rtp_send_stream_stats(const rtc_rtp_send_stream_t *s
 
 void rtc_rtp_send_stream_attach_transport(rtc_rtp_send_stream_t *stream,
                                           rtc_transport_t *transport);
-void rtc_rtp_send_stream_attach_twcc(rtc_rtp_send_stream_t *stream, rtc_twcc_sender_t *twcc,
-                                     uint8_t ext_id);
+void rtc_rtp_send_stream_attach_twcc(rtc_rtp_send_stream_t *stream, uint8_t ext_id);
 void rtc_rtp_send_stream_arm_video(rtc_rtp_send_stream_t *stream);
 
 void rtc_rtp_send_stream_set_send_active(rtc_rtp_send_stream_t *stream, bool active);

@@ -138,9 +138,9 @@ void rtc_rtp_sender_attach_logical(struct rtc_rtp_sender *s, rtc_transport_t *tr
         rtc_rtp_send_stream_attach_transport(s->stream, transport);
 }
 
-void rtc_rtp_sender_attach_twcc(struct rtc_rtp_sender *s, void *twcc_sender, uint8_t ext_id) {
+void rtc_rtp_sender_attach_twcc(struct rtc_rtp_sender *s, uint8_t ext_id) {
     if (s)
-        rtc_rtp_send_stream_attach_twcc(s->stream, twcc_sender, ext_id);
+        rtc_rtp_send_stream_attach_twcc(s->stream, ext_id);
 }
 
 void rtc_rtp_sender_arm_video(struct rtc_rtp_sender *s) {

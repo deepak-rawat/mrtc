@@ -9,11 +9,6 @@
 #include "rtc_sdp.h"
 #include "rtc_worker.h"
 
-#ifdef MRTC_ENABLE_TWCC
-#  include "rtc_twcc_sender.h"
-#  include "rtc_bwe.h"
-#endif
-
 #define RTC_ICE_UFRAG_MAX                   8
 #define RTC_ICE_PWD_MAX                     24
 #define RTC_DTLS_FINGERPRINT_MAX            96
@@ -130,18 +125,11 @@ void *rtc_transport_rtp_bound(rtc_transport_t *transport, uint32_t ssrc);
 typedef void (*rtc_transport_bitrate_fn)(uint32_t bitrate_bps, void *user);
 
 /* Enable transport-wide congestion control once SDP negotiation has selected a
- * transport-cc header extension id. The transport then tags nothing itself but
- * owns the TWCC sender history, the receiver arrival window + 100 ms feedback
- * timer, and the GCC bandwidth estimator. Requires cfg->enable_twcc at create.
- * `local_ssrc` identifies the feedback sender; `bwe_cfg` may be NULL to use the
- * transport's initial_outgoing_bitrate_bps. */
-int rtc_transport_enable_twcc(rtc_transport_t *transport, uint8_t ext_id, uint32_t local_ssrc,
-                              const rtc_bwe_config_t *bwe_cfg);
-
-/* Returns the TWCC sender history for outbound RTP tagging, or NULL when TWCC
- * is not enabled. Send streams attach to it to write the transport-cc header
- * extension and record post-protect wire size + send time. */
-rtc_twcc_sender_t *rtc_transport_twcc_sender(rtc_transport_t *transport);
+ * transport-cc header extension id. The transport owns the TWCC sender history,
+ * the receiver arrival window + 100 ms feedback timer, and the GCC bandwidth
+ * estimator (seeded by initial_outgoing_bitrate_bps). Requires cfg->enable_twcc
+ * at create; `local_ssrc` identifies the feedback sender. */
+int rtc_transport_enable_twcc(rtc_transport_t *transport, uint8_t ext_id, uint32_t local_ssrc);
 
 /* Subscribe to GCC bandwidth-estimate changes (fires on the worker loop). */
 void rtc_transport_on_bitrate_estimate(rtc_transport_t *transport, rtc_transport_bitrate_fn fn,

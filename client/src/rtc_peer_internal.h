@@ -16,7 +16,6 @@
 #include "rtc/rtc_rtp_ext.h"
 #include "rtc/rtc_rtcp.h"
 #include "rtc/rtc_sdp.h"
-#include "rtc/rtc_nack_buf.h"
 #include "rtc_client_runtime.h"
 #include "rtc/rtc_listener.h"
 #include "rtc/rtc_rtcp_router.h"
@@ -160,7 +159,7 @@ void rtc_rtp_transceiver_close_resources(struct rtc_rtp_transceiver *t);
 void rtc_rtp_sender_attach_logical(struct rtc_rtp_sender *s, rtc_transport_t *transport);
 
 /* Bind transport-cc tagging on a sender (no-op when MRTC_ENABLE_TWCC is off). */
-void rtc_rtp_sender_attach_twcc(struct rtc_rtp_sender *s, void *twcc_sender, uint8_t ext_id);
+void rtc_rtp_sender_attach_twcc(struct rtc_rtp_sender *s, uint8_t ext_id);
 
 /* Allocate NACK ring + rate controller for a video sender. No-op for audio. */
 void rtc_rtp_sender_arm_video(struct rtc_rtp_sender *s);

@@ -1,8 +1,8 @@
 /*
  * Tests for Transport-Wide Congestion Control (sender + receiver + parse).
  */
-#include "rtc/rtc_twcc_sender.h"
-#include "rtc/rtc_twcc_receiver.h"
+#include "rtc_twcc_sender.h"
+#include "rtc_twcc_receiver.h"
 #include "rtc/rtc_rtcp.h"
 #include "test_harness.h"
 

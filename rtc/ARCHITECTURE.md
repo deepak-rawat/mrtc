@@ -81,14 +81,16 @@ unconditionally:
 - `rtc_worker.h`, `rtc_listener.h`, `rtc_transport.h` — runtime transport primitives
 - `rtc_rtp.h`, `rtc_rtcp.h`, `rtc_sdp.h`, `rtc_rtp_ext.h`, `rtc_rtp_params.h` —
   protocol helpers and signaling parameter types
-- `rtc_nack_buf.h`, `rtc_rate_control.h`, `rtc_twcc_*.h`, `rtc_bwe.h` — RTP control
-  primitives shared by client and routing layers
 - `rtc_rtp_stream.h`, `rtc_rtcp_router.h` — composed RTP send/recv streams and
   the RTCP feedback router (SSRC → stream routing), shared by client and routing
 
 Internal / private helpers (`rtc_ice.h`, `rtc_dtls.h`, `rtc_srtp.h`,
-`rtc_stun.h`, `rtc_turn.h`, `rtc_rtp_demux.h`,
-`rtc_packet_io.h`, `rtc_poller.h`, `rtc_timer_sched.h`) live in `src/`.
+`rtc_stun.h`, `rtc_turn.h`, `rtc_rtp_demux.h`, `rtc_nack_buf.h`,
+`rtc_rate_control.h`, `rtc_twcc_sender.h`, `rtc_twcc_receiver.h`, `rtc_bwe.h`,
+`rtc_packet_io.h`, `rtc_poller.h`, `rtc_timer_sched.h`) live in `src/`. The
+congestion-control primitives (NACK buffer, AIMD rate control, TWCC, BWE) are
+encapsulated by the transport and the send/recv streams, so consumers never
+name them directly.
 
 ## Module Details
 
@@ -287,12 +289,12 @@ Offer / Answer generation and parsing (RFC 4566 WebRTC subset).
   `rtc_sdp_media_find_extmap_id()`. The client peer connection
   auto-advertises transport-cc (id=5) on every audio / video m-section.
 
-### Rate Control (`rtc_rate_control.h/c`)
+### Rate Control (`rtc_rate_control.h/c`, internal)
 
 AIMD (Additive Increase, Multiplicative Decrease) bitrate adaptation
-driven by RTCP Receiver Reports. The algorithm lives here; the client
-peer connection wires one controller into each `rtc_rtp_sender_t` so
-audio and video adapt independently.
+driven by RTCP Receiver Reports. Internal: each video send stream
+allocates a controller in `rtc_rtp_send_stream_arm_video`, and the RTCP
+router routes each RR block to it via `rtc_rtp_send_stream_on_rr`.
 
 - Loss < 2% → increase bitrate 5%
 - Loss > 5% → decrease bitrate 20%
@@ -304,15 +306,14 @@ Key functions: `rtc_rate_control_create()`,
 `rtc_rate_control_on_rtcp_rr()`, `rtc_rate_control_get_bitrate()`,
 `rtc_rate_control_should_keyframe()`.
 
-### NACK retransmit buffer (`rtc_nack_buf.h/c`)
+### NACK retransmit buffer (`rtc_nack_buf.h/c`, internal)
 
 512-packet ring buffer indexed by RTP sequence number. Stores post-SRTP
 packets so an incoming Generic NACK (RFC 4585 §6.2.1) can be served by
 re-sending the original wire packet through `rtc_transport_send_raw()`
-without re-encrypting. The client peer connection allocates one per
-video sender on connect.
+without re-encrypting. Each video send stream allocates one when armed.
 
-### Transport-Wide CC (`rtc_twcc_sender.h/c`, `rtc_twcc_receiver.h/c`)
+### Transport-Wide CC (`rtc_twcc_sender.h/c`, `rtc_twcc_receiver.h/c`, internal)
 
 Wire-level implementation of
 `draft-holmer-rmcat-transport-wide-cc-extensions`.
@@ -334,7 +335,7 @@ Wire-level implementation of
   absolute arrival time per packet (relative to the 24-bit reference
   time × 64 ms).
 
-### Bandwidth Estimator (`rtc_bwe.h/c`)
+### Bandwidth Estimator (`rtc_bwe.h/c`, internal)
 
 Simplified Google Congestion Control (draft-ietf-rmcat-gcc):
 

@@ -3,9 +3,11 @@
  */
 #include "rtc/rtc_rtp_stream.h"
 
-#include "rtc/rtc_nack_buf.h"
-#include "rtc/rtc_rate_control.h"
+#include "rtc_nack_buf.h"
+#include "rtc_rate_control.h"
 #include "rtc/rtc_rtp_ext.h"
+#include "rtc_transport_internal.h"
+#include "rtc_twcc_sender.h"
 
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -120,16 +122,14 @@ void rtc_rtp_send_stream_attach_transport(rtc_rtp_send_stream_t *stream,
     stream->transport = transport;
 }
 
-void rtc_rtp_send_stream_attach_twcc(rtc_rtp_send_stream_t *stream, rtc_twcc_sender_t *twcc,
-                                     uint8_t ext_id) {
+void rtc_rtp_send_stream_attach_twcc(rtc_rtp_send_stream_t *stream, uint8_t ext_id) {
 #ifdef MRTC_ENABLE_TWCC
-    if (!stream || !stream->active || ext_id == 0)
+    if (!stream || !stream->active || ext_id == 0 || !stream->transport)
         return;
-    stream->twcc = twcc;
+    stream->twcc = rtc_transport_twcc_sender(stream->transport);
     stream->twcc_ext_id = ext_id;
 #else
     (void)stream;
-    (void)twcc;
     (void)ext_id;
 #endif
 }

@@ -341,8 +341,7 @@ static void peer_runtime_complete_connection(rtc_peer_connection_t *pc) {
         rtc_rtp_sender_attach_logical(s, pc->runtime_transport);
 #ifdef MRTC_ENABLE_TWCC
         if (pc->twcc_ext_id != 0)
-            rtc_rtp_sender_attach_twcc(s, rtc_transport_twcc_sender(pc->runtime_transport),
-                                       pc->twcc_ext_id);
+            rtc_rtp_sender_attach_twcc(s, pc->twcc_ext_id);
 #endif
         rtc_rtp_sender_arm_video(s);
     }
@@ -791,7 +790,7 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
                     break;
                 }
             }
-            rtc_transport_enable_twcc(pc->runtime_transport, id, local_ssrc, NULL);
+            rtc_transport_enable_twcc(pc->runtime_transport, id, local_ssrc);
             RTC_LOG_INFO("Peer: transport-cc negotiated (ext id=%u)", (unsigned)id);
             break;
         }

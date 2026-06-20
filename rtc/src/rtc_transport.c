@@ -11,7 +11,9 @@
 #ifdef MRTC_ENABLE_TWCC
 #  include "rtc/rtc_rtcp.h"
 #  include "rtc/rtc_rtp_ext.h"
+#  include "rtc_twcc_sender.h"
 #  include "rtc_twcc_receiver.h"
+#  include "rtc_bwe.h"
 #endif
 #include "rtc_srtp.h"
 #include "rtc_stun.h"
@@ -881,7 +883,6 @@ static void transport_bwe_trampoline(uint32_t bitrate_bps, void *user) {
 typedef struct {
     uint8_t ext_id;
     uint32_t local_ssrc;
-    const rtc_bwe_config_t *bwe_cfg;
 } tx_enable_twcc_args_t;
 
 static int tx_enable_twcc_impl(rtc_transport_t *transport, void *arg) {
@@ -894,16 +895,13 @@ static int tx_enable_twcc_impl(rtc_transport_t *transport, void *arg) {
     transport->twcc_local_ssrc = a->local_ssrc;
     rtc_twcc_sender_init(&transport->twcc_sender);
     rtc_twcc_receiver_init(&transport->twcc_receiver);
-    rtc_bwe_config_t cfg;
-    if (a->bwe_cfg) {
-        cfg = *a->bwe_cfg;
-    } else {
-        cfg.initial_bps = transport->initial_outgoing_bitrate_bps
-                              ? transport->initial_outgoing_bitrate_bps
-                              : 500000;
-        cfg.min_bps = 100000;
-        cfg.max_bps = 4000000;
-    }
+    rtc_bwe_config_t cfg = {
+        .initial_bps = transport->initial_outgoing_bitrate_bps
+                           ? transport->initial_outgoing_bitrate_bps
+                           : 500000,
+        .min_bps = 100000,
+        .max_bps = 4000000,
+    };
     transport->bwe = rtc_bwe_create(&cfg);
     if (!transport->bwe)
         return RTC_ERR_NOMEM;
@@ -915,11 +913,10 @@ static int tx_enable_twcc_impl(rtc_transport_t *transport, void *arg) {
     return RTC_OK;
 }
 
-int rtc_transport_enable_twcc(rtc_transport_t *transport, uint8_t ext_id, uint32_t local_ssrc,
-                              const rtc_bwe_config_t *bwe_cfg) {
+int rtc_transport_enable_twcc(rtc_transport_t *transport, uint8_t ext_id, uint32_t local_ssrc) {
     if (!transport || ext_id == 0)
         return RTC_ERR_INVALID;
-    tx_enable_twcc_args_t args = {ext_id, local_ssrc, bwe_cfg};
+    tx_enable_twcc_args_t args = {ext_id, local_ssrc};
     return tx_op_invoke(transport, tx_enable_twcc_impl, &args);
 }
 
