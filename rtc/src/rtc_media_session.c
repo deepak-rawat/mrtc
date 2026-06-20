@@ -50,8 +50,16 @@ static void session_handle_rr(rtc_media_session_t *s, const uint8_t *buf, size_t
     if (rtc_rtcp_parse(&rtcp, buf, len) != RTC_OK)
         return;
 #ifdef MRTC_ENABLE_TWCC
+    /* The loss-based estimator is transport-wide, but an RR can report several
+     * SSRCs with different loss; feed the worst so congestion control reacts to
+     * the most-affected stream rather than whichever happens to be first. */
+    uint8_t worst_loss = 0;
+    for (int i = 0; i < rtcp.report_count; i++) {
+        if (rtcp.reports[i].fraction_lost > worst_loss)
+            worst_loss = rtcp.reports[i].fraction_lost;
+    }
     if (rtcp.report_count > 0)
-        rtc_transport_report_rtcp_loss(s->transport, rtcp.reports[0].fraction_lost);
+        rtc_transport_report_rtcp_loss(s->transport, worst_loss);
 #endif
     for (int i = 0; i < rtcp.report_count; i++) {
         const rtc_rtcp_rr_block_t *rr = &rtcp.reports[i];
