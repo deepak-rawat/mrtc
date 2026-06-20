@@ -81,7 +81,7 @@ static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t
                                 const rtc_addr_t *from, void *user);
 #ifdef MRTC_ENABLE_TWCC
 static void transport_record_twcc_arrival(rtc_transport_t *transport, const rtc_rtp_packet_t *pkt);
-static bool transport_consume_twcc_feedback(rtc_transport_t *transport, const uint8_t *buf,
+static void transport_consume_twcc_feedback(rtc_transport_t *transport, const uint8_t *buf,
                                             size_t len);
 #endif
 
@@ -317,8 +317,7 @@ static void transport_handle_rtcp(rtc_transport_t *transport, const uint8_t *dat
     if (rtc_srtp_unprotect_rtcp(&transport->srtp_recv, buf, &pkt_len) != RTC_OK)
         return;
 #ifdef MRTC_ENABLE_TWCC
-    if (transport_consume_twcc_feedback(transport, buf, pkt_len))
-        return;
+    transport_consume_twcc_feedback(transport, buf, pkt_len);
 #endif
     if (transport->on_rtcp)
         transport->on_rtcp(buf, pkt_len, transport->on_rtcp_user);
@@ -829,25 +828,38 @@ static void transport_record_twcc_arrival(rtc_transport_t *transport, const rtc_
     transport->twcc_have_packets = true;
 }
 
-static bool transport_consume_twcc_feedback(rtc_transport_t *transport, const uint8_t *buf,
+/* Scan a compound RTCP packet for transport-cc feedback (PT=205, FMT=15) and
+ * feed each reported packet's send/recv timing to the bandwidth estimator. Does
+ * not consume the datagram: the same compound is still delivered to on_rtcp so
+ * the media session sees any bundled SR/RR/NACK/PLI. */
+static void transport_consume_twcc_feedback(rtc_transport_t *transport, const uint8_t *buf,
                                             size_t len) {
     if (!transport->twcc_enabled || !transport->bwe)
-        return false;
-    uint8_t pt, fmt;
-    if (!rtc_rtcp_get_pt_fmt(buf, len, &pt, &fmt) || pt != RTCP_PT_RTPFB || fmt != 15)
-        return false;
-    rtc_rtcp_twcc_t tw;
-    if (rtc_rtcp_parse_twcc(&tw, buf, len) != RTC_OK)
-        return true;
-    for (int i = 0; i < tw.item_count; i++) {
-        const rtc_twcc_sent_pkt_t *s =
-            rtc_twcc_sender_lookup(&transport->twcc_sender, tw.items[i].seq);
-        if (!s)
-            continue;
-        uint64_t recv_us = tw.items[i].received ? tw.items[i].recv_time_us : 0;
-        rtc_bwe_on_packet_feedback(transport->bwe, s->send_time_us, recv_us, s->size);
+        return;
+    size_t offset = 0;
+    while (offset + 4 <= len) {
+        if (((buf[offset] >> 6) & 0x03) != 2)
+            break;
+        size_t sub_len = (((size_t)buf[offset + 2] << 8 | buf[offset + 3]) + 1) * 4;
+        if (offset + sub_len > len)
+            break;
+        uint8_t pt, fmt;
+        if (rtc_rtcp_get_pt_fmt(buf + offset, sub_len, &pt, &fmt) && pt == RTCP_PT_RTPFB &&
+            fmt == 15) {
+            rtc_rtcp_twcc_t tw;
+            if (rtc_rtcp_parse_twcc(&tw, buf + offset, sub_len) == RTC_OK) {
+                for (int i = 0; i < tw.item_count; i++) {
+                    const rtc_twcc_sent_pkt_t *s =
+                        rtc_twcc_sender_lookup(&transport->twcc_sender, tw.items[i].seq);
+                    if (!s)
+                        continue;
+                    uint64_t recv_us = tw.items[i].received ? tw.items[i].recv_time_us : 0;
+                    rtc_bwe_on_packet_feedback(transport->bwe, s->send_time_us, recv_us, s->size);
+                }
+            }
+        }
+        offset += sub_len;
     }
-    return true;
 }
 
 static void transport_twcc_fb_timer(void *user) {

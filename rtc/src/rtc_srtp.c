@@ -163,16 +163,21 @@ static int srtp_kdf(const uint8_t *master_key, const uint8_t *master_salt, size_
         iv[14] = (block_count >> 8) & 0xFF;
         iv[15] = block_count & 0xFF;
 
-        uint8_t plaintext[16];
-        memset(plaintext, 0, sizeof(plaintext));
-
+        /* AES-ECB always emits a full 16-byte block; derive into a scratch
+         * block and copy only the bytes still requested so a non-multiple-of-16
+         * out_len (e.g. 14-byte salt, 20-byte HMAC key) never overruns out. */
+        uint8_t block[16];
         int outl = 0;
         EVP_EncryptInit_ex(ctx, EVP_aes_128_ecb(), NULL, master_key, NULL);
         EVP_CIPHER_CTX_set_padding(ctx, 0);
-        EVP_EncryptUpdate(ctx, out + produced, &outl, iv, 16);
-        EVP_EncryptFinal_ex(ctx, out + produced + outl, &outl);
+        EVP_EncryptUpdate(ctx, block, &outl, iv, 16);
+        EVP_EncryptFinal_ex(ctx, block + outl, &outl);
 
-        produced += 16;
+        size_t remaining = out_len - produced;
+        size_t copy = remaining < 16 ? remaining : 16;
+        memcpy(out + produced, block, copy);
+
+        produced += copy;
         block_count++;
     }
 

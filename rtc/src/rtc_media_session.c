@@ -93,9 +93,7 @@ static void session_handle_psfb(rtc_media_session_t *s, uint8_t fmt, const uint8
         rtc_rtp_send_stream_handle_pli(ss);
 }
 
-void rtc_media_session_handle_rtcp(rtc_media_session_t *s, const uint8_t *buf, size_t len) {
-    if (!s || !s->ready || !buf || len <= 8)
-        return;
+static void session_dispatch_rtcp(rtc_media_session_t *s, const uint8_t *buf, size_t len) {
     uint8_t pt, fmt;
     if (!rtc_rtcp_get_pt_fmt(buf, len, &pt, &fmt))
         return;
@@ -115,6 +113,26 @@ void rtc_media_session_handle_rtcp(rtc_media_session_t *s, const uint8_t *buf, s
             break;
         default:
             break;
+    }
+}
+
+/* Walk a compound RTCP packet and dispatch each sub-packet. Real peers bundle
+ * SR/RR + SDES + feedback (NACK/PLI/TWCC) into one datagram, so dispatching only
+ * the first sub-packet would drop the rest. Each RTCP header carries a 16-bit
+ * length in 32-bit words minus one (RFC 3550 §6.4.1), i.e. (length + 1) * 4
+ * bytes. */
+void rtc_media_session_handle_rtcp(rtc_media_session_t *s, const uint8_t *buf, size_t len) {
+    if (!s || !s->ready || !buf)
+        return;
+    size_t offset = 0;
+    while (offset + 4 <= len) {
+        if (((buf[offset] >> 6) & 0x03) != 2)
+            break;
+        size_t sub_len = (((size_t)buf[offset + 2] << 8 | buf[offset + 3]) + 1) * 4;
+        if (offset + sub_len > len)
+            break;
+        session_dispatch_rtcp(s, buf + offset, sub_len);
+        offset += sub_len;
     }
 }
 

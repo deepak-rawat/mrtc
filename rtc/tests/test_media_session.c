@@ -112,10 +112,49 @@ TEST(unknown_ssrc_dropped) {
     rtc_rtp_send_stream_destroy(s1);
 }
 
+TEST(compound_rtcp_dispatches_all_subpackets) {
+    fb_rec_t r1 = {0};
+    fb_rec_t r2 = {0};
+    rtc_rtp_send_stream_t *s1 = make_stream(&r1);
+    rtc_rtp_send_stream_t *s2 = make_stream(&r2);
+    uint32_t ssrc1 = rtc_rtp_send_stream_ssrc(s1);
+    uint32_t ssrc2 = rtc_rtp_send_stream_ssrc(s2);
+
+    rtc_media_session_t session;
+    ASSERT_EQ(rtc_media_session_init(&session, NULL, NULL), RTC_OK);
+    ASSERT_EQ(rtc_media_session_add_sender(&session, s1), RTC_OK);
+    ASSERT_EQ(rtc_media_session_add_sender(&session, s2), RTC_OK);
+
+    /* One datagram carrying NACK(s1) followed by PLI(s2). The previous
+     * single-packet dispatch processed only the first sub-packet. */
+    uint8_t buf[256];
+    size_t total = 0;
+    size_t len = 0;
+    uint16_t lost[] = {2001, 2002};
+    ASSERT_EQ(rtc_rtcp_build_nack(buf, sizeof(buf), &len, 0xABCD, ssrc1, lost, 2), RTC_OK);
+    total += len;
+    ASSERT_EQ(rtc_rtcp_build_pli(buf + total, sizeof(buf) - total, &len, 0xABCD, ssrc2), RTC_OK);
+    total += len;
+
+    rtc_media_session_handle_rtcp(&session, buf, total);
+
+    ASSERT_EQ(r1.nack_calls, 1);
+    ASSERT_EQ(r1.last_count, 2);
+    ASSERT_EQ((int)r1.last_seq0, 2001);
+    ASSERT_EQ(r2.pli_calls, 1);
+    ASSERT_EQ(r1.pli_calls, 0);
+    ASSERT_EQ(r2.nack_calls, 0);
+
+    rtc_media_session_close(&session);
+    rtc_rtp_send_stream_destroy(s1);
+    rtc_rtp_send_stream_destroy(s2);
+}
+
 int main(void) {
     printf("=== rtc_media_session tests ===\n");
     RUN_TEST(nack_routes_to_named_sender);
     RUN_TEST(pli_routes_to_named_sender);
     RUN_TEST(unknown_ssrc_dropped);
+    RUN_TEST(compound_rtcp_dispatches_all_subpackets);
     TEST_SUMMARY();
 }
