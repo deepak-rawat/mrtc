@@ -35,16 +35,21 @@ typedef struct {
     bool initialized;
 } rtc_srtp_replay_t;
 
-/* Per-SSRC replay state. RFC 3711 §3.2.3: replay list is scoped to a single
- * cryptographic context which is keyed on the SSRC — bundled WebRTC streams
- * (audio + video on one transport) share a single SRTP key but have
- * independent sequence-number spaces and so need independent windows. */
+/* Per-SSRC stream state. RFC 3711 §3.2.3: the cryptographic context is keyed on
+ * the SSRC — bundled WebRTC streams (audio + video on one transport) share a
+ * single SRTP key but have independent sequence-number spaces, so each SSRC
+ * needs its own rollover counter (ROC) and replay window. A single shared ROC
+ * across SSRCs would mis-estimate rollover whenever two streams interleave and
+ * corrupt the AES-CM IV. */
 #define SRTP_REPLAY_MAX_STREAMS 8
 typedef struct {
     uint32_t ssrc;
     bool in_use;
     uint64_t lru_tick; /* set on each access; smallest is evicted when full */
-    rtc_srtp_replay_t replay;
+    uint32_t roc;      /* rollover counter for this SSRC */
+    uint16_t last_seq; /* last sequence number seen for this SSRC */
+    bool roc_init;     /* false until the first packet for this SSRC */
+    rtc_srtp_replay_t replay; /* receive direction only */
 } rtc_srtp_replay_entry_t;
 
 /* Thread safety: rtc_srtp_protect / rtc_srtp_unprotect / rtc_srtp_protect_rtcp
@@ -52,8 +57,8 @@ typedef struct {
  * context serializes them internally with `lock`. Required because the
  * encoder thread (RTP send) and transport thread (RTCP SR/RR/TWCC timers,
  * NACK retransmit) share the same sender context, and concurrent updates of
- * `roc`/`last_seq`/`srtcp_index` would otherwise cause IV reuse — fatal for
- * AES-CM. Init / close are not thread-safe and must not race with anything. */
+ * the per-SSRC rollover state / `srtcp_index` would otherwise cause IV reuse —
+ * fatal for AES-CM. Init / close are not thread-safe and must not race. */
 typedef struct {
     /* Serializes the four protect/unprotect entry points. */
     rtc_mutex_t lock;
@@ -72,16 +77,15 @@ typedef struct {
     uint8_t rtcp_session_salt[SRTP_MAX_SALT_LEN];
     uint8_t rtcp_session_auth_key[20];
 
-    /* Rollover counter (RTP) */
-    uint32_t roc;
-    uint16_t last_seq;
-
-    /* SRTCP index counter */
+    /* SRTCP index counter (sender side; the index space is per-context). */
     uint32_t srtcp_index;
 
-    /* Replay protection — receive direction only, per-SSRC. */
+    /* Per-SSRC RTP rollover + replay. rtp_send carries the send-direction ROC;
+     * rtp_replay / rtcp_replay carry the receive-direction ROC + replay window. */
+    rtc_srtp_replay_entry_t rtp_send[SRTP_REPLAY_MAX_STREAMS];
     rtc_srtp_replay_entry_t rtp_replay[SRTP_REPLAY_MAX_STREAMS];
     rtc_srtp_replay_entry_t rtcp_replay[SRTP_REPLAY_MAX_STREAMS];
+    uint64_t send_lru_tick;
     uint64_t replay_lru_tick;
 
     bool initialized;

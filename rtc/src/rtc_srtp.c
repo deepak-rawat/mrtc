@@ -99,17 +99,32 @@ static int srtp_replay_check(rtc_srtp_replay_t *r, uint64_t index) {
 }
 
 /*
- * Find (or allocate) the replay window for `ssrc` in a per-SSRC table.
+ * Find the per-SSRC stream entry for `ssrc` without allocating. Returns NULL if
+ * the SSRC has no entry yet. Used on the receive path to estimate the ROC for
+ * auth-tag verification before a (potentially spoofed) packet is trusted, so a
+ * forged SSRC cannot churn the table prior to authentication.
+ */
+static rtc_srtp_replay_entry_t *srtp_find_ssrc(rtc_srtp_replay_entry_t *table, size_t n,
+                                               uint32_t ssrc) {
+    for (size_t i = 0; i < n; i++) {
+        if (table[i].in_use && table[i].ssrc == ssrc)
+            return &table[i];
+    }
+    return NULL;
+}
+
+/*
+ * Find (or allocate) the per-SSRC stream entry for `ssrc` in a table.
  * On overflow evicts the least-recently-used entry. Never fails.
  */
-static rtc_srtp_replay_t *srtp_replay_for_ssrc(rtc_srtp_replay_entry_t *table, size_t n,
-                                               uint64_t *lru_tick, uint32_t ssrc) {
+static rtc_srtp_replay_entry_t *srtp_entry_for_ssrc(rtc_srtp_replay_entry_t *table, size_t n,
+                                                    uint64_t *lru_tick, uint32_t ssrc) {
     rtc_srtp_replay_entry_t *free_slot = NULL;
     rtc_srtp_replay_entry_t *lru_slot = &table[0];
     for (size_t i = 0; i < n; i++) {
         if (table[i].in_use && table[i].ssrc == ssrc) {
             table[i].lru_tick = ++(*lru_tick);
-            return &table[i].replay;
+            return &table[i];
         }
         if (!table[i].in_use && !free_slot)
             free_slot = &table[i];
@@ -119,14 +134,14 @@ static rtc_srtp_replay_t *srtp_replay_for_ssrc(rtc_srtp_replay_entry_t *table, s
 
     rtc_srtp_replay_entry_t *slot = free_slot ? free_slot : lru_slot;
     if (slot == lru_slot && slot->in_use) {
-        RTC_LOG_WARN("SRTP: replay table full, evicting SSRC=0x%08x for SSRC=0x%08x", slot->ssrc,
+        RTC_LOG_WARN("SRTP: stream table full, evicting SSRC=0x%08x for SSRC=0x%08x", slot->ssrc,
                      ssrc);
     }
     memset(slot, 0, sizeof(*slot));
     slot->ssrc = ssrc;
     slot->in_use = true;
     slot->lru_tick = ++(*lru_tick);
-    return &slot->replay;
+    return slot;
 }
 
 /*
@@ -308,13 +323,17 @@ int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_
     uint32_t ssrc =
         ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) | ((uint32_t)buf[10] << 8) | buf[11];
 
-    /* Update ROC */
-    if (ctx->last_seq == 0 && ctx->roc == 0) {
-        ctx->last_seq = seq;
-    } else if (seq < ctx->last_seq && (ctx->last_seq - seq) > 0x8000) {
-        ctx->roc++;
+    /* Per-SSRC rollover: bundled streams share this context but have
+     * independent sequence spaces, so the ROC must be tracked per SSRC. */
+    rtc_srtp_replay_entry_t *st =
+        srtp_entry_for_ssrc(ctx->rtp_send, SRTP_REPLAY_MAX_STREAMS, &ctx->send_lru_tick, ssrc);
+    if (!st->roc_init) {
+        st->roc_init = true;
+    } else if (seq < st->last_seq && (st->last_seq - seq) > 0x8000) {
+        st->roc++;
     }
-    ctx->last_seq = seq;
+    st->last_seq = seq;
+    uint32_t roc = st->roc;
 
     /* Determine header length (handle CSRC and extension) */
     size_t hdr_len = 12;
@@ -334,7 +353,7 @@ int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_
     }
 
     /* Encrypt payload (not header) */
-    int rc = srtp_aes_cm(ctx->session_key, ctx->session_salt, ssrc, ctx->roc, seq, buf + hdr_len,
+    int rc = srtp_aes_cm(ctx->session_key, ctx->session_salt, ssrc, roc, seq, buf + hdr_len,
                          *len - hdr_len);
     if (rc != RTC_OK) {
         rtc_mutex_unlock(&ctx->lock);
@@ -343,10 +362,10 @@ int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_
 
     /* Compute authentication tag: HMAC-SHA1 over (header + encrypted payload + ROC) */
     uint8_t roc_buf[4];
-    roc_buf[0] = (ctx->roc >> 24) & 0xFF;
-    roc_buf[1] = (ctx->roc >> 16) & 0xFF;
-    roc_buf[2] = (ctx->roc >> 8) & 0xFF;
-    roc_buf[3] = ctx->roc & 0xFF;
+    roc_buf[0] = (roc >> 24) & 0xFF;
+    roc_buf[1] = (roc >> 16) & 0xFF;
+    roc_buf[2] = (roc >> 8) & 0xFF;
+    roc_buf[3] = roc & 0xFF;
 
     uint8_t hmac[20];
     rc = srtp_hmac_sha1(ctx->session_auth_key, 20, buf, *len, roc_buf, 4, hmac, sizeof(hmac));
@@ -379,10 +398,12 @@ int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     uint32_t ssrc =
         ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) | ((uint32_t)buf[10] << 8) | buf[11];
 
-    /* Estimate ROC */
-    uint32_t roc = ctx->roc;
-    if (ctx->last_seq != 0 && seq < ctx->last_seq && (ctx->last_seq - seq) > 0x8000)
-        roc = ctx->roc + 1;
+    /* Estimate ROC per-SSRC. Use a non-allocating lookup here: a spoofed SSRC
+     * must not churn the stream table before the auth tag is verified. */
+    rtc_srtp_replay_entry_t *known = srtp_find_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS, ssrc);
+    uint32_t roc = known ? known->roc : 0;
+    if (known && known->roc_init && seq < known->last_seq && (known->last_seq - seq) > 0x8000)
+        roc = known->roc + 1;
 
     /* Verify authentication tag */
     uint8_t roc_buf[4];
@@ -406,12 +427,12 @@ int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     }
 
     /* Replay check (RFC 3711 §3.3.2) — after auth verify to avoid spoofed
-     * replay rejection. Packet index = (ROC << 16) | seq. Window is per-SSRC:
+     * replay rejection. Packet index = (ROC << 16) | seq. State is per-SSRC:
      * bundled streams share a key but not a sequence space. */
     uint64_t pkt_index = ((uint64_t)roc << 16) | seq;
-    rtc_srtp_replay_t *replay =
-        srtp_replay_for_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS, &ctx->replay_lru_tick, ssrc);
-    int replay_rc = srtp_replay_check(replay, pkt_index);
+    rtc_srtp_replay_entry_t *st = srtp_entry_for_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS,
+                                                      &ctx->replay_lru_tick, ssrc);
+    int replay_rc = srtp_replay_check(&st->replay, pkt_index);
     if (replay_rc != RTC_OK) {
         rtc_mutex_unlock(&ctx->lock);
         return replay_rc;
@@ -442,10 +463,11 @@ int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
         return rc;
     }
 
-    /* Update state */
-    if (seq > ctx->last_seq || (ctx->last_seq - seq) > 0x8000) {
-        ctx->last_seq = seq;
-        ctx->roc = roc;
+    /* Update per-SSRC rollover state. */
+    if (!st->roc_init || seq > st->last_seq || (st->last_seq - seq) > 0x8000) {
+        st->last_seq = seq;
+        st->roc = roc;
+        st->roc_init = true;
     }
 
     *len = srtp_len;
@@ -590,9 +612,9 @@ int rtc_srtp_unprotect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
      * SRTCP index space is independent for each sender. */
     uint32_t sender_ssrc =
         ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) | ((uint32_t)buf[6] << 8) | buf[7];
-    rtc_srtp_replay_t *replay = srtp_replay_for_ssrc(ctx->rtcp_replay, SRTP_REPLAY_MAX_STREAMS,
-                                                     &ctx->replay_lru_tick, sender_ssrc);
-    int replay_rc = srtp_replay_check(replay, (uint64_t)index);
+    rtc_srtp_replay_entry_t *st = srtp_entry_for_ssrc(ctx->rtcp_replay, SRTP_REPLAY_MAX_STREAMS,
+                                                      &ctx->replay_lru_tick, sender_ssrc);
+    int replay_rc = srtp_replay_check(&st->replay, (uint64_t)index);
     if (replay_rc != RTC_OK) {
         rtc_mutex_unlock(&ctx->lock);
         return replay_rc;

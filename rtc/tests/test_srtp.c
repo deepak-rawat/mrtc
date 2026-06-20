@@ -187,6 +187,63 @@ TEST(srtp_multiple_packets) {
     rtc_srtp_close(&recv_ctx);
 }
 
+/* Two SSRCs bundled on one SRTP context, with sequence numbers that straddle
+ * the 0x8000 wrap boundary. A single shared rollover counter would spuriously
+ * roll over when the streams interleave (and fail once the receive order
+ * differs from the send order); per-SSRC ROC keeps each stream at ROC 0. */
+TEST(srtp_per_ssrc_rollover) {
+    enum { N = 6 };
+    rtc_srtp_ctx_t send_ctx, recv_ctx;
+    rtc_srtp_init(&send_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
+    rtc_srtp_init(&recv_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
+
+    const uint32_t ssrc_a = 0x0A0A0A0A;
+    const uint32_t ssrc_b = 0x0B0B0B0B;
+    const uint16_t base_a = 100;
+    const uint16_t base_b = 50000; /* base_b - base_a > 0x8000 */
+
+    uint8_t pkts[2 * N][1500];
+    size_t lens[2 * N];
+    char payloads[2 * N][32];
+
+    /* Protect in interleaved send order: A,B,A,B,... */
+    for (int i = 0; i < N; i++) {
+        for (int s = 0; s < 2; s++) {
+            int idx = i * 2 + s;
+            uint32_t ssrc = s == 0 ? ssrc_a : ssrc_b;
+            uint16_t seq = (uint16_t)((s == 0 ? base_a : base_b) + i);
+            int plen =
+                snprintf(payloads[idx], sizeof(payloads[idx]), "%c-%d", s == 0 ? 'A' : 'B', i);
+            rtc_rtp_packet_t pkt;
+            rtc_rtp_build(&pkt, 111, seq, (uint32_t)(i * 960), ssrc, false,
+                          (const uint8_t *)payloads[idx], (size_t)plen);
+            memcpy(pkts[idx], pkt.buf, pkt.buf_len);
+            lens[idx] = pkt.buf_len;
+            int rc = rtc_srtp_protect(&send_ctx, pkts[idx], &lens[idx], sizeof(pkts[idx]));
+            ASSERT_EQ(rc, RTC_OK);
+        }
+    }
+
+    /* Unprotect grouped by stream (all A, then all B) — a different order than
+     * sent. A shared ROC mis-estimates and fails here; per-SSRC succeeds. */
+    for (int s = 0; s < 2; s++) {
+        for (int i = 0; i < N; i++) {
+            int idx = i * 2 + s;
+            size_t len = lens[idx];
+            int rc = rtc_srtp_unprotect(&recv_ctx, pkts[idx], &len);
+            ASSERT_EQ(rc, RTC_OK);
+            size_t plen = strlen(payloads[idx]);
+            ASSERT_EQ(len, RTP_HEADER_SIZE + plen);
+            ASSERT_MEM_EQ(pkts[idx] + RTP_HEADER_SIZE, payloads[idx], plen);
+        }
+    }
+
+    printf("    per-SSRC rollover: 2 bundled SSRCs reordered, all decrypt\n");
+
+    rtc_srtp_close(&send_ctx);
+    rtc_srtp_close(&recv_ctx);
+}
+
 TEST(srtcp_roundtrip) {
     rtc_srtp_ctx_t send_ctx, recv_ctx;
     rtc_srtp_init(&send_ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
@@ -350,6 +407,7 @@ int main(void) {
     RUN_TEST(srtp_roundtrip);
     RUN_TEST(srtp_wrong_key_fails);
     RUN_TEST(srtp_multiple_packets);
+    RUN_TEST(srtp_per_ssrc_rollover);
     RUN_TEST(srtcp_roundtrip);
     RUN_TEST(srtcp_wrong_key_fails);
     RUN_TEST(srtp_replay_rejected);
