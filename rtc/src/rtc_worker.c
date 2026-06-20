@@ -17,8 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define RTC_WORKER_NAME_MAX 64
-#define RTC_WORKER_MAX_IO   8
+#define RTC_WORKER_NAME_MAX   64
+#define RTC_WORKER_DEFAULT_IO 8
 
 typedef struct {
     rtc_socket_t fd;
@@ -49,7 +49,8 @@ struct rtc_worker {
 
     /* I/O sources: touched only on the loop thread (registration is
      * marshalled there), so no lock is needed to read/write this table. */
-    worker_io_source_t io[RTC_WORKER_MAX_IO];
+    worker_io_source_t *io;
+    int io_cap;
     int io_count;
 
     /* Cross-thread task queue, guarded by mutex. */
@@ -159,6 +160,7 @@ static void *worker_thread_fn(void *arg) {
 static void worker_apply_config(rtc_worker_t *worker, const rtc_worker_config_t *cfg) {
     worker->max_packet_batch = 64;
     worker->timer_resolution_ms = 1;
+    worker->io_cap = RTC_WORKER_DEFAULT_IO;
     if (!cfg)
         return;
 
@@ -173,6 +175,8 @@ static void worker_apply_config(rtc_worker_t *worker, const rtc_worker_config_t 
         worker->max_packet_batch = cfg->max_packet_batch;
     if (cfg->timer_resolution_ms > 0)
         worker->timer_resolution_ms = cfg->timer_resolution_ms;
+    if (cfg->max_io_sources > 0)
+        worker->io_cap = cfg->max_io_sources;
 }
 
 rtc_worker_t *rtc_worker_create(const rtc_worker_config_t *cfg) {
@@ -202,9 +206,19 @@ rtc_worker_t *rtc_worker_create(const rtc_worker_config_t *cfg) {
         free(worker);
         return NULL;
     }
+    worker->io = (worker_io_source_t *)calloc((size_t)worker->io_cap, sizeof(*worker->io));
+    if (!worker->io) {
+        rtc_poller_close(&worker->poller);
+        rtc_cond_destroy(&worker->cond);
+        rtc_mutex_destroy(&worker->mutex);
+        rtc_timer_sched_close(&worker->timers);
+        free(worker);
+        return NULL;
+    }
     atomic_store_explicit(&worker->running, true, memory_order_release);
     if (rtc_thread_create(&worker->thread, worker_thread_fn, worker) != RTC_OK) {
         atomic_store_explicit(&worker->running, false, memory_order_relaxed);
+        free(worker->io);
         rtc_poller_close(&worker->poller);
         rtc_cond_destroy(&worker->cond);
         rtc_mutex_destroy(&worker->mutex);
@@ -255,6 +269,7 @@ void rtc_worker_destroy(rtc_worker_t *worker) {
     rtc_cond_destroy(&worker->cond);
     rtc_mutex_destroy(&worker->mutex);
     rtc_timer_sched_close(&worker->timers);
+    free(worker->io);
     free(worker);
 }
 
@@ -358,7 +373,7 @@ typedef struct {
 static void worker_do_add_io(void *user) {
     worker_io_add_ctx_t *ctx = (worker_io_add_ctx_t *)user;
     rtc_worker_t *worker = ctx->worker;
-    if (worker->io_count >= RTC_WORKER_MAX_IO) {
+    if (worker->io_count >= worker->io_cap) {
         ctx->rc = RTC_ERR_NOMEM;
         return;
     }

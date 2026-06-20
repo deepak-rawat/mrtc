@@ -16,6 +16,7 @@ typedef struct {
     const char *name;
     int max_packet_batch;
     int timer_resolution_ms;
+    int max_io_sources; /* registered sockets cap; <=0 uses the default (8) */
 } rtc_worker_config_t;
 
 typedef struct {
