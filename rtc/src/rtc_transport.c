@@ -109,6 +109,28 @@ static int tx_op_invoke(rtc_transport_t *transport, tx_op_fn fn, void *arg) {
     return call.rc;
 }
 
+/* Define a `void rtc_transport_<func>(transport, fn, user)` callback setter that
+ * marshals the (fn, user) store onto the worker thread. The store itself is the
+ * same shape for every callback, so generate the args struct + impl + wrapper
+ * instead of repeating them. */
+#define TX_DEFINE_CB_SETTER(func, fntype, fn_field, user_field)                                    \
+    typedef struct {                                                                               \
+        fntype fn;                                                                                  \
+        void *user;                                                                                 \
+    } tx_##func##_args_t;                                                                          \
+    static int tx_##func##_impl(rtc_transport_t *transport, void *arg) {                           \
+        tx_##func##_args_t *a = (tx_##func##_args_t *)arg;                                          \
+        transport->fn_field = a->fn;                                                                \
+        transport->user_field = a->user;                                                            \
+        return RTC_OK;                                                                              \
+    }                                                                                              \
+    void rtc_transport_##func(rtc_transport_t *transport, fntype fn, void *user) {                  \
+        if (!transport)                                                                            \
+            return;                                                                                  \
+        tx_##func##_args_t args = {fn, user};                                                       \
+        tx_op_invoke(transport, tx_##func##_impl, &args);                                           \
+    }
+
 static rtc_transport_dtls_state_t transport_dtls_state(rtc_dtls_state_t state) {
     switch (state) {
         case RTC_DTLS_STATE_NEW:
@@ -718,24 +740,8 @@ int rtc_transport_set_dtls_role(rtc_transport_t *transport, rtc_transport_dtls_r
     return tx_op_invoke(transport, tx_set_dtls_role_impl, &role);
 }
 
-typedef struct {
-    rtc_transport_rtp_fn fn;
-    void *user;
-} tx_on_rtp_args_t;
+TX_DEFINE_CB_SETTER(on_rtp, rtc_transport_rtp_fn, on_rtp, on_rtp_user)
 
-static int tx_on_rtp_impl(rtc_transport_t *transport, void *arg) {
-    tx_on_rtp_args_t *a = (tx_on_rtp_args_t *)arg;
-    transport->on_rtp = a->fn;
-    transport->on_rtp_user = a->user;
-    return RTC_OK;
-}
-
-void rtc_transport_on_rtp(rtc_transport_t *transport, rtc_transport_rtp_fn fn, void *user) {
-    if (!transport)
-        return;
-    tx_on_rtp_args_t args = {fn, user};
-    tx_op_invoke(transport, tx_on_rtp_impl, &args);
-}
 
 typedef struct {
     rtc_rtp_sink_fn sink;
@@ -938,25 +944,7 @@ rtc_twcc_sender_t *rtc_transport_twcc_sender(rtc_transport_t *transport) {
     return &transport->twcc_sender;
 }
 
-typedef struct {
-    rtc_transport_bitrate_fn fn;
-    void *user;
-} tx_on_bitrate_args_t;
-
-static int tx_on_bitrate_impl(rtc_transport_t *transport, void *arg) {
-    tx_on_bitrate_args_t *a = (tx_on_bitrate_args_t *)arg;
-    transport->on_bitrate = a->fn;
-    transport->on_bitrate_user = a->user;
-    return RTC_OK;
-}
-
-void rtc_transport_on_bitrate_estimate(rtc_transport_t *transport, rtc_transport_bitrate_fn fn,
-                                       void *user) {
-    if (!transport)
-        return;
-    tx_on_bitrate_args_t args = {fn, user};
-    tx_op_invoke(transport, tx_on_bitrate_impl, &args);
-}
+TX_DEFINE_CB_SETTER(on_bitrate_estimate, rtc_transport_bitrate_fn, on_bitrate, on_bitrate_user)
 
 void rtc_transport_report_rtcp_loss(rtc_transport_t *transport, uint8_t fraction_lost) {
     if (transport && transport->twcc_enabled && transport->bwe)
@@ -964,43 +952,9 @@ void rtc_transport_report_rtcp_loss(rtc_transport_t *transport, uint8_t fraction
 }
 #endif /* MRTC_ENABLE_TWCC */
 
-typedef struct {
-    rtc_transport_rtcp_fn fn;
-    void *user;
-} tx_on_rtcp_args_t;
+TX_DEFINE_CB_SETTER(on_rtcp, rtc_transport_rtcp_fn, on_rtcp, on_rtcp_user)
 
-static int tx_on_rtcp_impl(rtc_transport_t *transport, void *arg) {
-    tx_on_rtcp_args_t *a = (tx_on_rtcp_args_t *)arg;
-    transport->on_rtcp = a->fn;
-    transport->on_rtcp_user = a->user;
-    return RTC_OK;
-}
-
-void rtc_transport_on_rtcp(rtc_transport_t *transport, rtc_transport_rtcp_fn fn, void *user) {
-    if (!transport)
-        return;
-    tx_on_rtcp_args_t args = {fn, user};
-    tx_op_invoke(transport, tx_on_rtcp_impl, &args);
-}
-
-typedef struct {
-    rtc_transport_data_fn fn;
-    void *user;
-} tx_on_data_args_t;
-
-static int tx_on_data_impl(rtc_transport_t *transport, void *arg) {
-    tx_on_data_args_t *a = (tx_on_data_args_t *)arg;
-    transport->on_data = a->fn;
-    transport->on_data_user = a->user;
-    return RTC_OK;
-}
-
-void rtc_transport_on_data(rtc_transport_t *transport, rtc_transport_data_fn fn, void *user) {
-    if (!transport)
-        return;
-    tx_on_data_args_t args = {fn, user};
-    tx_op_invoke(transport, tx_on_data_impl, &args);
-}
+TX_DEFINE_CB_SETTER(on_data, rtc_transport_data_fn, on_data, on_data_user)
 
 typedef struct {
     const uint8_t *data;
@@ -1037,10 +991,6 @@ int rtc_transport_send_raw(rtc_transport_t *transport, const uint8_t *data, size
     if (!atomic_load_explicit(&transport->selected_remote_valid, memory_order_acquire))
         return RTC_ERR_INVALID;
     return rtc_listener_send_to(transport->listener, data, len, &transport->selected_remote);
-}
-
-int rtc_transport_send_protected_rtp(rtc_transport_t *transport, const uint8_t *data, size_t len) {
-    return rtc_transport_send_raw(transport, data, len);
 }
 
 int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap) {

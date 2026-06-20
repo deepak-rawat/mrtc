@@ -282,7 +282,7 @@ void rtc_rtp_send_stream_handle_nack(rtc_rtp_send_stream_t *stream, const uint16
         uint16_t twcc_seq = 0;
         if (!rtc_nack_buf_retransmit(stream->nack_buf, lost_seqs[i], &pkt, &pkt_len, &twcc_seq))
             continue;
-        rtc_transport_send_protected_rtp(stream->transport, pkt, pkt_len);
+        rtc_transport_send_raw(stream->transport, pkt, pkt_len);
 #ifdef MRTC_ENABLE_TWCC
         if (twcc_seq != 0 && stream->twcc)
             rtc_twcc_sender_invalidate(stream->twcc, twcc_seq);
@@ -329,11 +329,13 @@ bool rtc_rtp_send_stream_on_rr(rtc_rtp_send_stream_t *stream, const rtc_rtcp_rr_
 #endif
 }
 
-void rtc_rtp_send_stream_emit_sr(rtc_rtp_send_stream_t *stream, rtc_transport_t *transport) {
-    if (!stream || !stream->active || !transport || stream->rtcp_stats.packets_sent == 0)
-        return;
+/* Build an SR/RR for `stats` with `build` and send it SRTCP-protected over
+ * `transport`, stamping the report time on success. Shared by the send-stream
+ * SR path and the recv-stream RR path. */
+static void emit_rtcp_report(rtc_rtcp_stats_t *stats, rtc_transport_t *transport,
+                             int (*build)(rtc_rtcp_packet_t *, const rtc_rtcp_stats_t *)) {
     rtc_rtcp_packet_t pkt;
-    if (rtc_rtcp_build_sr(&pkt, &stream->rtcp_stats) != RTC_OK)
+    if (build(&pkt, stats) != RTC_OK)
         return;
     uint8_t buf[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
     if (pkt.buf_len > sizeof(buf))
@@ -342,7 +344,13 @@ void rtc_rtp_send_stream_emit_sr(rtc_rtp_send_stream_t *stream, rtc_transport_t 
     size_t len = pkt.buf_len;
     if (rtc_transport_send_rtcp(transport, buf, &len, sizeof(buf)) != RTC_OK)
         return;
-    stream->rtcp_stats.last_report_time = rtc_time_ms();
+    stats->last_report_time = rtc_time_ms();
+}
+
+void rtc_rtp_send_stream_emit_sr(rtc_rtp_send_stream_t *stream, rtc_transport_t *transport) {
+    if (!stream || !stream->active || !transport || stream->rtcp_stats.packets_sent == 0)
+        return;
+    emit_rtcp_report(&stream->rtcp_stats, transport, rtc_rtcp_build_sr);
 }
 
 void rtc_rtp_recv_stream_set_active(rtc_rtp_recv_stream_t *stream, bool active) {
@@ -396,15 +404,5 @@ void rtc_rtp_recv_stream_on_sr(rtc_rtp_recv_stream_t *stream, const rtc_rtcp_sr_
 void rtc_rtp_recv_stream_emit_rr(rtc_rtp_recv_stream_t *stream, rtc_transport_t *transport) {
     if (!stream || !stream->active || !transport || stream->rtcp_stats.packets_received == 0)
         return;
-    rtc_rtcp_packet_t pkt;
-    if (rtc_rtcp_build_rr(&pkt, &stream->rtcp_stats) != RTC_OK)
-        return;
-    uint8_t buf[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
-    if (pkt.buf_len > sizeof(buf))
-        return;
-    memcpy(buf, pkt.buf, pkt.buf_len);
-    size_t len = pkt.buf_len;
-    if (rtc_transport_send_rtcp(transport, buf, &len, sizeof(buf)) != RTC_OK)
-        return;
-    stream->rtcp_stats.last_report_time = rtc_time_ms();
+    emit_rtcp_report(&stream->rtcp_stats, transport, rtc_rtcp_build_rr);
 }
