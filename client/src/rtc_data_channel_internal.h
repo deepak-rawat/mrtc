@@ -4,8 +4,8 @@
  *
  * The data channel manager is embedded inside rtc_peer_connection and
  * drives the OPEN/ACK/DATA/CLOSE handshake over the DTLS application-data
- * path. Only rtc_peer.c, rtc_peer_packets.c, rtc_data_channel.c, and the
- * data channel unit test should include this header.
+ * path. Only rtc_peer.c, rtc_data_channel.c, and the data channel unit
+ * test should include this header.
  */
 #ifndef RTC_DATA_CHANNEL_INTERNAL_H
 #define RTC_DATA_CHANNEL_INTERNAL_H

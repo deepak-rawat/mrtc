@@ -1,12 +1,12 @@
 /*
- * Unit tests for the RTCP feedback router (rtc_rtcp_router).
+ * Unit tests for the RTP/RTCP media session (rtc_media_session).
  *
  * Exercises SSRC -> send-stream routing for NACK / PLI feedback with a NULL
- * transport (SR routing + RR loss feed require a live transport and are covered
- * end-to-end by the client peer test).
+ * transport / worker (SR routing, the RR loss feed, and the emission timer
+ * require a live transport and are covered end-to-end by the client peer test).
  */
 #include "rtc/rtc_rtcp.h"
-#include "rtc/rtc_rtcp_router.h"
+#include "rtc/rtc_media_session.h"
 #include "rtc/rtc_rtp_stream.h"
 #include "test_harness.h"
 
@@ -43,25 +43,24 @@ TEST(nack_routes_to_named_sender) {
     rtc_rtp_send_stream_t *s1 = make_stream(&r1);
     rtc_rtp_send_stream_t *s2 = make_stream(&r2);
     uint32_t ssrc1 = rtc_rtp_send_stream_ssrc(s1);
-    uint32_t ssrc2 = rtc_rtp_send_stream_ssrc(s2);
 
-    rtc_rtcp_router_t router;
-    ASSERT_EQ(rtc_rtcp_router_init(&router, NULL), RTC_OK);
-    ASSERT_EQ(rtc_rtcp_router_add_sender(&router, ssrc1, s1), RTC_OK);
-    ASSERT_EQ(rtc_rtcp_router_add_sender(&router, ssrc2, s2), RTC_OK);
+    rtc_media_session_t session;
+    ASSERT_EQ(rtc_media_session_init(&session, NULL, NULL), RTC_OK);
+    ASSERT_EQ(rtc_media_session_add_sender(&session, s1), RTC_OK);
+    ASSERT_EQ(rtc_media_session_add_sender(&session, s2), RTC_OK);
 
     uint8_t buf[256];
     size_t len = 0;
     uint16_t lost[] = {1001, 1002};
     ASSERT_EQ(rtc_rtcp_build_nack(buf, sizeof(buf), &len, 0xABCD, ssrc1, lost, 2), RTC_OK);
 
-    rtc_rtcp_router_handle(&router, buf, len);
+    rtc_media_session_handle_rtcp(&session, buf, len);
     ASSERT_EQ(r1.nack_calls, 1);
     ASSERT_EQ(r1.last_count, 2);
     ASSERT_EQ((int)r1.last_seq0, 1001);
     ASSERT_EQ(r2.nack_calls, 0);
 
-    rtc_rtcp_router_close(&router);
+    rtc_media_session_close(&session);
     rtc_rtp_send_stream_destroy(s1);
     rtc_rtp_send_stream_destroy(s2);
 }
@@ -73,32 +72,32 @@ TEST(pli_routes_to_named_sender) {
     rtc_rtp_send_stream_t *s2 = make_stream(&r2);
     uint32_t ssrc2 = rtc_rtp_send_stream_ssrc(s2);
 
-    rtc_rtcp_router_t router;
-    ASSERT_EQ(rtc_rtcp_router_init(&router, NULL), RTC_OK);
-    ASSERT_EQ(rtc_rtcp_router_add_sender(&router, rtc_rtp_send_stream_ssrc(s1), s1), RTC_OK);
-    ASSERT_EQ(rtc_rtcp_router_add_sender(&router, ssrc2, s2), RTC_OK);
+    rtc_media_session_t session;
+    ASSERT_EQ(rtc_media_session_init(&session, NULL, NULL), RTC_OK);
+    ASSERT_EQ(rtc_media_session_add_sender(&session, s1), RTC_OK);
+    ASSERT_EQ(rtc_media_session_add_sender(&session, s2), RTC_OK);
 
     uint8_t buf[64];
     size_t len = 0;
     ASSERT_EQ(rtc_rtcp_build_pli(buf, sizeof(buf), &len, 0xABCD, ssrc2), RTC_OK);
 
-    rtc_rtcp_router_handle(&router, buf, len);
+    rtc_media_session_handle_rtcp(&session, buf, len);
     ASSERT_EQ(r2.pli_calls, 1);
     ASSERT_EQ(r1.pli_calls, 0);
 
-    rtc_rtcp_router_close(&router);
+    rtc_media_session_close(&session);
     rtc_rtp_send_stream_destroy(s1);
     rtc_rtp_send_stream_destroy(s2);
 }
 
-TEST(unknown_and_removed_ssrc_dropped) {
+TEST(unknown_ssrc_dropped) {
     fb_rec_t r1 = {0};
     rtc_rtp_send_stream_t *s1 = make_stream(&r1);
     uint32_t ssrc1 = rtc_rtp_send_stream_ssrc(s1);
 
-    rtc_rtcp_router_t router;
-    ASSERT_EQ(rtc_rtcp_router_init(&router, NULL), RTC_OK);
-    ASSERT_EQ(rtc_rtcp_router_add_sender(&router, ssrc1, s1), RTC_OK);
+    rtc_media_session_t session;
+    ASSERT_EQ(rtc_media_session_init(&session, NULL, NULL), RTC_OK);
+    ASSERT_EQ(rtc_media_session_add_sender(&session, s1), RTC_OK);
 
     uint8_t buf[256];
     size_t len = 0;
@@ -106,23 +105,17 @@ TEST(unknown_and_removed_ssrc_dropped) {
 
     /* Unknown media SSRC: nothing routed. */
     ASSERT_EQ(rtc_rtcp_build_nack(buf, sizeof(buf), &len, 0xABCD, ssrc1 ^ 0x55, lost, 1), RTC_OK);
-    rtc_rtcp_router_handle(&router, buf, len);
+    rtc_media_session_handle_rtcp(&session, buf, len);
     ASSERT_EQ(r1.nack_calls, 0);
 
-    /* After removal, the previously-bound SSRC is dropped too. */
-    rtc_rtcp_router_remove_sender(&router, ssrc1);
-    ASSERT_EQ(rtc_rtcp_build_nack(buf, sizeof(buf), &len, 0xABCD, ssrc1, lost, 1), RTC_OK);
-    rtc_rtcp_router_handle(&router, buf, len);
-    ASSERT_EQ(r1.nack_calls, 0);
-
-    rtc_rtcp_router_close(&router);
+    rtc_media_session_close(&session);
     rtc_rtp_send_stream_destroy(s1);
 }
 
 int main(void) {
-    printf("=== rtc_rtcp_router tests ===\n");
+    printf("=== rtc_media_session tests ===\n");
     RUN_TEST(nack_routes_to_named_sender);
     RUN_TEST(pli_routes_to_named_sender);
-    RUN_TEST(unknown_and_removed_ssrc_dropped);
+    RUN_TEST(unknown_ssrc_dropped);
     TEST_SUMMARY();
 }

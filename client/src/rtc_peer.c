@@ -1,8 +1,9 @@
 /*
  * Peer Connection: control plane.
  *
- * Lifecycle, SDP, connect choreography, timers, public API.
- * Packet handling (RTP/RTCP dispatch) lives in rtc_peer_packets.c.
+ * Lifecycle, SDP, connect choreography, timers, public API. The per-peer
+ * media plane (RTP routing, RTCP feedback, SR/RR) lives in the core
+ * rtc_media_session, owned here as pc->media_session.
  */
 #include "rtc_peer_internal.h"
 
@@ -16,7 +17,6 @@ static void peer_runtime_close(rtc_peer_connection_t *pc);
 static void peer_runtime_on_listener_candidate(const rtc_transport_candidate_t *cand, void *user);
 static void peer_runtime_on_listener_done(void *user);
 static void peer_runtime_connect_timer(void *user);
-static void peer_runtime_on_rtcp(const uint8_t *data, size_t len, void *user);
 static void peer_runtime_on_data(const uint8_t *data, size_t len, void *user);
 
 static rtc_worker_t *peer_runtime_worker(rtc_peer_connection_t *pc) {
@@ -119,11 +119,15 @@ static int peer_runtime_init(rtc_peer_connection_t *pc, const rtc_config_t *conf
         peer_runtime_close(pc);
         return RTC_ERR_GENERIC;
     }
-    rtc_transport_set_rtp_router(pc->runtime_transport, peer_rtp_sink, peer_rtp_resolve, pc);
-    rtc_transport_on_rtcp(pc->runtime_transport, peer_runtime_on_rtcp, pc);
     rtc_transport_on_data(pc->runtime_transport, peer_runtime_on_data, pc);
     pc->runtime_connect_timer = RTC_WORKER_TIMER_INVALID;
-    pc->runtime_rtcp_timer = RTC_WORKER_TIMER_INVALID;
+
+    /* The media session installs the transport's RTP router + RTCP handler and
+     * drives SR/RR; senders and receivers are registered as tracks are added. */
+    if (rtc_media_session_init(&pc->media_session, pc->runtime_transport, worker) != RTC_OK) {
+        peer_runtime_close(pc);
+        return RTC_ERR_GENERIC;
+    }
 
     rtc_dtls_parameters_t dtls;
     if (rtc_transport_get_dtls_parameters(pc->runtime_transport, &dtls) == RTC_OK)
@@ -142,10 +146,7 @@ static void peer_runtime_close(rtc_peer_connection_t *pc) {
         rtc_worker_cancel_timer(worker, pc->runtime_connect_timer);
         pc->runtime_connect_timer = RTC_WORKER_TIMER_INVALID;
     }
-    if (worker && pc->runtime_rtcp_timer != RTC_WORKER_TIMER_INVALID) {
-        rtc_worker_cancel_timer(worker, pc->runtime_rtcp_timer);
-        pc->runtime_rtcp_timer = RTC_WORKER_TIMER_INVALID;
-    }
+    rtc_media_session_stop(&pc->media_session);
     if (pc->runtime_transport) {
         rtc_transport_destroy(pc->runtime_transport);
         pc->runtime_transport = NULL;
@@ -352,8 +353,7 @@ static void peer_runtime_complete_connection(rtc_peer_connection_t *pc) {
     if (pc->on_data_channel)
         rtc_dc_manager_on_channel(&pc->dc_manager, pc->on_data_channel, pc->on_data_channel_user);
 
-    pc->runtime_rtcp_timer = rtc_worker_add_timer(
-        peer_runtime_worker(pc), rtc_time_ms() + RTCP_INTERVAL_MS, peer_rtcp_timer, pc);
+    rtc_media_session_start(&pc->media_session);
 
     peer_set_ice_connection(pc, RTC_ICE_CONNECTION_CONNECTED);
     peer_set_connection(pc, RTC_CONNECTION_CONNECTED);
@@ -391,11 +391,6 @@ static void peer_runtime_connect_timer(void *user) {
 
     pc->runtime_connect_timer = rtc_worker_add_timer(peer_runtime_worker(pc), rtc_time_ms() + 50,
                                                      peer_runtime_connect_timer, pc);
-}
-
-static void peer_runtime_on_rtcp(const uint8_t *data, size_t len, void *user) {
-    rtc_peer_connection_t *pc = (rtc_peer_connection_t *)user;
-    rtc_rtcp_router_handle(&pc->rtcp_router, data, len);
 }
 
 static void peer_runtime_on_data(const uint8_t *data, size_t len, void *user) {
@@ -488,13 +483,6 @@ rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config) {
         return NULL;
     }
 
-    /* Initialize the RTCP feedback router (resolves SR recipients via the
-     * transport RTP demux; routes RR/NACK/PLI to send streams). */
-    if (rtc_rtcp_router_init(&pc->rtcp_router, pc->runtime_transport) != RTC_OK) {
-        peer_runtime_close(pc);
-        free(pc);
-        return NULL;
-    }
     RTC_LOG_INFO("Peer connection created");
     return pc;
 }
@@ -508,7 +496,7 @@ void rtc_peer_connection_close(rtc_peer_connection_t *pc) {
     peer_runtime_close(pc);
 
     rtc_dc_manager_close(&pc->dc_manager);
-    rtc_rtcp_router_close(&pc->rtcp_router);
+    rtc_media_session_close(&pc->media_session);
     rtc_sdp_close(&pc->local_sdp);
     rtc_sdp_close(&pc->remote_sdp);
     /* Destroy per-sender resources */
@@ -545,9 +533,9 @@ rtc_rtp_sender_t *rtc_peer_connection_add_track(rtc_peer_connection_t *pc, rtc_k
     struct rtc_rtp_transceiver *t = &pc->transceivers[pc->transceiver_count];
     rtc_rtp_transceiver_init_slot(t, pc->transceiver_count, kind, codec);
 
-    /* SSRC is fixed at creation, so register for RTCP feedback now. */
-    rtc_rtcp_router_add_sender(&pc->rtcp_router, rtc_rtp_send_stream_ssrc(t->sender.stream),
-                               t->sender.stream);
+    /* SSRC is fixed at creation, so register the streams with the session now. */
+    rtc_media_session_add_sender(&pc->media_session, t->sender.stream);
+    rtc_media_session_add_receiver(&pc->media_session, t->receiver.stream);
 
     pc->transceiver_count++;
     return &t->sender;
@@ -571,8 +559,8 @@ rtc_rtp_transceiver_t *rtc_peer_connection_add_transceiver(rtc_peer_connection_t
     /* Sender active only for sendrecv/sendonly. */
     if (t->direction == RTC_DIR_RECVONLY || t->direction == RTC_DIR_INACTIVE)
         rtc_rtp_send_stream_set_active(t->sender.stream, false);
-    rtc_rtcp_router_add_sender(&pc->rtcp_router, rtc_rtp_send_stream_ssrc(t->sender.stream),
-                               t->sender.stream);
+    rtc_media_session_add_sender(&pc->media_session, t->sender.stream);
+    rtc_media_session_add_receiver(&pc->media_session, t->receiver.stream);
 
     pc->transceiver_count++;
     return (rtc_rtp_transceiver_t *)t;
@@ -757,9 +745,9 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
     /* Eager SSRC → receive-stream binding from remote SDP. Walk parsed
      * m= sections; for each that carried a=ssrc, find the matching
      * transceiver by mid_index and bind its receive stream into the
-     * transport RTP demux under that SSRC. The payload-type resolver
-     * (peer_rtp_resolve) remains as a defensive fallback for peers that
-     * omit a=ssrc lines. */
+     * transport RTP demux under that SSRC. The session payload-type
+     * resolver remains as a defensive fallback for peers that omit
+     * a=ssrc lines. */
     for (int i = 0; i < pc->remote_sdp.media_count; i++) {
         const rtc_sdp_media_t *m = &pc->remote_sdp.media[i];
         if (m->ssrc == 0)
@@ -767,8 +755,7 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
         for (int j = 0; j < pc->transceiver_count; j++) {
             struct rtc_rtp_transceiver *t = &pc->transceivers[j];
             if (t->mid_index == m->mid_index) {
-                rtc_rtp_recv_stream_set_ssrc(t->receiver.stream, m->ssrc);
-                rtc_transport_bind_rtp(pc->runtime_transport, m->ssrc, t->receiver.stream);
+                rtc_media_session_bind_receiver(&pc->media_session, t->receiver.stream, m->ssrc);
                 break;
             }
         }

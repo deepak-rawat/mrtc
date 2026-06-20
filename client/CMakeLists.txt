@@ -5,7 +5,6 @@ add_library(mrtc_client STATIC
     src/rtc_track.c
     src/rtc_data_channel.c
     src/rtc_peer.c
-    src/rtc_peer_packets.c
 )
 target_include_directories(mrtc_client
     PUBLIC  include

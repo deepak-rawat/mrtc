@@ -86,7 +86,7 @@ headers. On disk they live in `client/include/rtc/`.
 
 ## Module Details
 
-### Peer Connection (`rtc_peer.h/c`, `rtc_peer_packets.c`)
+### Peer Connection (`rtc_peer.h/c`)
 
 High-level WebRTC-style API. A peer connection is a facade over a private
 runtime stack — it acquires a shared default `rtc_worker_t` and
@@ -98,18 +98,22 @@ struct rtc_peer_connection {
     rtc_transport_t *runtime_transport;   // private ICE/DTLS/SRTP/RTP endpoint
     rtc_rtp_transceiver_t transceivers[8]; // media tracks (core send/recv streams)
     rtc_dc_manager_t dc_manager;          // data channels
-    rtc_rtcp_router_t rtcp_router;         // inbound RTCP -> stream routing
+    rtc_media_session_t media_session;    // per-peer RTP routing + RTCP + SR/RR
     rtc_desc_t local_desc, remote_desc;
     uint8_t twcc_ext_id;                  // negotiated transport-cc id
     _Atomic rtc_connection_state_t state;
 };
 ```
 
-Inbound RTP no longer round-trips through the peer: the transport owns an
-SSRC -> receive-stream demux that the peer populates from SDP (and a
-payload-type resolver for un-signalled SSRCs), so a parsed packet goes
-transport -> receive stream -> app `on_frame` on the worker thread. The
-TWCC sender/receiver and the GCC bandwidth estimator live in the
+The per-peer media plane is the core `rtc_media_session` (owned as
+`media_session`): it installs the transport's RTP router (per-SSRC sink +
+payload-type resolver), routes inbound RTCP (SR -> receive stream;
+RR / NACK / PLI / FIR -> send stream), and runs the periodic SR / RR
+timer. Inbound RTP no longer round-trips through the peer: the transport
+owns an SSRC -> receive-stream demux that the session populates from SDP
+(and a payload-type resolver for un-signalled SSRCs), so a parsed packet
+goes transport -> receive stream -> app `on_frame` on the worker thread.
+The TWCC sender/receiver and the GCC bandwidth estimator live in the
 transport (it is transport-*wide* congestion control); the peer only
 negotiates the extension id and forwards the bitrate estimate.
 

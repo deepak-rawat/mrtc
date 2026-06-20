@@ -81,8 +81,9 @@ unconditionally:
 - `rtc_worker.h`, `rtc_listener.h`, `rtc_transport.h` — runtime transport primitives
 - `rtc_rtp.h`, `rtc_rtcp.h`, `rtc_sdp.h`, `rtc_rtp_ext.h`, `rtc_rtp_params.h` —
   protocol helpers and signaling parameter types
-- `rtc_rtp_stream.h`, `rtc_rtcp_router.h` — composed RTP send/recv streams and
-  the RTCP feedback router (SSRC → stream routing), shared by client and routing
+- `rtc_rtp_stream.h` — composed RTP send/recv streams, shared by client and routing
+- `rtc_media_session.h` — per-peer RTP/RTCP media session (RTP routing, RTCP
+  feedback, SR/RR), used by the client peer connection
 
 Internal / private helpers (`rtc_ice.h`, `rtc_dtls.h`, `rtc_srtp.h`,
 `rtc_stun.h`, `rtc_turn.h`, `rtc_rtp_demux.h`, `rtc_nack_buf.h`,
@@ -248,10 +249,10 @@ with jitter / loss / delay stats. Feedback messages: NACK / PLI / FIR
 (RFC 4585 + 5104) and Transport-CC (PT=205 FMT=15,
 draft-holmer-rmcat-transport-wide-cc) build + parse. SRTCP protect /
 unprotect for all outgoing / incoming RTCP. Inbound RTCP is parsed and
-routed by `rtc_rtcp_router` (SR → the receive stream, RR / NACK / PLI /
-FIR → the named send stream); the client schedules a 5 s SR / RR emission
-timer per active transceiver, and the transport runs the 100 ms TWCC
-feedback timer when negotiated.
+routed by the core `rtc_media_session` (SR → the receive stream,
+RR / NACK / PLI / FIR → the named send stream); the session also runs a
+5 s SR / RR emission timer over its streams, and the transport runs the
+100 ms TWCC feedback timer when negotiated.
 
 Statistics tracked:
 ```
@@ -259,7 +260,7 @@ Send: packets_sent, octets_sent, rtp_timestamp
 Recv: packets_received, jitter, last_transit, last_sr_ntp
 ```
 
-### RTP streams, demux & RTCP router (`rtc_rtp_stream.h`, `rtc_rtp_demux.h`, `rtc_rtcp_router.h`)
+### RTP streams, demux & media session (`rtc_rtp_stream.h`, `rtc_rtp_demux.h`, `rtc_media_session.h`)
 
 - **`rtc_rtp_send_stream` / `rtc_rtp_recv_stream`** — composed RTP/RTCP
   streams owning sequencing, RTCP stats, NACK retransmit, PLI rate
@@ -271,10 +272,14 @@ Recv: packets_received, jitter, last_transit, last_sr_ntp
   payload type, then auto-bind). Owned by the transport and reused by the
   client peer connection (SSRC → receive stream) and the SFU router
   (SSRC → producer), so neither carries its own SSRC map or callback hop.
-- **`rtc_rtcp_router`** — parses inbound compound RTCP and routes each
-  report to the right stream, using the transport's demux to resolve
-  receive streams and an SSRC → send-stream table for feedback. This is
-  the reusable glue that previously lived hand-written in the client.
+- **`rtc_media_session`** — the per-peer media plane over one transport.
+  It owns the send/receive streams, installs the transport's RTP router
+  (per-SSRC sink + payload-type resolver), parses inbound compound RTCP
+  and routes each report to the right stream (SR → receive stream;
+  RR / NACK / PLI / FIR → the named send stream via an SSRC → send-stream
+  table), feeds RR loss into the transport bandwidth estimator, and runs
+  the periodic SR / RR emission timer. This is the reusable glue that
+  previously lived hand-written in the client.
 
 ### SDP (`rtc_sdp.h/c`)
 
@@ -396,7 +401,7 @@ checks the atomic published flags `selected_remote_valid` and
 | `test_timer_sched` | Dynamic timer scheduler |
 | `test_rtcp` | SR/RR build/parse, jitter statistics |
 | `test_rtcp_feedback` | NACK / PLI / FIR build + parse |
-| `test_rtcp_router` | RTCP feedback routing (NACK / PLI) to send streams |
+| `test_media_session` | Per-peer media session: RTCP feedback routing (NACK / PLI) |
 | `test_rtp_demux` | SSRC → consumer demux: bind / resolve / dispatch |
 | `test_nack_buf` | NACK ring buffer store/lookup, wraparound |
 | `test_twcc` | TWCC sender ring, receiver window, feedback round-trip |

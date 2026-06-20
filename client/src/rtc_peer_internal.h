@@ -1,9 +1,8 @@
 /*
- * Shared internal definitions for rtc_peer.c and
- * rtc_peer_packets.c.  NOT part of the public API.
+ * Shared internal definitions for rtc_peer.c. NOT part of the public API.
  *
  * Contains the concrete struct layouts for peer_connection, sender,
- * receiver, and transceiver plus helpers used by both translation units.
+ * receiver, and transceiver plus helpers used across the client TUs.
  */
 #ifndef RTC_PEER_INTERNAL_H
 #define RTC_PEER_INTERNAL_H
@@ -18,7 +17,7 @@
 #include "rtc/rtc_sdp.h"
 #include "rtc_client_runtime.h"
 #include "rtc/rtc_listener.h"
-#include "rtc/rtc_rtcp_router.h"
+#include "rtc/rtc_media_session.h"
 #include "rtc/rtc_rtp_stream.h"
 #include "rtc/rtc_transport.h"
 #include "rtc/rtc_worker.h"
@@ -57,7 +56,6 @@ struct rtc_peer_connection {
     rtc_transport_t *runtime_transport;
     bool runtime_registered;
     rtc_worker_timer_t runtime_connect_timer;
-    rtc_worker_timer_t runtime_rtcp_timer;
     char runtime_fingerprint[RTC_DTLS_FINGERPRINT_MAX];
     bool runtime_connected;
 
@@ -101,9 +99,9 @@ struct rtc_peer_connection {
     /* Connection started flag */
     bool connect_started;
 
-    /* RTCP feedback router: SSRC → send stream, with receive streams resolved
-     * through the transport's RTP demux. Replaces the old peer send_map. */
-    rtc_rtcp_router_t rtcp_router;
+    /* Per-peer RTP/RTCP media session: owns the send/receive streams over the
+     * runtime transport and drives RTP routing, RTCP feedback, and SR/RR. */
+    rtc_media_session_t media_session;
 
 #ifdef MRTC_ENABLE_TWCC
     /* Negotiated transport-cc header extension id (0 = not negotiated). The
@@ -169,15 +167,5 @@ void rtc_rtp_receiver_activate(struct rtc_rtp_receiver *r);
 
 /* Serialize a single transceiver into an SDP m= section. */
 void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc_sdp_media_t *m);
-
-/* Inbound RTP dispatch, defined in rtc_peer_packets.c. The transport's RTP
- * router resolves an SSRC to its receive stream (peer_rtp_resolve) and then
- * delivers each packet straight to that stream (peer_rtp_sink). */
-void peer_rtp_sink(const rtc_rtp_packet_t *pkt, void *user);
-void *peer_rtp_resolve(const rtc_rtp_packet_t *pkt, void *user);
-
-/* RTCP send timer + interval. */
-#define RTCP_INTERVAL_MS 5000
-void peer_rtcp_timer(void *user);
 
 #endif /* RTC_PEER_INTERNAL_H */
