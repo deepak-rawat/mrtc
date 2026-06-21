@@ -51,7 +51,10 @@ const rtc_rtp_ext_t *rtc_rtp_ext_find(const rtc_rtp_ext_t *exts, size_t count, u
     "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
 #define RTC_EXT_URI_AUDIO_LEVEL "urn:ietf:params:rtp-hdrext:ssrc-audio-level"
 #define RTC_EXT_URI_MID         "urn:ietf:params:rtp-hdrext:sdes:mid"
-#define RTC_EXT_URI_TOFFSET     "urn:ietf:params:rtp-hdrext:toffset"
+#define RTC_EXT_URI_RID         "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id"
+#define RTC_EXT_URI_REPAIRED_RID \
+    "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id"
+#define RTC_EXT_URI_TOFFSET "urn:ietf:params:rtp-hdrext:toffset"
 
 /* abs-send-time: 24-bit fixed-point, 6.18 format, seconds & (1 << 18) - 1 */
 void rtc_rtp_ext_make_abs_send_time(rtc_rtp_ext_t *out, uint8_t id, uint64_t now_us);
@@ -59,5 +62,16 @@ void rtc_rtp_ext_make_abs_send_time(rtc_rtp_ext_t *out, uint8_t id, uint64_t now
 /* transport-cc: 16-bit transport-wide sequence number, big-endian */
 void rtc_rtp_ext_make_transport_cc(rtc_rtp_ext_t *out, uint8_t id, uint16_t seq);
 uint16_t rtc_rtp_ext_read_transport_cc(const rtc_rtp_ext_t *ext);
+
+/* SDES string extensions (MID, RID): the value is an ASCII string of 1..16
+ * bytes carried verbatim in a one-byte extension. */
+void rtc_rtp_ext_make_string(rtc_rtp_ext_t *out, uint8_t id, const char *s);
+/* Copy the extension value into `buf` as a NUL-terminated string (cap includes
+ * the NUL). Returns the string length, or 0 if absent/empty. */
+size_t rtc_rtp_ext_read_string(const rtc_rtp_ext_t *ext, char *buf, size_t cap);
+/* Parse an extension block body, find the entry with `id`, and copy its value
+ * as a NUL-terminated string into `buf`. Returns the length, or 0 if absent. */
+size_t rtc_rtp_ext_get_string(const uint8_t *ext_data, size_t ext_len, uint8_t id, char *buf,
+                              size_t cap);
 
 #endif /* RTC_RTP_EXT_H */

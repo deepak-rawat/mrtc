@@ -36,6 +36,7 @@ typedef struct {
     rtc_vec_t recv_streams;        /* rtc_rtp_recv_stream_t* (RTP resolve + RR emission) */
     rtc_interceptor_chain_t chain; /* RTCP handling: report, NACK, PLI + custom */
     rtc_worker_timer_t report_timer;
+    uint8_t mid_ext_id; /* negotiated MID header-extension id (0 = none) */
     _Atomic bool running;
     bool ready;
 } rtc_media_session_t;
@@ -58,6 +59,19 @@ rtc_err_t rtc_media_session_add_receiver(rtc_media_session_t *s, rtc_rtp_recv_st
  * dispatch in O(1) without the resolver. */
 void rtc_media_session_bind_receiver(rtc_media_session_t *s, rtc_rtp_recv_stream_t *stream,
                                      uint32_t ssrc);
+
+/* Set the negotiated MID header-extension id (RFC 8843/8852). When set, the
+ * resolver routes an unbound SSRC to the receive stream whose MID matches the
+ * packet's MID extension before falling back to payload-type matching — this
+ * disambiguates bundled m-sections that share a payload type. 0 disables it. */
+void rtc_media_session_set_mid_ext_id(rtc_media_session_t *s, uint8_t ext_id);
+
+/* Resolve which receive stream an inbound RTP packet belongs to: by MID header
+ * extension (if negotiated) then payload type. Sets the matched stream's SSRC
+ * and returns it, or NULL. Normally invoked via the transport RTP router;
+ * exposed for testing. */
+rtc_rtp_recv_stream_t *rtc_media_session_resolve(rtc_media_session_t *s,
+                                                 const rtc_rtp_packet_t *pkt);
 
 /* Append a custom RTCP interceptor (e.g. REMB, RFC 8888, stats). The session
  * takes ownership and destroys it in rtc_media_session_close(); on failure

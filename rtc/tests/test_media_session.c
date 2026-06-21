@@ -7,6 +7,7 @@
  */
 #include "rtc/rtc_rtcp.h"
 #include "rtc/rtc_media_session.h"
+#include "rtc/rtc_rtp_ext.h"
 #include "rtc/rtc_rtp_stream.h"
 #include "test_harness.h"
 
@@ -212,6 +213,77 @@ TEST(custom_interceptor_sees_rtcp_and_is_freed) {
     rtc_rtp_send_stream_destroy(s1);
 }
 
+static void noop_frame(const uint8_t *p, size_t l, uint16_t s, uint32_t t, uint32_t ssrc, bool m,
+                       void *u) {
+    (void)p;
+    (void)l;
+    (void)s;
+    (void)t;
+    (void)ssrc;
+    (void)m;
+    (void)u;
+}
+
+static rtc_rtp_recv_stream_t *make_recv(uint8_t pt, const char *mid) {
+    rtc_rtp_recv_stream_config_t cfg = {.payload_type = pt, .clock_rate = 90000, .local_ssrc = 1};
+    rtc_rtp_recv_stream_t *r = rtc_rtp_recv_stream_create(&cfg);
+    rtc_rtp_recv_stream_set_active(r, true);
+    rtc_rtp_recv_stream_on_frame(r, noop_frame, NULL);
+    if (mid)
+        rtc_rtp_recv_stream_set_mid(r, mid);
+    return r;
+}
+
+TEST(resolve_routes_same_pt_by_mid) {
+    rtc_media_session_t session;
+    ASSERT_EQ(rtc_media_session_init(&session, NULL, NULL), RTC_OK);
+    rtc_rtp_recv_stream_t *r0 = make_recv(96, "0");
+    rtc_rtp_recv_stream_t *r1 = make_recv(96, "1");
+    ASSERT_EQ(rtc_media_session_add_receiver(&session, r0), RTC_OK);
+    ASSERT_EQ(rtc_media_session_add_receiver(&session, r1), RTC_OK);
+    rtc_media_session_set_mid_ext_id(&session, 4);
+
+    /* PT 96 + MID="1" must route to r1, even though r0 also has PT 96. */
+    rtc_rtp_ext_t exts[1];
+    rtc_rtp_ext_make_string(&exts[0], 4, "1");
+    const uint8_t payload[] = {0x01};
+    rtc_rtp_packet_t pkt, parsed;
+    ASSERT_EQ(rtc_rtp_build_with_ext(&pkt, 96, 1, 0, 0xAAAA0001, false, exts, 1, payload, 1),
+              RTC_OK);
+    ASSERT_EQ(rtc_rtp_parse(&parsed, pkt.buf, pkt.buf_len), RTC_OK);
+    ASSERT(rtc_media_session_resolve(&session, &parsed) == r1);
+    ASSERT_EQ(rtc_rtp_recv_stream_ssrc(r1), 0xAAAA0001u);
+
+    /* MID="0" must route to r0. */
+    rtc_rtp_ext_make_string(&exts[0], 4, "0");
+    ASSERT_EQ(rtc_rtp_build_with_ext(&pkt, 96, 2, 0, 0xAAAA0000, false, exts, 1, payload, 1),
+              RTC_OK);
+    ASSERT_EQ(rtc_rtp_parse(&parsed, pkt.buf, pkt.buf_len), RTC_OK);
+    ASSERT(rtc_media_session_resolve(&session, &parsed) == r0);
+
+    rtc_media_session_close(&session);
+    rtc_rtp_recv_stream_destroy(r0);
+    rtc_rtp_recv_stream_destroy(r1);
+}
+
+TEST(resolve_falls_back_to_payload_type) {
+    rtc_media_session_t session;
+    ASSERT_EQ(rtc_media_session_init(&session, NULL, NULL), RTC_OK);
+    rtc_rtp_recv_stream_t *r = make_recv(96, "0");
+    ASSERT_EQ(rtc_media_session_add_receiver(&session, r), RTC_OK);
+    rtc_media_session_set_mid_ext_id(&session, 4);
+
+    /* No MID extension present: fall back to payload-type match. */
+    const uint8_t payload[] = {0x01};
+    rtc_rtp_packet_t pkt, parsed;
+    ASSERT_EQ(rtc_rtp_build(&pkt, 96, 1, 0, 0xBBBB0001, false, payload, 1), RTC_OK);
+    ASSERT_EQ(rtc_rtp_parse(&parsed, pkt.buf, pkt.buf_len), RTC_OK);
+    ASSERT(rtc_media_session_resolve(&session, &parsed) == r);
+
+    rtc_media_session_close(&session);
+    rtc_rtp_recv_stream_destroy(r);
+}
+
 int main(void) {
     printf("=== rtc_media_session tests ===\n");
     RUN_TEST(nack_routes_to_named_sender);
@@ -219,5 +291,7 @@ int main(void) {
     RUN_TEST(unknown_ssrc_dropped);
     RUN_TEST(compound_rtcp_dispatches_all_subpackets);
     RUN_TEST(custom_interceptor_sees_rtcp_and_is_freed);
+    RUN_TEST(resolve_routes_same_pt_by_mid);
+    RUN_TEST(resolve_falls_back_to_payload_type);
     TEST_SUMMARY();
 }

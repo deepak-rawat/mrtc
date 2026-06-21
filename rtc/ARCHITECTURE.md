@@ -281,7 +281,7 @@ Recv: packets_received, jitter, last_transit, last_sr_ntp
   (SSRC → producer), so neither carries its own SSRC map or callback hop.
 - **`rtc_media_session`** — the per-peer media plane over one transport.
   It owns the send/receive streams, installs the transport's RTP router
-  (per-SSRC sink + payload-type resolver), and drives the RTCP plane through
+  (per-SSRC sink + resolver) and drives the RTCP plane through
   an **interceptor chain** (`rtc_interceptor`): it splits each inbound
   compound RTCP packet into sub-packets and dispatches them, plus a periodic
   tick, to an ordered list of interceptors. The built-ins replicate the
@@ -289,8 +289,11 @@ Recv: packets_received, jitter, last_transit, last_sr_ntp
   RR → send stream + RR loss → the transport bandwidth estimator, and SR/RR
   emission on tick), a *NACK responder*, and a *PLI/FIR responder* — and
   applications can append their own (REMB, RFC 8888, stats, logging) with
-  `rtc_media_session_add_interceptor()`. This is the reusable glue that
-  previously lived hand-written in the client.
+  `rtc_media_session_add_interceptor()`. The resolver routes an unbound SSRC
+  first by the **MID header extension** (RFC 8843/8852, when negotiated),
+  then by payload type, so bundled m-sections that share a payload type land
+  on the right receive stream. This is the reusable glue that previously
+  lived hand-written in the client.
 
 ### SDP (`rtc_sdp.h/c`)
 
@@ -303,7 +306,8 @@ Offer / Answer generation and parsing (RFC 4566 WebRTC subset).
 - `a=extmap:<id> <uri>` (RFC 8285) emit + parse with
   `rtc_sdp_media_add_extmap()` /
   `rtc_sdp_media_find_extmap_id()`. The client peer connection
-  auto-advertises transport-cc (id=5) on every audio / video m-section.
+  auto-advertises the MID extension (id=4) and transport-cc (id=5) on every
+  audio / video m-section.
 
 ### Rate Control (`rtc_rate_control.h/c`, internal)
 

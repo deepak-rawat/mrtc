@@ -4,6 +4,7 @@
 #include "rtc/rtc_media_session.h"
 
 #include "rtc/rtc_rtcp.h"
+#include "rtc/rtc_rtp_ext.h"
 
 #include <stdlib.h>
 
@@ -15,20 +16,50 @@ static void session_rtp_sink(const rtc_rtp_packet_t *pkt, void *user) {
     rtc_rtp_recv_stream_on_packet((rtc_rtp_recv_stream_t *)user, pkt);
 }
 
-/* First packet for an unbound SSRC: match a receive stream by payload type and
- * return it for the transport to bind. Handles peers that omit a=ssrc. */
-static void *session_rtp_resolve(const rtc_rtp_packet_t *pkt, void *user) {
-    rtc_media_session_t *s = (rtc_media_session_t *)user;
+static rtc_rtp_recv_stream_t *session_recv_at(rtc_media_session_t *s, size_t i) {
+    rtc_rtp_recv_stream_t **slot = (rtc_rtp_recv_stream_t **)rtc_vec_at(&s->recv_streams, i);
+    return slot ? *slot : NULL;
+}
+
+rtc_rtp_recv_stream_t *rtc_media_session_resolve(rtc_media_session_t *s,
+                                                 const rtc_rtp_packet_t *pkt) {
+    if (!s || !s->ready || !pkt)
+        return NULL;
     size_t n = rtc_vec_len(&s->recv_streams);
+
+    /* 1. MID match: when a MID extension is negotiated and present, route to the
+     * receive stream whose MID matches. Disambiguates bundled m-sections that
+     * share a payload type (RFC 8843/8852). */
+    if (s->mid_ext_id && pkt->header.extension && pkt->ext_data && pkt->ext_len) {
+        char mid[RTC_RTP_MID_MAX];
+        if (rtc_rtp_ext_get_string(pkt->ext_data, pkt->ext_len, s->mid_ext_id, mid, sizeof(mid)) >
+            0) {
+            for (size_t i = 0; i < n; i++) {
+                rtc_rtp_recv_stream_t *rs = session_recv_at(s, i);
+                if (rs && rtc_rtp_recv_stream_mid_matches(rs, mid) &&
+                    rtc_rtp_recv_stream_can_receive(rs, pkt->header.payload_type)) {
+                    rtc_rtp_recv_stream_set_ssrc(rs, pkt->header.ssrc);
+                    return rs;
+                }
+            }
+        }
+    }
+
+    /* 2. Payload-type match (peers that omit a=ssrc and MID). */
     for (size_t i = 0; i < n; i++) {
-        rtc_rtp_recv_stream_t **slot = (rtc_rtp_recv_stream_t **)rtc_vec_at(&s->recv_streams, i);
-        rtc_rtp_recv_stream_t *rs = slot ? *slot : NULL;
+        rtc_rtp_recv_stream_t *rs = session_recv_at(s, i);
         if (rs && rtc_rtp_recv_stream_can_receive(rs, pkt->header.payload_type)) {
             rtc_rtp_recv_stream_set_ssrc(rs, pkt->header.ssrc);
             return rs;
         }
     }
     return NULL;
+}
+
+/* First packet for an unbound SSRC: hand the transport demux the resolved
+ * receive stream to auto-bind. Handles peers that omit a=ssrc. */
+static void *session_rtp_resolve(const rtc_rtp_packet_t *pkt, void *user) {
+    return rtc_media_session_resolve((rtc_media_session_t *)user, pkt);
 }
 
 /* ---- Inbound RTCP routing ---- */
@@ -296,6 +327,11 @@ void rtc_media_session_bind_receiver(rtc_media_session_t *s, rtc_rtp_recv_stream
     rtc_rtp_recv_stream_set_ssrc(stream, ssrc);
     if (s->transport)
         rtc_transport_bind_rtp(s->transport, ssrc, stream);
+}
+
+void rtc_media_session_set_mid_ext_id(rtc_media_session_t *s, uint8_t ext_id) {
+    if (s && s->ready)
+        s->mid_ext_id = ext_id;
 }
 
 rtc_err_t rtc_media_session_add_interceptor(rtc_media_session_t *s, rtc_interceptor_t *it) {

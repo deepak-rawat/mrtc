@@ -105,3 +105,43 @@ uint16_t rtc_rtp_ext_read_transport_cc(const rtc_rtp_ext_t *ext) {
         return 0;
     return ((uint16_t)ext->data[0] << 8) | ext->data[1];
 }
+
+void rtc_rtp_ext_make_string(rtc_rtp_ext_t *out, uint8_t id, const char *s) {
+    size_t n = s ? strlen(s) : 0;
+    if (n > RTC_RTP_EXT_MAX_DATA)
+        n = RTC_RTP_EXT_MAX_DATA;
+    if (n == 0)
+        n = 1; /* one-byte form encodes len-1; an empty value is not representable */
+    out->id = id;
+    out->len = (uint8_t)n;
+    memset(out->data, 0, sizeof(out->data));
+    if (s)
+        memcpy(out->data, s, n);
+}
+
+size_t rtc_rtp_ext_read_string(const rtc_rtp_ext_t *ext, char *buf, size_t cap) {
+    if (!ext || !buf || cap == 0)
+        return 0;
+    size_t n = ext->len;
+    if (n > RTC_RTP_EXT_MAX_DATA)
+        n = RTC_RTP_EXT_MAX_DATA;
+    if (n > cap - 1)
+        n = cap - 1;
+    memcpy(buf, ext->data, n);
+    buf[n] = '\0';
+    return n;
+}
+
+size_t rtc_rtp_ext_get_string(const uint8_t *ext_data, size_t ext_len, uint8_t id, char *buf,
+                              size_t cap) {
+    if (!ext_data || ext_len == 0 || id == 0)
+        return 0;
+    rtc_rtp_ext_t exts[RTC_RTP_EXT_MAX_ENTRIES];
+    size_t cnt = RTC_RTP_EXT_MAX_ENTRIES;
+    if (rtc_rtp_ext_parse_body(ext_data, ext_len, exts, &cnt) != RTC_OK)
+        return 0;
+    const rtc_rtp_ext_t *e = rtc_rtp_ext_find(exts, cnt, id);
+    if (!e)
+        return 0;
+    return rtc_rtp_ext_read_string(e, buf, cap);
+}

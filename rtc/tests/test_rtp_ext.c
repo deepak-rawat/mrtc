@@ -143,6 +143,40 @@ TEST(rtp_build_no_ext_unchanged) {
     ASSERT_EQ((pkt.buf[0] & 0x10), 0);
 }
 
+TEST(sdes_string_make_read) {
+    rtc_rtp_ext_t e;
+    rtc_rtp_ext_make_string(&e, 4, "video");
+    ASSERT_EQ((int)e.id, 4);
+    ASSERT_EQ((int)e.len, 5);
+
+    char buf[32];
+    size_t n = rtc_rtp_ext_read_string(&e, buf, sizeof(buf));
+    ASSERT_EQ((int)n, 5);
+    ASSERT(strcmp(buf, "video") == 0);
+}
+
+TEST(sdes_string_in_packet) {
+    rtc_rtp_ext_t exts[1];
+    rtc_rtp_ext_make_string(&exts[0], 4, "1");
+    const uint8_t payload[] = {0xAA, 0xBB};
+    rtc_rtp_packet_t pkt;
+    ASSERT_EQ(rtc_rtp_build_with_ext(&pkt, 96, 10, 1000, 0x11223344, false, exts, 1, payload,
+                                     sizeof(payload)),
+              RTC_OK);
+
+    rtc_rtp_packet_t parsed;
+    ASSERT_EQ(rtc_rtp_parse(&parsed, pkt.buf, pkt.buf_len), RTC_OK);
+    ASSERT(parsed.header.extension);
+
+    char mid[16];
+    size_t n = rtc_rtp_ext_get_string(parsed.ext_data, parsed.ext_len, 4, mid, sizeof(mid));
+    ASSERT_EQ((int)n, 1);
+    ASSERT(strcmp(mid, "1") == 0);
+
+    /* An id that is not present yields 0. */
+    ASSERT_EQ((int)rtc_rtp_ext_get_string(parsed.ext_data, parsed.ext_len, 7, mid, sizeof(mid)), 0);
+}
+
 int main(void) {
     RUN_TEST(write_and_parse_single_ext);
     RUN_TEST(write_and_parse_multiple);
@@ -152,5 +186,7 @@ int main(void) {
     RUN_TEST(write_zero_count_emits_empty_block);
     RUN_TEST(rtp_build_with_ext_roundtrip);
     RUN_TEST(rtp_build_no_ext_unchanged);
+    RUN_TEST(sdes_string_make_read);
+    RUN_TEST(sdes_string_in_packet);
     return 0;
 }

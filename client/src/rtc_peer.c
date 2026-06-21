@@ -761,6 +761,25 @@ int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_des
         }
     }
 
+    /* MID extmap negotiation: when the peer advertises the MID extension, route
+     * bundled inbound RTP by MID (RFC 8843/8852). Tell each receive stream its
+     * expected MID so the resolver can disambiguate same-payload-type streams. */
+    for (int i = 0; i < pc->remote_sdp.media_count; i++) {
+        const rtc_sdp_media_t *m = &pc->remote_sdp.media[i];
+        if (m->media_type != RTC_MEDIA_AUDIO && m->media_type != RTC_MEDIA_VIDEO)
+            continue;
+        uint8_t mid_id = rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_MID);
+        if (mid_id != 0) {
+            rtc_media_session_set_mid_ext_id(&pc->media_session, mid_id);
+            break;
+        }
+    }
+    for (int j = 0; j < pc->transceiver_count; j++) {
+        struct rtc_rtp_transceiver *t = &pc->transceivers[j];
+        if (t->receiver.stream)
+            rtc_rtp_recv_stream_set_mid(t->receiver.stream, t->mid);
+    }
+
     /* Transport-CC extmap negotiation */
 #ifdef MRTC_ENABLE_TWCC
     for (int i = 0; i < pc->remote_sdp.media_count; i++) {

@@ -47,6 +47,8 @@ struct rtc_rtp_recv_stream {
     rtc_rtp_recv_stream_frame_fn on_frame;
     void *on_frame_user;
     uint32_t ssrc;
+    char mid[RTC_RTP_MID_MAX];
+    bool has_mid;
     rtc_rtcp_stats_t rtcp_stats;
     bool active;
 };
@@ -369,6 +371,30 @@ bool rtc_rtp_recv_stream_can_receive(const rtc_rtp_recv_stream_t *stream, uint8_
 void rtc_rtp_recv_stream_set_ssrc(rtc_rtp_recv_stream_t *stream, uint32_t ssrc) {
     if (stream)
         stream->ssrc = ssrc;
+}
+
+void rtc_rtp_recv_stream_set_mid(rtc_rtp_recv_stream_t *stream, const char *mid) {
+    if (!stream)
+        return;
+    if (!mid || mid[0] == '\0') {
+        stream->has_mid = false;
+        stream->mid[0] = '\0';
+        return;
+    }
+    size_t n = strlen(mid);
+    if (n >= sizeof(stream->mid))
+        n = sizeof(stream->mid) - 1;
+    memcpy(stream->mid, mid, n);
+    stream->mid[n] = '\0';
+    stream->has_mid = true;
+}
+
+const char *rtc_rtp_recv_stream_mid(const rtc_rtp_recv_stream_t *stream) {
+    return (stream && stream->has_mid) ? stream->mid : NULL;
+}
+
+bool rtc_rtp_recv_stream_mid_matches(const rtc_rtp_recv_stream_t *stream, const char *mid) {
+    return stream && stream->has_mid && mid && strcmp(stream->mid, mid) == 0;
 }
 
 uint32_t rtc_rtp_recv_stream_ssrc(const rtc_rtp_recv_stream_t *stream) {

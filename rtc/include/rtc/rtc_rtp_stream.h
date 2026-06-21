@@ -13,6 +13,9 @@
 #include "rtc_rtp.h"
 #include "rtc_transport.h"
 
+/* Max MID/RID length for routing (one-byte RTP extension carries up to 16). */
+#define RTC_RTP_MID_MAX 17
+
 typedef struct rtc_rtp_send_stream rtc_rtp_send_stream_t;
 typedef struct rtc_rtp_recv_stream rtc_rtp_recv_stream_t;
 
@@ -76,6 +79,11 @@ bool rtc_rtp_recv_stream_can_receive(const rtc_rtp_recv_stream_t *stream, uint8_
 void rtc_rtp_recv_stream_set_ssrc(rtc_rtp_recv_stream_t *stream, uint32_t ssrc);
 uint32_t rtc_rtp_recv_stream_ssrc(const rtc_rtp_recv_stream_t *stream);
 const rtc_rtcp_stats_t *rtc_rtp_recv_stream_stats(const rtc_rtp_recv_stream_t *stream);
+
+/* Expected MID (from a=mid) for BUNDLE / same-payload-type routing. */
+void rtc_rtp_recv_stream_set_mid(rtc_rtp_recv_stream_t *stream, const char *mid);
+const char *rtc_rtp_recv_stream_mid(const rtc_rtp_recv_stream_t *stream);
+bool rtc_rtp_recv_stream_mid_matches(const rtc_rtp_recv_stream_t *stream, const char *mid);
 
 void rtc_rtp_recv_stream_on_frame(rtc_rtp_recv_stream_t *stream, rtc_rtp_recv_stream_frame_fn fn,
                                   void *user);

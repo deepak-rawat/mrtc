@@ -182,6 +182,12 @@ void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc
     m->mid_index = t->mid_index;
     m->ssrc = rtc_rtp_send_stream_ssrc(t->sender.stream);
 
+    /* Advertise the MID extension so the peer tags inbound RTP with its MID,
+     * letting us route bundled m-sections that share a payload type. */
+    if (m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) {
+        rtc_sdp_media_add_extmap(m, 4, RTC_EXT_URI_MID);
+    }
+
 #ifdef MRTC_ENABLE_TWCC
     if (m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) {
         rtc_sdp_media_add_extmap(m, 5, RTC_EXT_URI_TRANSPORT_CC);
