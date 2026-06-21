@@ -142,16 +142,16 @@ Files: `rtc/src/rtc_srtp.c`, `rtc/src/rtc_srtp.h`, `rtc/src/rtc_dtls.c`
 
 | Section | Feature | Notes |
 |---------|---------|-------|
-| 8.1 | SRTP AEAD_AES_128_GCM (12-byte IV, 16-byte tag) | RTP header as associated data; payload encrypted in place |
-| 9.1 | SRTCP AEAD_AES_128_GCM | Header + E\|index as associated data; E-flag honored |
-| 11 | 16-byte key / 12-byte salt key derivation | Same SRTP KDF, no separate auth key |
-| — | DTLS-SRTP profile negotiation | `SRTP_AEAD_AES_128_GCM` offered first (preferred) and selected per handshake |
+| 8.1 | SRTP AEAD_AES_128_GCM / AEAD_AES_256_GCM (12-byte IV, 16-byte tag) | RTP header as associated data; payload encrypted in place |
+| 9.1 | SRTCP AEAD_AES_*_GCM | Header + E\|index as associated data; E-flag honored |
+| 11 | 16/32-byte key, 12-byte salt key derivation | Same SRTP KDF (AES-128 or AES-256 PRF by key size), no separate auth key |
+| — | DTLS-SRTP profile negotiation | `SRTP_AEAD_AES_256_GCM` then `SRTP_AEAD_AES_128_GCM` offered first (preferred), selected per handshake |
 
 ### Not Implemented
 
 | Feature | Notes |
 |---------|-------|
-| AEAD_AES_256_GCM | Only the 128-bit AEAD profile is supported |
+| AEAD with 192-bit keys | Only AES-128 / AES-256 GCM are offered |
 
 ---
 
@@ -326,7 +326,7 @@ Files: `rtc/src/rtc_dtls.c`, `rtc/src/rtc_dtls.h`
 
 | Section | Feature | Notes |
 |---------|---------|-------|
-| 4.1 | SRTP protection profile negotiation | `SRTP_AEAD_AES_128_GCM` (preferred) + `SRTP_AES128_CM_SHA1_80` via `SSL_CTX_set_tlsext_use_srtp`; selected profile read back with `SSL_get_selected_srtp_profile` |
+| 4.1 | SRTP protection profile negotiation | `SRTP_AEAD_AES_256_GCM` / `SRTP_AEAD_AES_128_GCM` (preferred) + `SRTP_AES128_CM_SHA1_80` via `SSL_CTX_set_tlsext_use_srtp`; selected profile read back with `SSL_get_selected_srtp_profile` |
 | 4.2 | Key material export (`EXTRACTOR-dtls_srtp`) | `SSL_export_keying_material` called after handshake |
 | 4.2 | Client/server key material split | Correct split into client_write/server_write key+salt pairs |
 | — | SDP `a=fingerprint:sha-256` | SHA-256 fingerprint extracted and exchanged |
@@ -336,7 +336,6 @@ Files: `rtc/src/rtc_dtls.c`, `rtc/src/rtc_dtls.h`
 
 | Feature | Notes |
 |---------|-------|
-| Multiple SRTP profile negotiation | `SRTP_AEAD_AES_128_GCM` and `SRTP_AES128_CM_SHA1_80` negotiated; no AES-256 profiles |
 | Fingerprint verification against SDP | Callback always accepts; fingerprint compared separately (if at all) |
 
 ---

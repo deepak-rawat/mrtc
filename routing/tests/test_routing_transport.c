@@ -34,12 +34,17 @@ static int listener_loopback_addr(rtc_listener_t *listener, rtc_addr_t *out) {
 }
 
 /* Build a manual SRTP context that matches the profile the DTLS handshake
- * negotiated (GCM uses a 12-byte salt and the AEAD path). */
+ * negotiated (GCM uses a 12-byte salt; AES-256-GCM a 32-byte key). */
 static int srtp_init_from_dtls(rtc_srtp_ctx_t *ctx, const rtc_dtls_transport_t *d,
                                const uint8_t *key, const uint8_t *salt) {
-    rtc_srtp_profile_t prof =
-        d->srtp_aead_gcm ? RTC_SRTP_PROFILE_AEAD_AES_128_GCM : RTC_SRTP_PROFILE_AES128_CM_SHA1_80;
-    return rtc_srtp_init_profile(ctx, prof, key, RTC_SRTP_MASTER_KEY_LEN, salt, d->srtp_salt_len);
+    rtc_srtp_profile_t prof;
+    if (!d->srtp_aead_gcm)
+        prof = RTC_SRTP_PROFILE_AES128_CM_SHA1_80;
+    else if (d->srtp_key_len >= 32)
+        prof = RTC_SRTP_PROFILE_AEAD_AES_256_GCM;
+    else
+        prof = RTC_SRTP_PROFILE_AEAD_AES_128_GCM;
+    return rtc_srtp_init_profile(ctx, prof, key, d->srtp_key_len, salt, d->srtp_salt_len);
 }
 
 static rtc_socket_t make_bound_sender(void) {

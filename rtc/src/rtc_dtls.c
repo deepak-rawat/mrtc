@@ -120,7 +120,9 @@ static int dtls_setup_ssl(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role) {
 
     /* Offer AEAD_AES_128_GCM (preferred) and AES-CM. The peer/handshake picks
      * one; the actual profile is read back at key export. */
-    if (SSL_CTX_set_tlsext_use_srtp(dtls->ctx, "SRTP_AEAD_AES_128_GCM:SRTP_AES128_CM_SHA1_80") !=
+    if (SSL_CTX_set_tlsext_use_srtp(
+            dtls->ctx,
+            "SRTP_AEAD_AES_256_GCM:SRTP_AEAD_AES_128_GCM:SRTP_AES128_CM_SHA1_80") !=
         0) {
         RTC_LOG_ERR("DTLS: failed to set SRTP profile");
         dtls_close_ssl(dtls);
@@ -170,6 +172,7 @@ static int dtls_setup_ssl(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role) {
     dtls->role = role;
     dtls->srtp_keys_ready = false;
     dtls->srtp_aead_gcm = false;
+    dtls->srtp_key_len = RTC_SRTP_MASTER_KEY_LEN;
     dtls->srtp_salt_len = RTC_SRTP_MASTER_SALT_LEN;
     memset(dtls->srtp_client_key, 0, sizeof(dtls->srtp_client_key));
     memset(dtls->srtp_client_salt, 0, sizeof(dtls->srtp_client_salt));
@@ -295,11 +298,17 @@ int rtc_dtls_export_srtp_keys(rtc_dtls_transport_t *dtls) {
         return RTC_ERR_SSL;
 
     /* Which profile did the handshake select? GCM uses a 12-byte salt and no
-     * separate auth key; AES-CM uses a 14-byte salt. */
+     * separate auth key (AES-128-GCM = 16-byte key, AES-256-GCM = 32-byte key);
+     * AES-CM uses a 16-byte key and 14-byte salt. */
     const SRTP_PROTECTION_PROFILE *prof = SSL_get_selected_srtp_profile(dtls->ssl);
+    size_t key_len = RTC_SRTP_MASTER_KEY_LEN;  /* 16 */
     size_t salt_len = RTC_SRTP_MASTER_SALT_LEN; /* 14 (AES-CM) */
     dtls->srtp_aead_gcm = false;
-    if (prof && prof->id == SRTP_AEAD_AES_128_GCM) {
+    if (prof && prof->id == SRTP_AEAD_AES_256_GCM) {
+        dtls->srtp_aead_gcm = true;
+        key_len = 32;
+        salt_len = 12;
+    } else if (prof && prof->id == SRTP_AEAD_AES_128_GCM) {
         dtls->srtp_aead_gcm = true;
         salt_len = 12;
     }
@@ -308,8 +317,8 @@ int rtc_dtls_export_srtp_keys(rtc_dtls_transport_t *dtls) {
      * Export keying material per RFC 5764.
      * Layout: client_key | server_key | client_salt | server_salt
      */
-    size_t total = 2 * (RTC_SRTP_MASTER_KEY_LEN + salt_len);
-    uint8_t material[2 * (16 + 14)]; /* 60 bytes (max, AES-CM) */
+    size_t total = 2 * (key_len + salt_len);
+    uint8_t material[2 * (32 + 14)]; /* 92 bytes (max, AES-256-GCM key + CM salt) */
 
     if (SSL_export_keying_material(dtls->ssl, material, total, "EXTRACTOR-dtls_srtp", 19, NULL, 0,
                                    0) != 1) {
@@ -318,18 +327,21 @@ int rtc_dtls_export_srtp_keys(rtc_dtls_transport_t *dtls) {
     }
 
     size_t off = 0;
-    memcpy(dtls->srtp_client_key, material + off, RTC_SRTP_MASTER_KEY_LEN);
-    off += RTC_SRTP_MASTER_KEY_LEN;
-    memcpy(dtls->srtp_server_key, material + off, RTC_SRTP_MASTER_KEY_LEN);
-    off += RTC_SRTP_MASTER_KEY_LEN;
+    memcpy(dtls->srtp_client_key, material + off, key_len);
+    off += key_len;
+    memcpy(dtls->srtp_server_key, material + off, key_len);
+    off += key_len;
     memcpy(dtls->srtp_client_salt, material + off, salt_len);
     off += salt_len;
     memcpy(dtls->srtp_server_salt, material + off, salt_len);
 
+    dtls->srtp_key_len = key_len;
     dtls->srtp_salt_len = salt_len;
     dtls->srtp_keys_ready = true;
     RTC_LOG_INFO("DTLS: SRTP keying material exported (%s)",
-                 dtls->srtp_aead_gcm ? "AEAD_AES_128_GCM" : "AES_CM_128_HMAC_SHA1_80");
+                 !dtls->srtp_aead_gcm        ? "AES_CM_128_HMAC_SHA1_80"
+                 : dtls->srtp_key_len >= 32 ? "AEAD_AES_256_GCM"
+                                            : "AEAD_AES_128_GCM");
     return RTC_OK;
 }
 

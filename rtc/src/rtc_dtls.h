@@ -13,7 +13,8 @@
 #include <openssl/x509.h>
 
 #define RTC_DTLS_FINGERPRINT_SIZE 96 /* SHA-256 hex string + colons */
-#define RTC_SRTP_MASTER_KEY_LEN   16
+#define RTC_SRTP_MASTER_KEY_LEN   16 /* AES-128 master key */
+#define RTC_SRTP_MASTER_KEY_MAX   32 /* storage: AES-256-GCM master key */
 #define RTC_SRTP_MASTER_SALT_LEN  14
 
 typedef enum {
@@ -51,11 +52,12 @@ typedef struct {
     char local_fingerprint[RTC_DTLS_FINGERPRINT_SIZE];
 
     /* SRTP keying material (populated after handshake) */
-    uint8_t srtp_client_key[RTC_SRTP_MASTER_KEY_LEN];
+    uint8_t srtp_client_key[RTC_SRTP_MASTER_KEY_MAX];
     uint8_t srtp_client_salt[RTC_SRTP_MASTER_SALT_LEN];
-    uint8_t srtp_server_key[RTC_SRTP_MASTER_KEY_LEN];
+    uint8_t srtp_server_key[RTC_SRTP_MASTER_KEY_MAX];
     uint8_t srtp_server_salt[RTC_SRTP_MASTER_SALT_LEN];
-    bool srtp_aead_gcm;   /* true: AEAD_AES_128_GCM was negotiated, else AES-CM */
+    bool srtp_aead_gcm;   /* true: an AEAD AES-GCM profile was negotiated, else AES-CM */
+    size_t srtp_key_len;  /* exported key length (16 for CM / GCM-128, 32 for GCM-256) */
     size_t srtp_salt_len; /* exported salt length (14 for CM, 12 for GCM) */
     bool srtp_keys_ready;
 } rtc_dtls_transport_t;

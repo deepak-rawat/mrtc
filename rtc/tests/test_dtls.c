@@ -245,13 +245,19 @@ TEST(dtls_srtp_e2e) {
     rtc_dtls_export_srtp_keys(&server);
 
     /* Client sends to server: client encrypts with client_key, server decrypts with client_key.
-     * Mirror the profile DTLS negotiated (GCM uses a 12-byte salt and the AEAD). */
-    rtc_srtp_profile_t prof = client.srtp_aead_gcm ? RTC_SRTP_PROFILE_AEAD_AES_128_GCM
-                                                   : RTC_SRTP_PROFILE_AES128_CM_SHA1_80;
+     * Mirror the profile DTLS negotiated (GCM uses a 12-byte salt; 256-GCM a
+     * 32-byte key). */
+    rtc_srtp_profile_t prof;
+    if (!client.srtp_aead_gcm)
+        prof = RTC_SRTP_PROFILE_AES128_CM_SHA1_80;
+    else if (client.srtp_key_len >= 32)
+        prof = RTC_SRTP_PROFILE_AEAD_AES_256_GCM;
+    else
+        prof = RTC_SRTP_PROFILE_AEAD_AES_128_GCM;
     rtc_srtp_ctx_t client_send, server_recv;
-    rtc_srtp_init_profile(&client_send, prof, client.srtp_client_key, RTC_SRTP_MASTER_KEY_LEN,
+    rtc_srtp_init_profile(&client_send, prof, client.srtp_client_key, client.srtp_key_len,
                           client.srtp_client_salt, client.srtp_salt_len);
-    rtc_srtp_init_profile(&server_recv, prof, server.srtp_client_key, RTC_SRTP_MASTER_KEY_LEN,
+    rtc_srtp_init_profile(&server_recv, prof, server.srtp_client_key, server.srtp_key_len,
                           server.srtp_client_salt, server.srtp_salt_len);
 
     /* Build, protect, unprotect */

@@ -10,12 +10,12 @@
 #include "rtc_common.h"
 #include <openssl/evp.h>
 
-#define SRTP_MAX_KEY_LEN        16
+#define SRTP_MAX_KEY_LEN        32 /* room for AES-256-GCM; AES-128 uses 16 */
 #define SRTP_MAX_SALT_LEN       14
 #define SRTP_AUTH_TAG_LEN       10
-#define SRTP_GCM_TAG_LEN        16 /* AEAD_AES_128_GCM auth tag (RFC 7714) */
-#define SRTP_GCM_SALT_LEN       12 /* AEAD_AES_128_GCM salt (RFC 7714 §11) */
-#define SRTP_GCM_IV_LEN         12 /* AEAD_AES_128_GCM IV (RFC 7714 §8.1/§9.1) */
+#define SRTP_GCM_TAG_LEN        16 /* AEAD AES-GCM auth tag (RFC 7714) */
+#define SRTP_GCM_SALT_LEN       12 /* AEAD AES-GCM salt (RFC 7714 §11) */
+#define SRTP_GCM_IV_LEN         12 /* AEAD AES-GCM IV (RFC 7714 §8.1/§9.1) */
 #define SRTP_MAX_PACKET         1500
 #define SRTP_REPLAY_WINDOW_SIZE 128 /* RFC 3711 §3.3.2 (at least 64; we use 128) */
 
@@ -23,6 +23,7 @@
 typedef enum {
     RTC_SRTP_PROFILE_AES128_CM_SHA1_80 = 0, /* RFC 3711 AES-CM + HMAC-SHA1-80 */
     RTC_SRTP_PROFILE_AEAD_AES_128_GCM = 1,  /* RFC 7714 AES-128-GCM */
+    RTC_SRTP_PROFILE_AEAD_AES_256_GCM = 2,  /* RFC 7714 AES-256-GCM */
 } rtc_srtp_profile_t;
 
 /* Key derivation labels (RFC 3711 section 4.3.1) */
@@ -72,8 +73,10 @@ typedef struct {
     /* Serializes the four protect/unprotect entry points. */
     rtc_mutex_t lock;
 
-    /* Negotiated profile + session salt length (14 for CM, 12 for GCM). */
+    /* Negotiated profile, session key length (16 / 32) and salt length (14 for
+     * CM, 12 for GCM). */
     rtc_srtp_profile_t profile;
+    size_t key_len;
     size_t salt_len;
 
     /* Master key + salt (from DTLS export) */

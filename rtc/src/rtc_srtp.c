@@ -147,10 +147,12 @@ static rtc_srtp_replay_entry_t *srtp_entry_for_ssrc(rtc_srtp_replay_entry_t *tab
 /*
  * SRTP Key Derivation Function (RFC 3711, Section 4.3.1)
  *
- * derived_key = AES-CM(master_key, master_salt XOR (label << 48))
+ * derived_key = AES-CM(master_key, master_salt XOR (label << 48)). The PRF
+ * block cipher matches the master key size: AES-128 for a 16-byte key, AES-256
+ * for a 32-byte key (RFC 7714 §11).
  */
-static int srtp_kdf(const uint8_t *master_key, const uint8_t *master_salt, size_t salt_len,
-                    uint8_t label, uint8_t *out, size_t out_len) {
+static int srtp_kdf(const uint8_t *master_key, size_t mk_len, const uint8_t *master_salt,
+                    size_t salt_len, uint8_t label, uint8_t *out, size_t out_len) {
     /* Build the "x" value: salt XOR (label || index) padded to 14 bytes */
     uint8_t x[14];
     memset(x, 0, sizeof(x));
@@ -159,7 +161,9 @@ static int srtp_kdf(const uint8_t *master_key, const uint8_t *master_salt, size_
     memcpy(x, master_salt, salt_len);
     x[7] ^= label; /* label goes at byte 7 (after 48-bit shift for index=0) */
 
-    /* Use AES-128-ECB to generate keystream blocks */
+    const EVP_CIPHER *prf = mk_len >= 32 ? EVP_aes_256_ecb() : EVP_aes_128_ecb();
+
+    /* Use AES-ECB to generate keystream blocks */
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     if (!ctx)
         return RTC_ERR_NOMEM;
@@ -183,7 +187,7 @@ static int srtp_kdf(const uint8_t *master_key, const uint8_t *master_salt, size_
          * out_len (e.g. 14-byte salt, 20-byte HMAC key) never overruns out. */
         uint8_t block[16];
         int outl = 0;
-        EVP_EncryptInit_ex(ctx, EVP_aes_128_ecb(), NULL, master_key, NULL);
+        EVP_EncryptInit_ex(ctx, prf, NULL, master_key, NULL);
         EVP_CIPHER_CTX_set_padding(ctx, 0);
         EVP_EncryptUpdate(ctx, block, &outl, iv, 16);
         EVP_EncryptFinal_ex(ctx, block + outl, &outl);
@@ -217,29 +221,31 @@ int rtc_srtp_init_profile(rtc_srtp_ctx_t *ctx, rtc_srtp_profile_t profile,
         salt_len = SRTP_MAX_SALT_LEN;
 
     ctx->profile = profile;
+    ctx->key_len = key_len;
     ctx->salt_len = salt_len;
     memcpy(ctx->master_key, master_key, key_len);
     memcpy(ctx->master_salt, master_salt, salt_len);
 
-    /* Session encryption key + salt (RTP). The session salt matches the master
-     * salt length (14 for AES-CM, 12 for GCM). */
+    /* Session encryption key + salt (RTP). The session key/salt match the master
+     * key/salt lengths (16/14 for AES-CM, 16/12 for AES-128-GCM, 32/12 for
+     * AES-256-GCM). */
     int rc;
-    rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTP_ENCRYPTION, ctx->session_key,
-                  SRTP_MAX_KEY_LEN);
+    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTP_ENCRYPTION,
+                  ctx->session_key, key_len);
     if (rc != RTC_OK)
         return rc;
-    rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTP_SALT, ctx->session_salt,
-                  salt_len);
+    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTP_SALT,
+                  ctx->session_salt, salt_len);
     if (rc != RTC_OK)
         return rc;
 
     /* Session encryption key + salt (RTCP, labels 0x03 / 0x05). */
-    rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTCP_ENCRYPTION,
-                  ctx->rtcp_session_key, SRTP_MAX_KEY_LEN);
+    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTCP_ENCRYPTION,
+                  ctx->rtcp_session_key, key_len);
     if (rc != RTC_OK)
         return rc;
-    rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTCP_SALT, ctx->rtcp_session_salt,
-                  salt_len);
+    rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTCP_SALT,
+                  ctx->rtcp_session_salt, salt_len);
     if (rc != RTC_OK)
         return rc;
 
@@ -247,22 +253,25 @@ int rtc_srtp_init_profile(rtc_srtp_ctx_t *ctx, rtc_srtp_profile_t profile,
      * tag, so it has no auth keys. */
     if (profile == RTC_SRTP_PROFILE_AES128_CM_SHA1_80) {
         uint8_t auth_key[20];
-        rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTP_AUTH, auth_key, 20);
+        rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTP_AUTH, auth_key,
+                      20);
         if (rc != RTC_OK)
             return rc;
         memcpy(ctx->session_auth_key, auth_key, 20);
 
         uint8_t rtcp_auth_key[20];
-        rc = srtp_kdf(master_key, master_salt, salt_len, SRTP_LABEL_RTCP_AUTH, rtcp_auth_key, 20);
+        rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTCP_AUTH,
+                      rtcp_auth_key, 20);
         if (rc != RTC_OK)
             return rc;
         memcpy(ctx->rtcp_session_auth_key, rtcp_auth_key, 20);
     }
 
     ctx->initialized = true;
-    RTC_LOG_INFO("SRTP: context initialized (%s)", profile == RTC_SRTP_PROFILE_AEAD_AES_128_GCM
-                                                       ? "AEAD_AES_128_GCM"
-                                                       : "AES_CM_128_HMAC_SHA1_80");
+    const char *pname = profile == RTC_SRTP_PROFILE_AEAD_AES_256_GCM   ? "AEAD_AES_256_GCM"
+                        : profile == RTC_SRTP_PROFILE_AEAD_AES_128_GCM ? "AEAD_AES_128_GCM"
+                                                                       : "AES_CM_128_HMAC_SHA1_80";
+    RTC_LOG_INFO("SRTP: context initialized (%s)", pname);
     return RTC_OK;
 }
 
@@ -357,15 +366,27 @@ static void srtp_gcm_rtcp_iv(const uint8_t *salt, uint32_t ssrc, uint32_t index,
         iv[i] = x[i] ^ salt[i];
 }
 
+/* True for either AEAD AES-GCM profile. */
+static bool srtp_is_gcm(rtc_srtp_profile_t profile) {
+    return profile == RTC_SRTP_PROFILE_AEAD_AES_128_GCM ||
+           profile == RTC_SRTP_PROFILE_AEAD_AES_256_GCM;
+}
+
+/* GCM block cipher for the context's key length. */
+static const EVP_CIPHER *srtp_gcm_cipher(const rtc_srtp_ctx_t *ctx) {
+    return ctx->key_len >= 32 ? EVP_aes_256_gcm() : EVP_aes_128_gcm();
+}
+
 /*
- * AES-128-GCM AEAD. On encrypt: `data` is encrypted in place and the 16-byte
- * `tag` is produced. On decrypt: `data` is decrypted in place and `tag` is
- * verified (RTC_ERR_SRTP on mismatch). Two AAD chunks support SRTCP, whose
- * associated data spans the header and the trailing E|index field.
+ * AES-GCM AEAD (AES-128 or AES-256 per `cipher`). On encrypt: `data` is
+ * encrypted in place and the 16-byte `tag` is produced. On decrypt: `data` is
+ * decrypted in place and `tag` is verified (RTC_ERR_SRTP on mismatch). Two AAD
+ * chunks support SRTCP, whose associated data spans the header and the trailing
+ * E|index field.
  */
-static int srtp_aes_gcm(const uint8_t *key, const uint8_t *iv, const uint8_t *aad1, size_t aad1_len,
-                        const uint8_t *aad2, size_t aad2_len, uint8_t *data, size_t data_len,
-                        uint8_t *tag, bool encrypt) {
+static int srtp_aes_gcm(const EVP_CIPHER *cipher, const uint8_t *key, const uint8_t *iv,
+                        const uint8_t *aad1, size_t aad1_len, const uint8_t *aad2, size_t aad2_len,
+                        uint8_t *data, size_t data_len, uint8_t *tag, bool encrypt) {
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     if (!ctx)
         return RTC_ERR_NOMEM;
@@ -373,7 +394,7 @@ static int srtp_aes_gcm(const uint8_t *key, const uint8_t *iv, const uint8_t *aa
     int outl = 0;
 
     if (encrypt) {
-        if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, NULL, NULL) != 1 ||
+        if (EVP_EncryptInit_ex(ctx, cipher, NULL, NULL, NULL) != 1 ||
             EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, SRTP_GCM_IV_LEN, NULL) != 1 ||
             EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv) != 1)
             goto done;
@@ -387,7 +408,7 @@ static int srtp_aes_gcm(const uint8_t *key, const uint8_t *iv, const uint8_t *aa
             goto done;
         rc = RTC_OK;
     } else {
-        if (EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, NULL, NULL) != 1 ||
+        if (EVP_DecryptInit_ex(ctx, cipher, NULL, NULL, NULL) != 1 ||
             EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, SRTP_GCM_IV_LEN, NULL) != 1 ||
             EVP_DecryptInit_ex(ctx, NULL, NULL, key, iv) != 1)
             goto done;
@@ -446,8 +467,8 @@ static int srtp_protect_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size
     uint8_t iv[SRTP_GCM_IV_LEN];
     srtp_gcm_rtp_iv(ctx->session_salt, ssrc, roc, seq, iv);
 
-    int rc = srtp_aes_gcm(ctx->session_key, iv, buf, hdr_len, NULL, 0, buf + hdr_len,
-                          *len - hdr_len, buf + *len, true);
+    int rc = srtp_aes_gcm(srtp_gcm_cipher(ctx), ctx->session_key, iv, buf, hdr_len, NULL, 0,
+                          buf + hdr_len, *len - hdr_len, buf + *len, true);
     if (rc != RTC_OK)
         return rc;
     *len += SRTP_GCM_TAG_LEN;
@@ -478,8 +499,8 @@ static int srtp_unprotect_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     uint8_t iv[SRTP_GCM_IV_LEN];
     srtp_gcm_rtp_iv(ctx->session_salt, ssrc, roc, seq, iv);
 
-    int rc = srtp_aes_gcm(ctx->session_key, iv, buf, hdr_len, NULL, 0, buf + hdr_len,
-                          body_len - hdr_len, tag, false);
+    int rc = srtp_aes_gcm(srtp_gcm_cipher(ctx), ctx->session_key, iv, buf, hdr_len, NULL, 0,
+                          buf + hdr_len, body_len - hdr_len, tag, false);
     if (rc != RTC_OK)
         return rc;
 
@@ -516,8 +537,8 @@ static int srtp_protect_rtcp_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len,
     srtp_gcm_rtcp_iv(ctx->rtcp_session_salt, ssrc, index, iv);
 
     size_t ct_len = *len - 8;
-    int rc = srtp_aes_gcm(ctx->rtcp_session_key, iv, buf, 8, trailer, 4, buf + 8, ct_len,
-                          buf + *len, true);
+    int rc = srtp_aes_gcm(srtp_gcm_cipher(ctx), ctx->rtcp_session_key, iv, buf, 8, trailer, 4,
+                          buf + 8, ct_len, buf + *len, true);
     if (rc != RTC_OK)
         return rc;
 
@@ -550,11 +571,12 @@ static int srtp_unprotect_rtcp_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *le
 
     int rc;
     if (encrypted) {
-        rc = srtp_aes_gcm(ctx->rtcp_session_key, iv, buf, 8, trailer, 4, buf + 8, tag_off - 8, tag,
-                          false);
+        rc = srtp_aes_gcm(srtp_gcm_cipher(ctx), ctx->rtcp_session_key, iv, buf, 8, trailer, 4,
+                          buf + 8, tag_off - 8, tag, false);
     } else {
         /* Unencrypted: the whole packet body is authenticated cleartext. */
-        rc = srtp_aes_gcm(ctx->rtcp_session_key, iv, buf, tag_off, trailer, 4, NULL, 0, tag, false);
+        rc = srtp_aes_gcm(srtp_gcm_cipher(ctx), ctx->rtcp_session_key, iv, buf, tag_off, trailer, 4,
+                          NULL, 0, tag, false);
     }
     if (rc != RTC_OK)
         return rc;
@@ -575,7 +597,7 @@ int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_
         return RTC_ERR_SRTP;
     if (*len < 12)
         return RTC_ERR_INVALID; /* minimum RTP header */
-    if (ctx->profile == RTC_SRTP_PROFILE_AEAD_AES_128_GCM) {
+    if (srtp_is_gcm(ctx->profile)) {
         rtc_mutex_lock(&ctx->lock);
         int rc = srtp_protect_gcm(ctx, buf, len, buf_cap);
         rtc_mutex_unlock(&ctx->lock);
@@ -654,7 +676,7 @@ int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_
 int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     if (!ctx->initialized)
         return RTC_ERR_SRTP;
-    if (ctx->profile == RTC_SRTP_PROFILE_AEAD_AES_128_GCM) {
+    if (srtp_is_gcm(ctx->profile)) {
         rtc_mutex_lock(&ctx->lock);
         int rc = srtp_unprotect_gcm(ctx, buf, len);
         rtc_mutex_unlock(&ctx->lock);
@@ -798,7 +820,7 @@ int rtc_srtp_protect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t
         return RTC_ERR_SRTP;
     if (*len < 8)
         return RTC_ERR_INVALID; /* minimum: RTCP header (4) + SSRC (4) */
-    if (ctx->profile == RTC_SRTP_PROFILE_AEAD_AES_128_GCM) {
+    if (srtp_is_gcm(ctx->profile)) {
         rtc_mutex_lock(&ctx->lock);
         int rc = srtp_protect_rtcp_gcm(ctx, buf, len, buf_cap);
         rtc_mutex_unlock(&ctx->lock);
@@ -856,7 +878,7 @@ int rtc_srtp_protect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t
 int rtc_srtp_unprotect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     if (!ctx->initialized)
         return RTC_ERR_SRTP;
-    if (ctx->profile == RTC_SRTP_PROFILE_AEAD_AES_128_GCM) {
+    if (srtp_is_gcm(ctx->profile)) {
         rtc_mutex_lock(&ctx->lock);
         int rc = srtp_unprotect_rtcp_gcm(ctx, buf, len);
         rtc_mutex_unlock(&ctx->lock);

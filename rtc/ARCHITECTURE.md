@@ -213,15 +213,15 @@ After:         dtls_export_srtp_keys() → client/server keys + salts
 
 ### SRTP (`rtc_srtp.h/c`)
 
-Two DTLS-SRTP protection profiles, selected by the handshake:
-`SRTP_AEAD_AES_128_GCM` (RFC 7714, preferred) and
-`SRTP_AES128_CM_SHA1_80` (RFC 3711, AES-128-CM + HMAC-SHA1-80).
+Three DTLS-SRTP protection profiles, selected by the handshake (offered in
+this preference order): `SRTP_AEAD_AES_256_GCM` and `SRTP_AEAD_AES_128_GCM`
+(RFC 7714) and `SRTP_AES128_CM_SHA1_80` (RFC 3711, AES-128-CM + HMAC-SHA1-80).
 
-- Master key / salt derived from DTLS export (16-byte key; 14-byte salt
-  for AES-CM, 12-byte for GCM)
+- Master key / salt derived from DTLS export (16- or 32-byte key; 14-byte
+  salt for AES-CM, 12-byte for GCM)
 - AES-CM: derive session keys via PRF, encrypt payload, append 80-bit
-  HMAC tag. GCM: single AEAD pass with the RTP header as associated data
-  and a 128-bit tag (no separate HMAC key)
+  HMAC tag. GCM: single AEAD pass (AES-128 or AES-256) with the RTP header
+  as associated data and a 128-bit tag (no separate HMAC key)
 - Per-SSRC rollover counter (ROC) + replay window: bundled streams share
   one key but keep independent sequence spaces
 

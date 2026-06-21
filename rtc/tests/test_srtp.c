@@ -25,6 +25,12 @@ static const uint8_t test_salt[14] = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
 static const uint8_t test_gcm_salt[12] = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25,
                                           0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B};
 
+/* AEAD_AES_256_GCM uses a 32-byte key. */
+static const uint8_t test_key256[32] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                                        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+                                        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                                        0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F};
+
 TEST(srtp_init) {
     rtc_srtp_ctx_t ctx;
     int rc = rtc_srtp_init(&ctx, test_key, sizeof(test_key), test_salt, sizeof(test_salt));
@@ -288,6 +294,47 @@ TEST(srtp_gcm_roundtrip) {
     rtc_srtp_close(&recv_ctx);
 }
 
+TEST(srtp_gcm256_roundtrip) {
+    rtc_srtp_ctx_t send_ctx, recv_ctx;
+    ASSERT_EQ(rtc_srtp_init_profile(&send_ctx, RTC_SRTP_PROFILE_AEAD_AES_256_GCM, test_key256,
+                                    sizeof(test_key256), test_gcm_salt, sizeof(test_gcm_salt)),
+              RTC_OK);
+    ASSERT_EQ(rtc_srtp_init_profile(&recv_ctx, RTC_SRTP_PROFILE_AEAD_AES_256_GCM, test_key256,
+                                    sizeof(test_key256), test_gcm_salt, sizeof(test_gcm_salt)),
+              RTC_OK);
+
+    const uint8_t payload[] = "AEAD_AES_256_GCM round-trip payload!";
+    rtc_rtp_packet_t pkt;
+    rtc_rtp_build(&pkt, 96, 7, 2000, 0x0BADF00D, false, payload, sizeof(payload) - 1);
+
+    uint8_t buf[1500];
+    memcpy(buf, pkt.buf, pkt.buf_len);
+    size_t len = pkt.buf_len;
+
+    ASSERT_EQ(rtc_srtp_protect(&send_ctx, buf, &len, sizeof(buf)), RTC_OK);
+    ASSERT_EQ(len, pkt.buf_len + SRTP_GCM_TAG_LEN);
+    ASSERT_MEM_EQ(buf, pkt.buf, RTP_HEADER_SIZE);
+
+    ASSERT_EQ(rtc_srtp_unprotect(&recv_ctx, buf, &len), RTC_OK);
+    ASSERT_EQ(len, pkt.buf_len);
+    ASSERT_MEM_EQ(buf + RTP_HEADER_SIZE, payload, sizeof(payload) - 1);
+
+    /* A 128-GCM context must not decrypt a 256-GCM packet. */
+    rtc_srtp_ctx_t mismatch;
+    rtc_srtp_init_profile(&mismatch, RTC_SRTP_PROFILE_AEAD_AES_128_GCM, test_key, sizeof(test_key),
+                          test_gcm_salt, sizeof(test_gcm_salt));
+    memcpy(buf, pkt.buf, pkt.buf_len);
+    len = pkt.buf_len;
+    ASSERT_EQ(rtc_srtp_protect(&send_ctx, buf, &len, sizeof(buf)), RTC_OK);
+    ASSERT(rtc_srtp_unprotect(&mismatch, buf, &len) != RTC_OK);
+    rtc_srtp_close(&mismatch);
+
+    printf("    GCM-256 SRTP round-trip: payload restored, 16-byte tag\n");
+
+    rtc_srtp_close(&send_ctx);
+    rtc_srtp_close(&recv_ctx);
+}
+
 TEST(srtp_gcm_wrong_key_fails) {
     rtc_srtp_ctx_t send_ctx, bad_ctx;
     rtc_srtp_init_profile(&send_ctx, RTC_SRTP_PROFILE_AEAD_AES_128_GCM, test_key, sizeof(test_key),
@@ -516,6 +563,7 @@ int main(void) {
     RUN_TEST(srtp_multiple_packets);
     RUN_TEST(srtp_per_ssrc_rollover);
     RUN_TEST(srtp_gcm_roundtrip);
+    RUN_TEST(srtp_gcm256_roundtrip);
     RUN_TEST(srtp_gcm_wrong_key_fails);
     RUN_TEST(srtcp_gcm_roundtrip);
     RUN_TEST(srtcp_roundtrip);
