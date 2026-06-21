@@ -10,6 +10,8 @@
 #include "rtc/rtc_rtp_stream.h"
 #include "test_harness.h"
 
+#include <stdlib.h>
+
 typedef struct {
     int nack_calls;
     int last_count;
@@ -150,11 +152,72 @@ TEST(compound_rtcp_dispatches_all_subpackets) {
     rtc_rtp_send_stream_destroy(s2);
 }
 
+/* A custom interceptor an application might append (e.g. stats / REMB). */
+typedef struct {
+    rtc_interceptor_t base;
+    int *rtcp_seen;
+    int *destroyed;
+} count_it_t;
+
+static void count_on_rtcp(rtc_interceptor_t *it, uint8_t pt, uint8_t fmt, const uint8_t *buf,
+                          size_t len) {
+    (void)pt;
+    (void)fmt;
+    (void)buf;
+    (void)len;
+    (*((count_it_t *)it)->rtcp_seen)++;
+}
+
+static void count_destroy(rtc_interceptor_t *it) {
+    (*((count_it_t *)it)->destroyed)++;
+    free(it);
+}
+
+static const rtc_interceptor_ops_t count_ops = {
+    .name = "count",
+    .on_rtcp = count_on_rtcp,
+    .destroy = count_destroy,
+};
+
+TEST(custom_interceptor_sees_rtcp_and_is_freed) {
+    fb_rec_t r = {0};
+    rtc_rtp_send_stream_t *s1 = make_stream(&r);
+    uint32_t ssrc1 = rtc_rtp_send_stream_ssrc(s1);
+
+    rtc_media_session_t session;
+    ASSERT_EQ(rtc_media_session_init(&session, NULL, NULL), RTC_OK);
+    ASSERT_EQ(rtc_media_session_add_sender(&session, s1), RTC_OK);
+
+    int rtcp_seen = 0;
+    int destroyed = 0;
+    count_it_t *ci = (count_it_t *)calloc(1, sizeof(*ci));
+    ci->base.ops = &count_ops;
+    ci->rtcp_seen = &rtcp_seen;
+    ci->destroyed = &destroyed;
+    ASSERT_EQ(rtc_media_session_add_interceptor(&session, &ci->base), RTC_OK);
+
+    /* A PLI still routes to the built-in PLI interceptor, and the custom one
+     * observes it too. */
+    uint8_t buf[64];
+    size_t len = 0;
+    ASSERT_EQ(rtc_rtcp_build_pli(buf, sizeof(buf), &len, 0xABCD, ssrc1), RTC_OK);
+    rtc_media_session_handle_rtcp(&session, buf, len);
+
+    ASSERT_EQ(rtcp_seen, 1);
+    ASSERT_EQ(r.pli_calls, 1);
+
+    rtc_media_session_close(&session);
+    ASSERT_EQ(destroyed, 1);
+
+    rtc_rtp_send_stream_destroy(s1);
+}
+
 int main(void) {
     printf("=== rtc_media_session tests ===\n");
     RUN_TEST(nack_routes_to_named_sender);
     RUN_TEST(pli_routes_to_named_sender);
     RUN_TEST(unknown_ssrc_dropped);
     RUN_TEST(compound_rtcp_dispatches_all_subpackets);
+    RUN_TEST(custom_interceptor_sees_rtcp_and_is_freed);
     TEST_SUMMARY();
 }

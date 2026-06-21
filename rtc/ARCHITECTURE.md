@@ -82,6 +82,8 @@ unconditionally:
 - `rtc_rtp.h`, `rtc_rtcp.h`, `rtc_sdp.h`, `rtc_rtp_ext.h`, `rtc_rtp_params.h` —
   protocol helpers and signaling parameter types
 - `rtc_rtp_stream.h` — composed RTP send/recv streams, shared by client and routing
+- `rtc_interceptor.h` — composable RTCP interceptor chain (report / NACK / PLI
+  built-ins + custom)
 - `rtc_media_session.h` — per-peer RTP/RTCP media session (RTP routing, RTCP
   feedback, SR/RR), used by the client peer connection
 
@@ -279,11 +281,15 @@ Recv: packets_received, jitter, last_transit, last_sr_ntp
   (SSRC → producer), so neither carries its own SSRC map or callback hop.
 - **`rtc_media_session`** — the per-peer media plane over one transport.
   It owns the send/receive streams, installs the transport's RTP router
-  (per-SSRC sink + payload-type resolver), parses inbound compound RTCP
-  and routes each report to the right stream (SR → receive stream;
-  RR / NACK / PLI / FIR → the named send stream via an SSRC → send-stream
-  table), feeds RR loss into the transport bandwidth estimator, and runs
-  the periodic SR / RR emission timer. This is the reusable glue that
+  (per-SSRC sink + payload-type resolver), and drives the RTCP plane through
+  an **interceptor chain** (`rtc_interceptor`): it splits each inbound
+  compound RTCP packet into sub-packets and dispatches them, plus a periodic
+  tick, to an ordered list of interceptors. The built-ins replicate the
+  former hardcoded switch — a *report* interceptor (SR → receive stream,
+  RR → send stream + RR loss → the transport bandwidth estimator, and SR/RR
+  emission on tick), a *NACK responder*, and a *PLI/FIR responder* — and
+  applications can append their own (REMB, RFC 8888, stats, logging) with
+  `rtc_media_session_add_interceptor()`. This is the reusable glue that
   previously lived hand-written in the client.
 
 ### SDP (`rtc_sdp.h/c`)
@@ -407,6 +413,7 @@ checks the atomic published flags `selected_remote_valid` and
 | `test_rtcp` | SR/RR build/parse, jitter statistics |
 | `test_rtcp_feedback` | NACK / PLI / FIR build + parse |
 | `test_media_session` | Per-peer media session: RTCP feedback routing (NACK / PLI) |
+| `test_interceptor` | RTCP interceptor chain: dispatch order, tick, ownership |
 | `test_rtp_demux` | SSRC → consumer demux: bind / resolve / dispatch |
 | `test_nack_buf` | NACK ring buffer store/lookup, wraparound |
 | `test_twcc` | TWCC sender ring, receiver window, feedback round-trip |

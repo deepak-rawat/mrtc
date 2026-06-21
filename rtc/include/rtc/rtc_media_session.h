@@ -20,6 +20,7 @@
 #define RTC_MEDIA_SESSION_H
 
 #include "rtc_common.h"
+#include "rtc_interceptor.h"
 #include "rtc_rtp_stream.h"
 #include "rtc_transport.h"
 #include "rtc_u32_map.h"
@@ -33,6 +34,7 @@ typedef struct {
     rtc_worker_t *worker;
     rtc_u32_map_t send_streams; /* ssrc -> rtc_rtp_send_stream_t* (RTCP feedback + SR) */
     rtc_vec_t recv_streams;     /* rtc_rtp_recv_stream_t* (RTP resolve + RR emission) */
+    rtc_interceptor_chain_t chain; /* RTCP handling: report, NACK, PLI + custom */
     rtc_worker_timer_t report_timer;
     _Atomic bool running;
     bool ready;
@@ -56,6 +58,12 @@ rtc_err_t rtc_media_session_add_receiver(rtc_media_session_t *s, rtc_rtp_recv_st
  * dispatch in O(1) without the resolver. */
 void rtc_media_session_bind_receiver(rtc_media_session_t *s, rtc_rtp_recv_stream_t *stream,
                                      uint32_t ssrc);
+
+/* Append a custom RTCP interceptor (e.g. REMB, RFC 8888, stats). The session
+ * takes ownership and destroys it in rtc_media_session_close(); on failure
+ * (chain full) ownership stays with the caller. Interceptors run after the
+ * built-in report / NACK / PLI handlers. */
+rtc_err_t rtc_media_session_add_interceptor(rtc_media_session_t *s, rtc_interceptor_t *it);
 
 /* Route one compound RTCP packet (post SRTCP-unprotect). Normally invoked
  * internally from the transport's on_rtcp; exposed for testing. */

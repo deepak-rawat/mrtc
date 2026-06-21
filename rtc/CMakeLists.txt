@@ -21,6 +21,7 @@ set(RTC_PROTOCOL_SOURCES
     src/rtc_rtp_demux.c
     src/rtc_rtp_ext.c
     src/rtc_rtcp.c
+    src/rtc_interceptor.c
     src/rtc_media_session.c
     src/rtc_nack_buf.c
     src/rtc_rate_control.c
@@ -60,7 +61,7 @@ if(MRTC_BUILD_TESTS)
         test_stun test_rtp test_srtp test_dtls test_ice test_sdp test_packet_io
         test_sdp_video test_rtcp test_turn test_rate_control test_rtcp_feedback
         test_nack_buf test_rtp_ext test_rtp_demux test_media_session test_poller test_timer_sched
-        test_worker test_listener
+        test_worker test_listener test_interceptor
     )
     if(MRTC_ENABLE_TWCC)
         list(APPEND RUNTIME_TEST_NAMES test_twcc test_bwe)
