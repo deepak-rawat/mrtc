@@ -113,22 +113,22 @@ static int tx_op_invoke(rtc_transport_t *transport, tx_op_fn fn, void *arg) {
  * marshals the (fn, user) store onto the worker thread. The store itself is the
  * same shape for every callback, so generate the args struct + impl + wrapper
  * instead of repeating them. */
-#define TX_DEFINE_CB_SETTER(func, fntype, fn_field, user_field)                                    \
-    typedef struct {                                                                               \
-        fntype fn;                                                                                  \
-        void *user;                                                                                 \
-    } tx_##func##_args_t;                                                                          \
-    static int tx_##func##_impl(rtc_transport_t *transport, void *arg) {                           \
-        tx_##func##_args_t *a = (tx_##func##_args_t *)arg;                                          \
-        transport->fn_field = a->fn;                                                                \
-        transport->user_field = a->user;                                                            \
-        return RTC_OK;                                                                              \
-    }                                                                                              \
-    void rtc_transport_##func(rtc_transport_t *transport, fntype fn, void *user) {                  \
-        if (!transport)                                                                            \
-            return;                                                                                  \
-        tx_##func##_args_t args = {fn, user};                                                       \
-        tx_op_invoke(transport, tx_##func##_impl, &args);                                           \
+#define TX_DEFINE_CB_SETTER(func, fntype, fn_field, user_field)                    \
+    typedef struct {                                                               \
+        fntype fn;                                                                 \
+        void *user;                                                                \
+    } tx_##func##_args_t;                                                          \
+    static int tx_##func##_impl(rtc_transport_t *transport, void *arg) {           \
+        tx_##func##_args_t *a = (tx_##func##_args_t *)arg;                         \
+        transport->fn_field = a->fn;                                               \
+        transport->user_field = a->user;                                           \
+        return RTC_OK;                                                             \
+    }                                                                              \
+    void rtc_transport_##func(rtc_transport_t *transport, fntype fn, void *user) { \
+        if (!transport)                                                            \
+            return;                                                                \
+        tx_##func##_args_t args = {fn, user};                                      \
+        tx_op_invoke(transport, tx_##func##_impl, &args);                          \
     }
 
 static rtc_transport_dtls_state_t transport_dtls_state(rtc_dtls_state_t state) {
@@ -281,9 +281,8 @@ static void transport_try_export_srtp(rtc_transport_t *transport) {
                                    ? transport->dtls.srtp_server_salt
                                    : transport->dtls.srtp_client_salt;
 
-    rtc_srtp_profile_t profile = transport->dtls.srtp_aead_gcm
-                                     ? RTC_SRTP_PROFILE_AEAD_AES_128_GCM
-                                     : RTC_SRTP_PROFILE_AES128_CM_SHA1_80;
+    rtc_srtp_profile_t profile = transport->dtls.srtp_aead_gcm ? RTC_SRTP_PROFILE_AEAD_AES_128_GCM
+                                                               : RTC_SRTP_PROFILE_AES128_CM_SHA1_80;
     size_t salt_len = transport->dtls.srtp_salt_len;
 
     int rc = rtc_srtp_init_profile(&transport->srtp_send, profile, send_key,
@@ -746,7 +745,6 @@ int rtc_transport_set_dtls_role(rtc_transport_t *transport, rtc_transport_dtls_r
 }
 
 TX_DEFINE_CB_SETTER(on_rtp, rtc_transport_rtp_fn, on_rtp, on_rtp_user)
-
 
 typedef struct {
     rtc_rtp_sink_fn sink;

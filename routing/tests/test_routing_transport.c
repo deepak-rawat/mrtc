@@ -37,8 +37,8 @@ static int listener_loopback_addr(rtc_listener_t *listener, rtc_addr_t *out) {
  * negotiated (GCM uses a 12-byte salt and the AEAD path). */
 static int srtp_init_from_dtls(rtc_srtp_ctx_t *ctx, const rtc_dtls_transport_t *d,
                                const uint8_t *key, const uint8_t *salt) {
-    rtc_srtp_profile_t prof = d->srtp_aead_gcm ? RTC_SRTP_PROFILE_AEAD_AES_128_GCM
-                                               : RTC_SRTP_PROFILE_AES128_CM_SHA1_80;
+    rtc_srtp_profile_t prof =
+        d->srtp_aead_gcm ? RTC_SRTP_PROFILE_AEAD_AES_128_GCM : RTC_SRTP_PROFILE_AES128_CM_SHA1_80;
     return rtc_srtp_init_profile(ctx, prof, key, RTC_SRTP_MASTER_KEY_LEN, salt, d->srtp_salt_len);
 }
 

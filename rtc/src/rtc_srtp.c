@@ -260,9 +260,9 @@ int rtc_srtp_init_profile(rtc_srtp_ctx_t *ctx, rtc_srtp_profile_t profile,
     }
 
     ctx->initialized = true;
-    RTC_LOG_INFO("SRTP: context initialized (%s)",
-                 profile == RTC_SRTP_PROFILE_AEAD_AES_128_GCM ? "AEAD_AES_128_GCM"
-                                                              : "AES_CM_128_HMAC_SHA1_80");
+    RTC_LOG_INFO("SRTP: context initialized (%s)", profile == RTC_SRTP_PROFILE_AEAD_AES_128_GCM
+                                                       ? "AEAD_AES_128_GCM"
+                                                       : "AES_CM_128_HMAC_SHA1_80");
     return RTC_OK;
 }
 
@@ -484,8 +484,8 @@ static int srtp_unprotect_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
         return rc;
 
     uint64_t pkt_index = ((uint64_t)roc << 16) | seq;
-    rtc_srtp_replay_entry_t *st = srtp_entry_for_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS,
-                                                      &ctx->replay_lru_tick, ssrc);
+    rtc_srtp_replay_entry_t *st =
+        srtp_entry_for_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS, &ctx->replay_lru_tick, ssrc);
     int replay_rc = srtp_replay_check(&st->replay, pkt_index);
     if (replay_rc != RTC_OK)
         return replay_rc;
@@ -516,8 +516,8 @@ static int srtp_protect_rtcp_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len,
     srtp_gcm_rtcp_iv(ctx->rtcp_session_salt, ssrc, index, iv);
 
     size_t ct_len = *len - 8;
-    int rc = srtp_aes_gcm(ctx->rtcp_session_key, iv, buf, 8, trailer, 4, buf + 8, ct_len, buf + *len,
-                          true);
+    int rc = srtp_aes_gcm(ctx->rtcp_session_key, iv, buf, 8, trailer, 4, buf + 8, ct_len,
+                          buf + *len, true);
     if (rc != RTC_OK)
         return rc;
 
@@ -560,8 +560,8 @@ static int srtp_unprotect_rtcp_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *le
         return rc;
 
     /* Replay check after auth (per-SSRC SRTCP index space). */
-    rtc_srtp_replay_entry_t *st = srtp_entry_for_ssrc(ctx->rtcp_replay, SRTP_REPLAY_MAX_STREAMS,
-                                                      &ctx->replay_lru_tick, ssrc);
+    rtc_srtp_replay_entry_t *st =
+        srtp_entry_for_ssrc(ctx->rtcp_replay, SRTP_REPLAY_MAX_STREAMS, &ctx->replay_lru_tick, ssrc);
     int replay_rc = srtp_replay_check(&st->replay, (uint64_t)index);
     if (replay_rc != RTC_OK)
         return replay_rc;

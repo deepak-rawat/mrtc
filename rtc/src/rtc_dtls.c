@@ -120,8 +120,8 @@ static int dtls_setup_ssl(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role) {
 
     /* Offer AEAD_AES_128_GCM (preferred) and AES-CM. The peer/handshake picks
      * one; the actual profile is read back at key export. */
-    if (SSL_CTX_set_tlsext_use_srtp(dtls->ctx,
-                                    "SRTP_AEAD_AES_128_GCM:SRTP_AES128_CM_SHA1_80") != 0) {
+    if (SSL_CTX_set_tlsext_use_srtp(dtls->ctx, "SRTP_AEAD_AES_128_GCM:SRTP_AES128_CM_SHA1_80") !=
+        0) {
         RTC_LOG_ERR("DTLS: failed to set SRTP profile");
         dtls_close_ssl(dtls);
         return RTC_ERR_SSL;
