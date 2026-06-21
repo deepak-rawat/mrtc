@@ -253,8 +253,8 @@ int rtc_srtp_init_profile(rtc_srtp_ctx_t *ctx, rtc_srtp_profile_t profile,
      * tag, so it has no auth keys. */
     if (profile == RTC_SRTP_PROFILE_AES128_CM_SHA1_80) {
         uint8_t auth_key[20];
-        rc = srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTP_AUTH, auth_key,
-                      20);
+        rc =
+            srtp_kdf(master_key, key_len, master_salt, salt_len, SRTP_LABEL_RTP_AUTH, auth_key, 20);
         if (rc != RTC_OK)
             return rc;
         memcpy(ctx->session_auth_key, auth_key, 20);

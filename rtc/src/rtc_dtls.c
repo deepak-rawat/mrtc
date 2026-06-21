@@ -120,10 +120,8 @@ static int dtls_setup_ssl(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role) {
 
     /* Offer AEAD_AES_128_GCM (preferred) and AES-CM. The peer/handshake picks
      * one; the actual profile is read back at key export. */
-    if (SSL_CTX_set_tlsext_use_srtp(
-            dtls->ctx,
-            "SRTP_AEAD_AES_256_GCM:SRTP_AEAD_AES_128_GCM:SRTP_AES128_CM_SHA1_80") !=
-        0) {
+    if (SSL_CTX_set_tlsext_use_srtp(dtls->ctx, "SRTP_AEAD_AES_256_GCM:SRTP_AEAD_AES_128_GCM:SRTP_"
+                                               "AES128_CM_SHA1_80") != 0) {
         RTC_LOG_ERR("DTLS: failed to set SRTP profile");
         dtls_close_ssl(dtls);
         return RTC_ERR_SSL;
@@ -301,7 +299,7 @@ int rtc_dtls_export_srtp_keys(rtc_dtls_transport_t *dtls) {
      * separate auth key (AES-128-GCM = 16-byte key, AES-256-GCM = 32-byte key);
      * AES-CM uses a 16-byte key and 14-byte salt. */
     const SRTP_PROTECTION_PROFILE *prof = SSL_get_selected_srtp_profile(dtls->ssl);
-    size_t key_len = RTC_SRTP_MASTER_KEY_LEN;  /* 16 */
+    size_t key_len = RTC_SRTP_MASTER_KEY_LEN;   /* 16 */
     size_t salt_len = RTC_SRTP_MASTER_SALT_LEN; /* 14 (AES-CM) */
     dtls->srtp_aead_gcm = false;
     if (prof && prof->id == SRTP_AEAD_AES_256_GCM) {
@@ -338,10 +336,14 @@ int rtc_dtls_export_srtp_keys(rtc_dtls_transport_t *dtls) {
     dtls->srtp_key_len = key_len;
     dtls->srtp_salt_len = salt_len;
     dtls->srtp_keys_ready = true;
-    RTC_LOG_INFO("DTLS: SRTP keying material exported (%s)",
-                 !dtls->srtp_aead_gcm        ? "AES_CM_128_HMAC_SHA1_80"
-                 : dtls->srtp_key_len >= 32 ? "AEAD_AES_256_GCM"
-                                            : "AEAD_AES_128_GCM");
+    RTC_LOG_INFO("DTLS: SRTP keying material exported (%s)", !dtls->srtp_aead_gcm ? "AES_CM_128_"
+                                                                                    "HMAC_SHA1_80"
+                                                             : dtls->srtp_key_len >= 32 ? "AEAD_"
+                                                                                          "AES_256_"
+                                                                                          "GCM"
+                                                                                        : "AEAD_"
+                                                                                          "AES_128_"
+                                                                                          "GCM");
     return RTC_OK;
 }
 

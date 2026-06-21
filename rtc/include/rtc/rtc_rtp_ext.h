@@ -49,12 +49,11 @@ const rtc_rtp_ext_t *rtc_rtp_ext_find(const rtc_rtp_ext_t *exts, size_t count, u
 #define RTC_EXT_URI_ABS_SEND_TIME "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time"
 #define RTC_EXT_URI_TRANSPORT_CC \
     "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
-#define RTC_EXT_URI_AUDIO_LEVEL "urn:ietf:params:rtp-hdrext:ssrc-audio-level"
-#define RTC_EXT_URI_MID         "urn:ietf:params:rtp-hdrext:sdes:mid"
-#define RTC_EXT_URI_RID         "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id"
-#define RTC_EXT_URI_REPAIRED_RID \
-    "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id"
-#define RTC_EXT_URI_TOFFSET "urn:ietf:params:rtp-hdrext:toffset"
+#define RTC_EXT_URI_AUDIO_LEVEL  "urn:ietf:params:rtp-hdrext:ssrc-audio-level"
+#define RTC_EXT_URI_MID          "urn:ietf:params:rtp-hdrext:sdes:mid"
+#define RTC_EXT_URI_RID          "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id"
+#define RTC_EXT_URI_REPAIRED_RID "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id"
+#define RTC_EXT_URI_TOFFSET      "urn:ietf:params:rtp-hdrext:toffset"
 
 /* abs-send-time: 24-bit fixed-point, 6.18 format, seconds & (1 << 18) - 1 */
 void rtc_rtp_ext_make_abs_send_time(rtc_rtp_ext_t *out, uint8_t id, uint64_t now_us);
