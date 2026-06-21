@@ -19,7 +19,7 @@ typedef struct {
     rtc_interceptor_t base;
     rec_t *rec;
     int id;
-    int *order_log;  /* shared dispatch-order log */
+    int *order_log; /* shared dispatch-order log */
     int *order_count;
 } test_it_t;
 

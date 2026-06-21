@@ -32,8 +32,8 @@
 typedef struct {
     rtc_transport_t *transport;
     rtc_worker_t *worker;
-    rtc_u32_map_t send_streams; /* ssrc -> rtc_rtp_send_stream_t* (RTCP feedback + SR) */
-    rtc_vec_t recv_streams;     /* rtc_rtp_recv_stream_t* (RTP resolve + RR emission) */
+    rtc_u32_map_t send_streams;    /* ssrc -> rtc_rtp_send_stream_t* (RTCP feedback + SR) */
+    rtc_vec_t recv_streams;        /* rtc_rtp_recv_stream_t* (RTP resolve + RR emission) */
     rtc_interceptor_chain_t chain; /* RTCP handling: report, NACK, PLI + custom */
     rtc_worker_timer_t report_timer;
     _Atomic bool running;
