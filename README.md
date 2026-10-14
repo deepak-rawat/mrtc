@@ -48,12 +48,50 @@ See [ROADMAP.md](ROADMAP.md) for planned improvements.
 
 ## Building
 
+### macOS
+
+Install the Xcode Command Line Tools and Homebrew dependencies:
+
 ```bash
-# Linux
+xcode-select --install
+brew install cmake ninja pkgconf openssl@4 libwebsockets cjson libvpx opus sdl3
+```
+
+Homebrew's `openssl@4` is keg-only, so pass its prefix explicitly when
+configuring. Using `brew --prefix` keeps the command portable between Apple
+Silicon and Intel Macs:
+
+```bash
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@4)" \
+  -DCMAKE_PREFIX_PATH="$(brew --prefix)"
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+The `conf_sdl` target is generated as a macOS application bundle so the system
+can request camera, microphone, and local-network permission:
+
+```bash
+./build/app/conf_sdl/conf_sdl.app/Contents/MacOS/conf_sdl --meeting test
+```
+
+macOS may also ask whether the signaling server can accept incoming network
+connections. Allow it when testing with other devices. If camera, microphone,
+or local-network access was previously denied, re-enable it under **System
+Settings > Privacy & Security**.
+
+### Linux
+
+```bash
 sudo apt install build-essential cmake libssl-dev
 mkdir build && cd build && cmake .. && make
+```
 
-# Windows (MSYS2 UCRT64)
+### Windows (MSYS2 UCRT64)
+
+```bash
 pacman -S mingw-w64-ucrt-x86_64-{gcc,cmake,openssl,ninja,libwebsockets,cjson}
 mkdir build && cd build && cmake -G Ninja .. && ninja
 ```
@@ -122,6 +160,13 @@ returns.
 
 # Video conference (SDL3)
 ./app/conf_sdl/conf_sdl --meeting test  # M=mute, V=camera, Q=quit
+```
+
+On macOS, run the conference executable inside its generated application
+bundle instead:
+
+```bash
+./app/conf_sdl/conf_sdl.app/Contents/MacOS/conf_sdl --meeting test
 ```
 
 ## Tests

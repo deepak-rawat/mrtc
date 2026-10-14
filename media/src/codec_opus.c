@@ -2,7 +2,7 @@
  * Opus audio codec backend using libopus.
  */
 #include "media/audio_codec.h"
-#include <opus/opus.h>
+#include <opus.h>
 #include <stdlib.h>
 #include <string.h>
 

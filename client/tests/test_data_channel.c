@@ -85,9 +85,9 @@ TEST(dc_create) {
     ASSERT_EQ(rtc_data_channel_state(dc), RTC_DC_CONNECTING);
     ASSERT_EQ(rtc_data_channel_id(dc), 0);
 
-    rtc_dc_manager_close(&mgr);
     printf("    created channel: label=\"%s\" id=%u state=CONNECTING\n", rtc_data_channel_label(dc),
            rtc_data_channel_id(dc));
+    rtc_dc_manager_close(&mgr);
 }
 
 TEST(dc_open_handshake) {

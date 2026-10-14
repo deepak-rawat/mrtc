@@ -20,6 +20,7 @@
 static int dtls_generate_cert(X509 **cert_out, EVP_PKEY **pkey_out, char *fp_out, size_t fp_size) {
     EVP_PKEY *pkey = NULL;
     X509 *x509 = NULL;
+    X509_NAME *name = NULL;
     int ret = RTC_ERR_SSL;
 
     if (!cert_out || !pkey_out || !fp_out || fp_size == 0)
@@ -47,10 +48,18 @@ static int dtls_generate_cert(X509 **cert_out, EVP_PKEY **pkey_out, char *fp_out
     X509_gmtime_adj(X509_get_notAfter(x509), 365 * 24 * 3600);
     X509_set_pubkey(x509, pkey);
 
-    X509_NAME *name = X509_get_subject_name(x509);
-    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (const unsigned char *)"mrtc", -1, -1, 0);
-    X509_set_issuer_name(x509, name);
-    X509_sign(x509, pkey, EVP_sha256());
+    name = X509_NAME_new();
+    if (!name)
+        goto fail;
+    if (X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                                   (const unsigned char *)"mrtc", -1, -1, 0) <= 0)
+        goto fail;
+    if (X509_set_subject_name(x509, name) <= 0 || X509_set_issuer_name(x509, name) <= 0)
+        goto fail;
+    X509_NAME_free(name);
+    name = NULL;
+    if (X509_sign(x509, pkey, EVP_sha256()) <= 0)
+        goto fail;
 
     /* Compute SHA-256 fingerprint */
     unsigned int flen = 0;
@@ -76,6 +85,8 @@ static int dtls_generate_cert(X509 **cert_out, EVP_PKEY **pkey_out, char *fp_out
     pkey = NULL;
 
 fail:
+    if (name)
+        X509_NAME_free(name);
     if (pctx)
         EVP_PKEY_CTX_free(pctx);
     if (x509)

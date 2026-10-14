@@ -20,6 +20,10 @@
  *     dual-stack v6 socket still works there; only PKTINFO is gated.
  *     TODO-test: Windows PKTINFO.
  */
+#ifdef __APPLE__
+#  define __APPLE_USE_RFC_3542
+#endif
+
 #include "rtc_packet_io.h"
 
 #include <string.h>

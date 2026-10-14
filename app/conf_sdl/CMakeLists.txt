@@ -15,6 +15,15 @@ add_executable(conf_sdl
     ui_sdl3.c
 )
 
+if(APPLE)
+    set_target_properties(conf_sdl PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_BUNDLE_NAME "mrtc Conference"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "dev.mrtc.conf-sdl"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
+    )
+endif()
+
 target_include_directories(conf_sdl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 if(MINGW)
     target_link_options(conf_sdl PRIVATE -mconsole)
