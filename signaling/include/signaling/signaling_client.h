@@ -31,6 +31,8 @@ typedef struct {
     sig_on_candidate_fn on_candidate;
     sig_on_error_fn on_error;
     void *user_data;
+    void (*on_mode)(const char *mode, void *user);
+    void (*on_disconnected)(void *user);
 } signaling_config_t;
 
 typedef struct signaling_client signaling_client_t;
@@ -61,5 +63,7 @@ rtc_err_t signaling_leave(signaling_client_t *sc);
 
 /* Disconnect and destroy. Blocks until the background thread exits. */
 void signaling_destroy(signaling_client_t *sc);
+/* Stop callbacks and close the connection; the client may be connected again. */
+void signaling_disconnect(signaling_client_t *sc);
 
 #endif /* SIGNALING_CLIENT_H */

@@ -1,6 +1,7 @@
 # Video Conference Application (conf_sdl)
 
-Full SDL3-based video conferencing application supporting multi-peer audio/video calls.
+SDL3 video conferencing application using the default SFU server, or explicit
+legacy mesh mode selected by the server.
 
 ## Architecture
 
@@ -39,29 +40,21 @@ Inactive slots are reused when participants join later.
 
 Orchestrates signaling, peer connections, and media pipelines.
 
-**Per-peer state:**
-```c
-struct conf_peer {
-    char peer_id[64];
-    rtc_peer_connection_t *pc;
-    rtc_rtp_sender_t *video_sender;
-    rtc_data_channel_t *dc;
-    media_pipeline_t *recv_pipeline;
-};
-```
+The application uses the public conference API rather than maintaining a second
+peer/media graph. Conference owns the publishing/subscription connections and
+shared pipeline; UI tiles are keyed by participant and source label.
 
 **Signaling flow:**
 1. Connect to signaling server → `on_joined(my_id, peer_list)`
-2. Create peer connections for existing peers
-3. `on_peer_joined(peer_id)` → I am older, create offer
-4. `on_offer(peer_id, sdp)` → I am newer, create answer
-5. ICE candidates exchanged (currently all in SDP, no trickle)
-6. On PC connected → start sending video/audio
+2. The conference selects SFU or mesh behavior from the server's mode event
+3. In SFU mode, publish to `"sfu"` and answer subscription offers for remote peers
+4. Forward asynchronous ICE candidates and end-of-candidates in both directions
+5. On connection readiness, send local frames and render decoded subscriptions
 
 **Media flow:**
 ```
-Local:  camera → VP8 encoder → packetizer → send to all peers
-Remote: RTP → recv_pipeline → depacketize → decode → render tile
+Local:  camera → VP8 encoder → packetizer → SFU publisher (or mesh fan-out)
+Remote: subscription RTP → shared pipeline → depacketize → decode → render tile
 ```
 
 ### Main Loop (`main.c`)

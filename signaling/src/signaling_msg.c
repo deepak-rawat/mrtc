@@ -79,10 +79,16 @@ char *sig_msg_build_candidate(const char *to, const char *candidate) {
 }
 
 char *sig_msg_build_joined(const char *peer_id, const char **peers, int peer_count) {
+    return sig_msg_build_joined_mode(peer_id, peers, peer_count, "mesh");
+}
+
+char *sig_msg_build_joined_mode(const char *peer_id, const char **peers, int peer_count,
+                                const char *mode) {
     cJSON *obj = make_base(SIG_MSG_JOINED);
     if (!obj)
         return NULL;
     cJSON_AddStringToObject(obj, "peer_id", peer_id);
+    cJSON_AddStringToObject(obj, "mode", mode);
     cJSON *arr = cJSON_AddArrayToObject(obj, "peers");
     for (int i = 0; i < peer_count; i++)
         cJSON_AddItemToArray(arr, cJSON_CreateString(peers[i]));
@@ -157,6 +163,20 @@ int sig_msg_parse(sig_msg_t *msg, const char *json, size_t json_len) {
     cJSON *root = cJSON_ParseWithLength(json, json_len);
     if (!root)
         return -1;
+    const struct {
+        const char *name;
+        size_t capacity;
+    } limits[] = {{"meeting", SIG_MAX_MEETING},     {"mode", sizeof(msg->mode)},
+                  {"peer_id", SIG_MAX_PEER_ID},     {"to", SIG_MAX_PEER_ID},
+                  {"from", SIG_MAX_PEER_ID},        {"sdp", SIG_MAX_SDP},
+                  {"candidate", SIG_MAX_CANDIDATE}, {"message", SIG_MAX_ERROR_MSG}};
+    for (size_t i = 0; i < sizeof(limits) / sizeof(limits[0]); i++) {
+        const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, limits[i].name);
+        if (cJSON_IsString(item) && strlen(item->valuestring) >= limits[i].capacity) {
+            cJSON_Delete(root);
+            return -1;
+        }
+    }
 
     cJSON *type_item = cJSON_GetObjectItemCaseSensitive(root, "type");
     if (!cJSON_IsString(type_item)) {
@@ -180,6 +200,7 @@ int sig_msg_parse(sig_msg_t *msg, const char *json, size_t json_len) {
             break;
 
         case SIG_MSG_JOINED:
+            safe_copy(msg->mode, sizeof(msg->mode), cJSON_GetObjectItemCaseSensitive(root, "mode"));
             safe_copy(msg->peer_id, sizeof(msg->peer_id),
                       cJSON_GetObjectItemCaseSensitive(root, "peer_id"));
             {

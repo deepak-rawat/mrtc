@@ -128,7 +128,8 @@ int meeting_join(meeting_manager_t *mgr, meeting_peer_t *peer, const char *name)
     peer->meeting_idx = idx;
 
     /* Send "joined" to the new peer */
-    char *joined = sig_msg_build_joined(peer->id, peer_ids, existing_count);
+    char *joined = sig_msg_build_joined_mode(peer->id, peer_ids, existing_count,
+                                             mgr->sfu_mode ? "sfu" : "mesh");
     if (joined) {
         mgr->send_fn(peer, joined, mgr->send_user);
         free(joined);

@@ -24,12 +24,13 @@ typedef enum {
     SIG_MSG_UNKNOWN,
 } sig_msg_type_t;
 
-#define SIG_MAX_PEER_ID   16
-#define SIG_MAX_MEETING   64
-#define SIG_MAX_PEERS     8
-#define SIG_MAX_SDP       4096
-#define SIG_MAX_CANDIDATE 256
-#define SIG_MAX_ERROR_MSG 128
+#define SIG_MAX_PEER_ID    16
+#define SIG_MAX_MEETING    64
+#define SIG_MAX_PEERS      8
+#define SIG_MAX_SDP        8192
+#define SIG_DC_HEADER_SIZE (4 + SIG_MAX_PEER_ID)
+#define SIG_MAX_CANDIDATE  256
+#define SIG_MAX_ERROR_MSG  128
 
 /* Parsed signaling message */
 typedef struct {
@@ -37,6 +38,7 @@ typedef struct {
 
     /* join */
     char meeting[SIG_MAX_MEETING];
+    char mode[8]; /* "sfu" or explicit legacy "mesh" */
 
     /* joined */
     char peer_id[SIG_MAX_PEER_ID];
@@ -68,6 +70,8 @@ char *sig_msg_build_candidate(const char *to, const char *candidate);
 
 /* Server → Client */
 char *sig_msg_build_joined(const char *peer_id, const char **peers, int peer_count);
+char *sig_msg_build_joined_mode(const char *peer_id, const char **peers, int peer_count,
+                                const char *mode);
 char *sig_msg_build_peer_joined(const char *peer_id);
 char *sig_msg_build_peer_left(const char *peer_id);
 char *sig_msg_build_relay_offer(const char *from, const char *sdp);

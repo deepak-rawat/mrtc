@@ -174,16 +174,17 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    conference_join(conf, sig);
     if (signaling_connect(sig) != RTC_OK) {
         printf("  [FAIL] Could not connect. Is the signaling server running?\n");
         printf("    Start it: ./signaling/signaling_server 8080\n");
+        conference_leave(conf);
         signaling_destroy(sig);
         conference_destroy(conf);
         ui_sdl3_close(&ui);
         return 1;
     }
 
-    conference_join(conf, sig);
     printf("  Connected! Waiting for peers...\n\n");
 
     bool running = true;

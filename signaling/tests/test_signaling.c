@@ -56,6 +56,7 @@ TEST(meeting_create_destroy) {
     ASSERT_EQ(p->meeting_idx, -1);
 
     meeting_peer_destroy(&mgr, p);
+    meeting_manager_close(&mgr);
     printf("    create/destroy OK\n");
     clear_sent();
 }
@@ -105,6 +106,7 @@ TEST(meeting_join_leave) {
     meeting_peer_destroy(&mgr, a);
     meeting_peer_destroy(&mgr, b);
     meeting_peer_destroy(&mgr, c);
+    meeting_manager_close(&mgr);
     clear_sent();
     printf("    join/leave with 3 peers OK\n");
 }
@@ -132,6 +134,7 @@ TEST(meeting_full) {
 
     for (int i = 0; i <= MEETING_MAX_PEERS; i++)
         meeting_peer_destroy(&mgr, peers[i]);
+    meeting_manager_close(&mgr);
     clear_sent();
 }
 
@@ -162,6 +165,7 @@ TEST(meeting_relay_message) {
     meeting_peer_destroy(&mgr, a);
     meeting_peer_destroy(&mgr, b);
     meeting_peer_destroy(&mgr, c);
+    meeting_manager_close(&mgr);
     clear_sent();
 }
 
@@ -193,6 +197,7 @@ TEST(meeting_broadcast_join_leave) {
     meeting_peer_destroy(&mgr, a);
     meeting_peer_destroy(&mgr, b);
     meeting_peer_destroy(&mgr, c);
+    meeting_manager_close(&mgr);
     clear_sent();
     printf("    broadcast join/leave OK\n");
 }
@@ -214,6 +219,7 @@ TEST(meeting_disconnect_cleanup) {
     ASSERT(find_msg_to(a, "\"peer_left\"") != NULL);
 
     meeting_peer_destroy(&mgr, a);
+    meeting_manager_close(&mgr);
     clear_sent();
     printf("    disconnect cleanup OK\n");
 }
@@ -235,6 +241,7 @@ TEST(meeting_separate_rooms) {
 
     meeting_peer_destroy(&mgr, a);
     meeting_peer_destroy(&mgr, b);
+    meeting_manager_close(&mgr);
     clear_sent();
 }
 

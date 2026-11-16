@@ -73,12 +73,14 @@ conference_t *conference_create(const conference_config_t *cfg);
 void conference_get_signaling_callbacks(conference_t *c, signaling_config_t *out_cfg,
                                         const char *server_url, const char *meeting);
 
-/* Join: store signaling client reference (must already be connected) */
+/* Bind signaling before signaling_connect(). Leave stops signaling callbacks;
+ * destroy the signaling client only after conference_leave(). */
 int conference_join(conference_t *c, signaling_client_t *signaling);
 void conference_leave(conference_t *c);
 void conference_destroy(conference_t *c);
 
-/* Media sources: local capture → encode → send to all peers. */
+/* Add sources before joining. With no sources, SFU publishing is SCTP-only;
+ * remote media subscriptions remain available. */
 
 /*
  * Add a video source (e.g. "camera", "screen").
@@ -102,6 +104,8 @@ void conference_mute_source(conference_t *c, const char *label, bool mute);
 /* Remove a source entirely (e.g., stop screen sharing) */
 void conference_remove_source(conference_t *c, const char *label);
 
+/* Safe from message callbacks and while a peer leaves. A departed/not-open
+ * peer returns RTC_ERR_INVALID; the conference must outlive all callers. */
 int conference_send_message(conference_t *c, const char *peer_id, const uint8_t *data, size_t len);
 int conference_broadcast_message(conference_t *c, const uint8_t *data, size_t len);
 

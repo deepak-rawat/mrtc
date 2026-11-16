@@ -1,11 +1,26 @@
 # Conference Library (libmrtc_conference)
 
-High-level multi-party conferencing API. Orchestrates `rtc` (peer connections),
-`media` (encode/decode pipeline), and `signaling` (WebSocket) so the application
-just pushes raw frames and receives decoded frames via callbacks.
+High-level conferencing API over client peer connections, the media pipeline,
+and WebSocket signaling. Applications push raw frames and receive decoded media
+and participant callbacks; protocol algorithms stay in the RTC layer.
 
-Conference is ~400 lines of pure wiring — no protocol logic, no codec logic,
-no network logic.
+The default server selects SFU mode. The same API also works with a server
+started with `--mesh`; `on_mode` selects the topology before the joined callback.
+
+## Default SFU Sessions
+
+- One publishing peer connection identified internally as `"sfu"` carries local
+  media and the conference's standard SCTP/DCEP channel.
+- Remote publisher IDs identify subscription peer connections. They deliver
+  decoded frames under the original participant ID, not under `"sfu"`.
+- Local ICE candidates and end-of-candidates are forwarded over signaling;
+  incoming candidates are applied to the corresponding session.
+- The publisher's bitrate-estimate callback updates the pipeline's peer budget.
+  Recovery callbacks request a keyframe on the relevant receiver.
+- No local media sources are required for text chat through the conference API.
+
+The shared encoder sends once to the SFU, which performs encoded-packet fan-out.
+In mesh mode the pipeline instead fans the encoded payloads out to each peer.
 
 ## Architecture
 
@@ -84,7 +99,20 @@ UDP from alice → SRTP unprotect → RTP parse
 
 ## Peer Lifecycle
 
-### Joining a meeting
+### Joining a default SFU meeting
+
+1. Create the conference and local sources.
+2. Obtain callbacks, create signaling, and call `conference_join()` to bind it.
+3. Call `signaling_connect()`; the server reports `mode="sfu"` and a local ID.
+4. Offer a publishing connection to `"sfu"` and apply its answer.
+5. Answer server-provided subscription offers identified by remote publisher ID.
+6. Reuse inactive peer/media slots when participants leave and reconnect.
+
+`conference_get_peer_count()` counts remote participants, excluding the internal
+publishing session. Text-chat applications use the same lifecycle without
+adding camera/microphone sources.
+
+### Joining a mesh meeting (`--mesh`)
 
 ```
 App                     Conference              Signaling Server
@@ -115,7 +143,7 @@ App                     Conference              Signaling Server
  │                         │    a_sender)              │
 ```
 
-### New peer arrives after us
+### New mesh peer arrives after us
 
 ```
 Signaling → sig_on_offer("charlie", sdp)
@@ -140,8 +168,12 @@ Signaling → sig_on_peer_left("charlie")
   → app.on_peer_left("charlie")            — remove the participant's gallery tiles
 ```
 
-Send-peer registration/removal and frame encoding/fan-out share a mutex so
-leaving cannot free a sender still in use by the application thread.
+Peer maps, slot reuse and in-flight send references are synchronized. Sends
+pin their peer while using its media/data handles; teardown marks the peer
+inactive and drains those references before closing the connection. Locks are
+not held across synchronous worker invocation, which could deadlock against a
+callback on that worker. Signaling disconnect is drained before peer storage
+is destroyed. Removed receive handles must not be used after slot reuse.
 
 ## Usage Example
 
@@ -172,8 +204,8 @@ conference_add_audio_source(conf, "mic", 48000, 1, 32000);
 signaling_config_t sig_cfg;
 conference_get_signaling_callbacks(conf, &sig_cfg, "ws://server:9000", "room1");
 signaling_client_t *sig = signaling_create(&sig_cfg);
-signaling_connect(sig);
 conference_join(conf, sig);
+signaling_connect(sig);
 
 // 4. Main loop — push local frames
 while (running) {
@@ -237,9 +269,22 @@ conference_destroy(conf);
 
 ## Limits
 
+The native facade currently negotiates VP8 video and Opus audio for each
+publisher. The lower-level media pipeline and client transceiver APIs are more
+general; labels alone do not add a new negotiated conference track.
+
 | Resource | Max |
 |---|---|
 | Peers | 8 (`CONF_MAX_PEERS`) |
 | Sources | 4 (`CONF_MAX_SOURCES`) |
 | Send peers in pipeline | 8 (`MP_MAX_SEND_PEERS`) |
 | Recv streams in pipeline | 16 (`MP_MAX_RECV_STREAMS`) |
+
+## Validation
+
+- `test_conference` exercises reusable peer slots and disconnect notifications.
+- The native churn harness verifies 120 real meeting generations with media and
+  SCTP messages, not just allocation/free calls.
+- The local browser harness checks actual decoded media, standard data channels,
+  live publisher direction/restart behavior, retained subscriptions and gallery
+  cleanup.

@@ -40,6 +40,7 @@ typedef struct {
                                  meeting_t.name) */
     meeting_send_fn send_fn;
     void *send_user;
+    bool sfu_mode;
 } meeting_manager_t;
 
 /* Initialize the meeting manager */

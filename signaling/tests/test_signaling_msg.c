@@ -166,6 +166,34 @@ TEST(json_roundtrip_all_types) {
     printf("    all message types round-trip OK\n");
 }
 
+TEST(json_sfu_mode_and_end_of_candidates) {
+    sig_msg_t message;
+    char *json = sig_msg_build_joined_mode("alice", NULL, 0, "sfu");
+    ASSERT(json != NULL);
+    ASSERT_EQ(sig_msg_parse(&message, json, strlen(json)), 0);
+    ASSERT_STR_EQ(message.mode, "sfu");
+    free(json);
+    json = sig_msg_build_candidate("sfu", "");
+    ASSERT(json != NULL);
+    ASSERT_EQ(sig_msg_parse(&message, json, strlen(json)), 0);
+    ASSERT_EQ(message.candidate[0], '\0');
+    ASSERT_STR_EQ(message.to, "sfu");
+    free(json);
+}
+
+TEST(json_rejects_truncated_negotiation) {
+    char *sdp = malloc(SIG_MAX_SDP + 1);
+    ASSERT(sdp != NULL);
+    memset(sdp, 'a', SIG_MAX_SDP);
+    sdp[SIG_MAX_SDP] = '\0';
+    char *json = sig_msg_build_offer("sfu", sdp);
+    ASSERT(json != NULL);
+    sig_msg_t message;
+    ASSERT_EQ(sig_msg_parse(&message, json, strlen(json)), -1);
+    free(json);
+    free(sdp);
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  Signaling Message Tests\n");
@@ -184,6 +212,8 @@ int main(void) {
     RUN_TEST(json_parse_error);
     RUN_TEST(json_parse_malformed);
     RUN_TEST(json_roundtrip_all_types);
+    RUN_TEST(json_sfu_mode_and_end_of_candidates);
+    RUN_TEST(json_rejects_truncated_negotiation);
 
     TEST_SUMMARY();
     return _test_fail_count > 0 ? 1 : 0;

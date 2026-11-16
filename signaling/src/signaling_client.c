@@ -17,6 +17,9 @@ struct signaling_client {
     rtc_thread_t thread;
     _Atomic bool running;
     _Atomic bool connected;
+    bool thread_started;
+    char incoming[2 * SIG_MAX_SDP + 1024];
+    size_t incoming_len;
 
     /* Outgoing message queue (thread-safe via mutex). FIFO of char* (owned). */
     rtc_mutex_t queue_mutex;
@@ -29,17 +32,18 @@ struct signaling_client {
     bool use_ssl;
 };
 
-static void enqueue_msg(signaling_client_t *sc, char *json) {
+static rtc_err_t enqueue_msg(signaling_client_t *sc, char *json) {
+    rtc_err_t result = RTC_OK;
     rtc_mutex_lock(&sc->queue_mutex);
-    if (rtc_vec_push(&sc->queue, &json) != RTC_OK) {
-        RTC_LOG_WARN("signaling-client: dropping outbound message (alloc failure)");
+    if (!sc->running || rtc_vec_len(&sc->queue) >= 128 ||
+        rtc_vec_push(&sc->queue, &json) != RTC_OK) {
+        result = RTC_ERR_NOMEM;
         free(json);
     }
-    rtc_mutex_unlock(&sc->queue_mutex);
     if (sc->lws_ctx)
         lws_cancel_service(sc->lws_ctx);
-    if (sc->wsi)
-        lws_callback_on_writable(sc->wsi);
+    rtc_mutex_unlock(&sc->queue_mutex);
+    return result;
 }
 
 static char *dequeue_msg(signaling_client_t *sc) {
@@ -60,6 +64,8 @@ static void dispatch_message(signaling_client_t *sc, const char *data, size_t le
 
     switch (msg.type) {
         case SIG_MSG_JOINED:
+            if (sc->cfg.on_mode)
+                sc->cfg.on_mode(msg.mode[0] ? msg.mode : "mesh", sc->cfg.user_data);
             if (sc->cfg.on_joined) {
                 const char *peers[SIG_MAX_PEERS];
                 for (int i = 0; i < msg.peer_count; i++)
@@ -117,7 +123,19 @@ static int callback_client(struct lws *wsi, enum lws_callback_reasons reason, vo
             break;
 
         case LWS_CALLBACK_CLIENT_RECEIVE:
-            dispatch_message(sc, (const char *)in, len);
+            if (len > sizeof(sc->incoming) - sc->incoming_len)
+                return -1;
+            memcpy(sc->incoming + sc->incoming_len, in, len);
+            sc->incoming_len += len;
+            if (lws_is_final_fragment(wsi) && lws_remaining_packet_payload(wsi) == 0) {
+                dispatch_message(sc, sc->incoming, sc->incoming_len);
+                sc->incoming_len = 0;
+            }
+            break;
+
+        case LWS_CALLBACK_EVENT_WAIT_CANCELLED:
+            if (sc->wsi)
+                lws_callback_on_writable(sc->wsi);
             break;
 
         case LWS_CALLBACK_CLIENT_WRITEABLE: {
@@ -127,8 +145,15 @@ static int callback_client(struct lws *wsi, enum lws_callback_reasons reason, vo
                 unsigned char *buf = malloc(LWS_PRE + json_len);
                 if (buf) {
                     memcpy(buf + LWS_PRE, json, json_len);
-                    lws_write(wsi, buf + LWS_PRE, json_len, LWS_WRITE_TEXT);
+                    int written = lws_write(wsi, buf + LWS_PRE, json_len, LWS_WRITE_TEXT);
                     free(buf);
+                    if (written != (int)json_len) {
+                        free(json);
+                        return -1;
+                    }
+                } else {
+                    free(json);
+                    return -1;
                 }
                 free(json);
             }
@@ -151,6 +176,8 @@ static int callback_client(struct lws *wsi, enum lws_callback_reasons reason, vo
         case LWS_CALLBACK_CLIENT_CLOSED:
             sc->connected = false;
             sc->wsi = NULL;
+            if (sc->cfg.on_disconnected)
+                sc->cfg.on_disconnected(sc->cfg.user_data);
             break;
 
         default:
@@ -266,7 +293,7 @@ signaling_client_t *signaling_create(const signaling_config_t *cfg) {
 }
 
 rtc_err_t signaling_connect(signaling_client_t *sc) {
-    if (!sc)
+    if (!sc || sc->thread_started || sc->lws_ctx)
         return RTC_ERR_INVALID;
 
     struct lws_context_creation_info info;
@@ -281,10 +308,12 @@ rtc_err_t signaling_connect(signaling_client_t *sc) {
 
     sc->running = true;
     if (rtc_thread_create(&sc->thread, client_thread_fn, sc) != 0) {
+        sc->running = false;
         lws_context_destroy(sc->lws_ctx);
         sc->lws_ctx = NULL;
         return RTC_ERR_GENERIC;
     }
+    sc->thread_started = true;
 
     return RTC_OK;
 }
@@ -295,8 +324,7 @@ rtc_err_t signaling_send_offer(signaling_client_t *sc, const char *to, const cha
     char *msg = sig_msg_build_offer(to, sdp);
     if (!msg)
         return RTC_ERR_NOMEM;
-    enqueue_msg(sc, msg);
-    return RTC_OK;
+    return enqueue_msg(sc, msg);
 }
 
 rtc_err_t signaling_send_answer(signaling_client_t *sc, const char *to, const char *sdp) {
@@ -305,8 +333,7 @@ rtc_err_t signaling_send_answer(signaling_client_t *sc, const char *to, const ch
     char *msg = sig_msg_build_answer(to, sdp);
     if (!msg)
         return RTC_ERR_NOMEM;
-    enqueue_msg(sc, msg);
-    return RTC_OK;
+    return enqueue_msg(sc, msg);
 }
 
 rtc_err_t signaling_send_candidate(signaling_client_t *sc, const char *to, const char *candidate) {
@@ -315,8 +342,7 @@ rtc_err_t signaling_send_candidate(signaling_client_t *sc, const char *to, const
     char *msg = sig_msg_build_candidate(to, candidate);
     if (!msg)
         return RTC_ERR_NOMEM;
-    enqueue_msg(sc, msg);
-    return RTC_OK;
+    return enqueue_msg(sc, msg);
 }
 
 rtc_err_t signaling_leave(signaling_client_t *sc) {
@@ -325,19 +351,28 @@ rtc_err_t signaling_leave(signaling_client_t *sc) {
     char *msg = sig_msg_build_leave();
     if (!msg)
         return RTC_ERR_NOMEM;
-    enqueue_msg(sc, msg);
-    return RTC_OK;
+    return enqueue_msg(sc, msg);
 }
 
-void signaling_destroy(signaling_client_t *sc) {
+void signaling_disconnect(signaling_client_t *sc) {
     if (!sc)
         return;
+    sc->connected = false;
     sc->running = false;
     if (sc->lws_ctx)
         lws_cancel_service(sc->lws_ctx);
-    rtc_thread_join(&sc->thread);
-    if (sc->lws_ctx)
-        lws_context_destroy(sc->lws_ctx);
+    if (sc->thread_started) {
+        rtc_thread_join(&sc->thread);
+        sc->thread_started = false;
+    }
+    rtc_mutex_lock(&sc->queue_mutex);
+    struct lws_context *context = sc->lws_ctx;
+    sc->lws_ctx = NULL;
+    rtc_mutex_unlock(&sc->queue_mutex);
+    if (context)
+        lws_context_destroy(context);
+    sc->connected = false;
+    sc->wsi = NULL;
 
     /* Free any remaining queued messages */
     rtc_mutex_lock(&sc->queue_mutex);
@@ -346,6 +381,15 @@ void signaling_destroy(signaling_client_t *sc) {
         char *m = *(char **)rtc_vec_at(&sc->queue, i);
         free(m);
     }
+    rtc_vec_clear(&sc->queue);
+    rtc_mutex_unlock(&sc->queue_mutex);
+}
+
+void signaling_destroy(signaling_client_t *sc) {
+    if (!sc)
+        return;
+    signaling_disconnect(sc);
+    rtc_mutex_lock(&sc->queue_mutex);
     rtc_vec_free(&sc->queue);
     rtc_mutex_unlock(&sc->queue_mutex);
     rtc_mutex_destroy(&sc->queue_mutex);
