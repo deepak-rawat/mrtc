@@ -34,8 +34,8 @@ jobs:
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
         run: |
-          brew install cmake ninja pkgconf openssl@3 libwebsockets cjson \
-            libvpx opus sdl3 usrsctp
+          brew install cmake ninja pkgconf openssl@4 libwebsockets cjson \
+            libvpx opus sdl3 libusrsctp
       - name: Install Windows dependencies
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
@@ -58,7 +58,7 @@ jobs:
         run: |
           args=()
           if [[ "$RUNNER_OS" == "macOS" ]]; then
-            args+=("-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)")
+            args+=("-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@4)")
             args+=("-DCMAKE_PREFIX_PATH=$(brew --prefix)")
           fi
           cmake -S . -B build/ci -G Ninja -DCMAKE_BUILD_TYPE=Debug "${args[@]}"
@@ -86,3 +86,37 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
         run: ctest --test-dir build/asan --output-on-failure --timeout 120
+
+  browser-interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: app/browser_interop/package-lock.json
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config libssl-dev \
+            libwebsockets-dev libcjson-dev libvpx-dev libopus-dev libusrsctp-dev
+      - name: Build local SFU fixtures
+        run: |
+          cmake -S . -B build/browser -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build/browser --parallel 4 --target signaling_server sfu_probe chat
+      - name: Install browser dependencies
+        working-directory: app/browser_interop
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Verify decoded browser media and standard data channels
+        working-directory: app/browser_interop
+        env:
+          MRTC_BUILD_DIR: ${{ github.workspace }}/build/browser
+        run: npm test
+      - name: Verify full-stack participant churn
+        working-directory: app/browser_interop
+        env:
+          MRTC_BUILD_DIR: ${{ github.workspace }}/build/browser
+        run: npm run test:churn
