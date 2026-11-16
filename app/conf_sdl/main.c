@@ -147,7 +147,7 @@ int main(int argc, char *argv[]) {
                 .on_remote_video = ui_sdl3_on_video_frame,
                 .on_remote_audio = ui_sdl3_on_audio_samples,
                 .on_peer_joined = NULL,
-                .on_peer_left = NULL,
+                .on_peer_left = ui_sdl3_on_peer_left,
                 .on_joined = NULL,
             },
         .user_data = &ui,

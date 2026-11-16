@@ -33,3 +33,11 @@ target_link_libraries(conf_sdl PRIVATE
     PkgConfig::SDL3
 )
 mrtc_set_warnings(conf_sdl)
+
+if(MRTC_BUILD_TESTS)
+    add_executable(test_ui_sdl3 test_ui_sdl3.c ui_sdl3.c)
+    target_include_directories(test_ui_sdl3 PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+    target_link_libraries(test_ui_sdl3 PRIVATE mrtc_media PkgConfig::SDL3)
+    mrtc_set_warnings(test_ui_sdl3)
+    add_test(NAME test_ui_sdl3 COMMAND test_ui_sdl3)
+endif()

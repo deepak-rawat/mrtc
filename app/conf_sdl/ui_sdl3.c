@@ -10,21 +10,28 @@
 int ui_sdl3_init(ui_sdl3_t *ui, int win_w, int win_h) {
     memset(ui, 0, sizeof(*ui));
     rtc_str_map_init_owned(&ui->tile_index);
+    if (rtc_mutex_init(&ui->tiles_mutex) != RTC_OK) {
+        RTC_LOG_ERR("UI tile mutex initialization failed");
+        return -1;
+    }
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_CAMERA)) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        ui_sdl3_close(ui);
         return -1;
     }
 
     ui->window = SDL_CreateWindow("mrtc Conference", win_w, win_h, SDL_WINDOW_RESIZABLE);
     if (!ui->window) {
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+        ui_sdl3_close(ui);
         return -1;
     }
 
     ui->renderer = SDL_CreateRenderer(ui->window, NULL);
     if (!ui->renderer) {
         fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
+        ui_sdl3_close(ui);
         return -1;
     }
 
@@ -163,18 +170,32 @@ static ui_tile_t *find_tile(ui_sdl3_t *ui, const char *peer_id, const char *labe
 static ui_tile_t *find_or_create_tile(ui_sdl3_t *ui, const char *peer_id, const char *label) {
     ui_tile_t *t = find_tile(ui, peer_id, label);
     if (t)
-        return t;
+        return t->remove_pending ? NULL : t;
 
-    if (ui->tile_count >= UI_MAX_TILES)
-        return NULL;
-    t = &ui->tiles[ui->tile_count++];
+    for (int i = 0; i < ui->tile_count; i++) {
+        if (!ui->tiles[i].active) {
+            t = &ui->tiles[i];
+            break;
+        }
+    }
+    if (!t) {
+        if (ui->tile_count >= UI_MAX_TILES) {
+            RTC_LOG_WARN("UI tile limit reached for peer %s", peer_id);
+            return NULL;
+        }
+        t = &ui->tiles[ui->tile_count++];
+    }
     memset(t, 0, sizeof(*t));
     snprintf(t->peer_id, sizeof(t->peer_id), "%s", peer_id);
     snprintf(t->label, sizeof(t->label), "%s", label);
     t->active = true;
     char key[128];
     ui_tile_key(key, sizeof(key), peer_id, label);
-    rtc_str_map_set(&ui->tile_index, key, t);
+    if (rtc_str_map_set(&ui->tile_index, key, t) != RTC_OK) {
+        t->active = false;
+        RTC_LOG_ERR("UI tile index allocation failed for peer %s", peer_id);
+        return NULL;
+    }
     return t;
 }
 
@@ -186,22 +207,27 @@ void ui_sdl3_on_video_frame(const char *peer_id, const char *label, const video_
     if (frame->width <= 0 || frame->height <= 0)
         return;
 
+    rtc_mutex_lock(&ui->tiles_mutex);
     ui_tile_t *tile = find_or_create_tile(ui, peer_id, label);
-    if (!tile)
+    if (!tile) {
+        rtc_mutex_unlock(&ui->tiles_mutex);
         return;
+    }
 
     int w = frame->width, h = frame->height;
     int y_size = w * h;
     int uv_size = (w / 2) * (h / 2);
     int total = y_size + 2 * uv_size;
 
-    /*
-     * Copy frame into a pending buffer (transport thread safe).
-     * The main thread will upload to SDL texture in ui_sdl3_render().
-     */
     if (!tile->pending_yuv || tile->pending_w != w || tile->pending_h != h) {
+        uint8_t *buf = (uint8_t *)malloc((size_t)total);
+        if (!buf) {
+            RTC_LOG_ERR("UI frame allocation failed for peer %s", peer_id);
+            rtc_mutex_unlock(&ui->tiles_mutex);
+            return;
+        }
         free(tile->pending_yuv);
-        tile->pending_yuv = (uint8_t *)malloc((size_t)total);
+        tile->pending_yuv = buf;
         tile->pending_w = w;
         tile->pending_h = h;
     }
@@ -220,6 +246,7 @@ void ui_sdl3_on_video_frame(const char *peer_id, const char *label, const video_
                    frame->planes[2] + y * frame->stride[2], (size_t)(w / 2));
         tile->pending_ready = true;
     }
+    rtc_mutex_unlock(&ui->tiles_mutex);
 }
 
 void ui_sdl3_on_audio_samples(const char *peer_id, const char *label, const audio_frame_t *audio,
@@ -237,11 +264,13 @@ void ui_sdl3_on_audio_samples(const char *peer_id, const char *label, const audi
     float level = sqrtf(sum / (float)n) / 32768.0f;
 
     /* Update tile's audio level */
+    rtc_mutex_lock(&ui->tiles_mutex);
     ui_tile_t *tile = find_tile(ui, peer_id, "camera");
     if (!tile)
         tile = find_tile(ui, peer_id, "screen");
-    if (tile)
+    if (tile && !tile->remove_pending)
         tile->audio_level = level;
+    rtc_mutex_unlock(&ui->tiles_mutex);
 
     /* Play through speaker */
     if (ui->speaker_stream)
@@ -253,9 +282,19 @@ void ui_sdl3_render(ui_sdl3_t *ui) {
     SDL_SetRenderDrawColor(ui->renderer, 30, 30, 30, 255);
     SDL_RenderClear(ui->renderer);
 
+    rtc_mutex_lock(&ui->tiles_mutex);
     /* Process pending frames from transport thread → SDL textures (main thread) */
     for (int i = 0; i < ui->tile_count; i++) {
         ui_tile_t *t = &ui->tiles[i];
+        if (t->remove_pending) {
+            char key[128];
+            ui_tile_key(key, sizeof(key), t->peer_id, t->label);
+            rtc_str_map_remove(&ui->tile_index, key);
+            if (t->texture)
+                SDL_DestroyTexture(t->texture);
+            free(t->pending_yuv);
+            memset(t, 0, sizeof(*t));
+        }
         if (!t->active || !t->pending_ready || !t->pending_yuv)
             continue;
 
@@ -326,6 +365,8 @@ void ui_sdl3_render(ui_sdl3_t *ui) {
         }
     }
 
+    rtc_mutex_unlock(&ui->tiles_mutex);
+
     /* Local preview (picture-in-picture, bottom-right) */
     if (ui->local_preview) {
         int win_w, win_h;
@@ -356,14 +397,16 @@ void ui_sdl3_render(ui_sdl3_t *ui) {
 }
 
 void ui_sdl3_remove_peer(ui_sdl3_t *ui, const char *peer_id) {
+    rtc_mutex_lock(&ui->tiles_mutex);
     for (int i = 0; i < ui->tile_count; i++) {
-        if (ui->tiles[i].active && strcmp(ui->tiles[i].peer_id, peer_id) == 0) {
-            if (ui->tiles[i].texture)
-                SDL_DestroyTexture(ui->tiles[i].texture);
-            ui->tiles[i].active = false;
-            ui->tiles[i].texture = NULL;
-        }
+        if (ui->tiles[i].active && strcmp(ui->tiles[i].peer_id, peer_id) == 0)
+            ui->tiles[i].remove_pending = true;
     }
+    rtc_mutex_unlock(&ui->tiles_mutex);
+}
+
+void ui_sdl3_on_peer_left(const char *peer_id, void *user) {
+    ui_sdl3_remove_peer((ui_sdl3_t *)user, peer_id);
 }
 
 void ui_sdl3_close(ui_sdl3_t *ui) {
@@ -381,6 +424,7 @@ void ui_sdl3_close(ui_sdl3_t *ui) {
         free(ui->tiles[i].pending_yuv);
     }
     rtc_str_map_free(&ui->tile_index);
+    rtc_mutex_destroy(&ui->tiles_mutex);
     if (ui->local_preview)
         SDL_DestroyTexture(ui->local_preview);
     if (ui->renderer)

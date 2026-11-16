@@ -19,11 +19,12 @@ typedef struct {
     int width, height;
     float audio_level; /* 0.0-1.0, updated from audio callback */
     bool active;
+    bool remove_pending;
 
-    /* Pending frame from transport thread (thread-safe handoff) */
-    uint8_t *pending_yuv; /* I420 buffer, atomically swapped */
+    /* Protected by tiles_mutex, including upload on the main thread. */
+    uint8_t *pending_yuv;
     int pending_w, pending_h;
-    volatile bool pending_ready;
+    bool pending_ready;
 } ui_tile_t;
 
 typedef struct {
@@ -42,6 +43,7 @@ typedef struct {
     ui_tile_t tiles[UI_MAX_TILES];
     int tile_count;
     rtc_str_map_t tile_index; /* "peer_id:label" → ui_tile_t * (owned keys) */
+    rtc_mutex_t tiles_mutex;
 
     /* Local preview */
     SDL_Texture *local_preview;
@@ -81,6 +83,7 @@ void ui_sdl3_render(ui_sdl3_t *ui);
 
 /* Remove a peer's tiles */
 void ui_sdl3_remove_peer(ui_sdl3_t *ui, const char *peer_id);
+void ui_sdl3_on_peer_left(const char *peer_id, void *user);
 
 /* Cleanup */
 void ui_sdl3_close(ui_sdl3_t *ui);

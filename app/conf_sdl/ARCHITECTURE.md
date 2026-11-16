@@ -29,6 +29,12 @@ SDL3-based capture and rendering:
 - **Local preview:** own camera feed in bottom-right corner
 - **Audio levels:** visual bars for mic input
 
+Remote frame buffers, tile lookup, and audio levels are protected by a mutex
+shared with the render thread. The `on_peer_left` conference callback marks
+all of that peer's tiles for removal; the next render removes their index
+entries, frees pending frames, and destroys textures on the SDL main thread.
+Inactive slots are reused when participants join later.
+
 ### Conference Manager (`conference.h/c`)
 
 Orchestrates signaling, peer connections, and media pipelines.
