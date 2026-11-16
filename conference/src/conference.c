@@ -62,6 +62,7 @@ struct conference {
     rtc_str_map_t peer_index; /* peer_id → conf_peer_t * (borrowed keys) */
 
     media_pipeline_t *pipeline; /* shared: encode+fanout (send) + decode (recv) */
+    rtc_mutex_t send_mutex;
 };
 
 static conf_source_t *find_source(conference_t *c, const char *label) {
@@ -97,16 +98,18 @@ static void destroy_peer(conference_t *c, conf_peer_t *p) {
         return;
     rtc_str_map_remove(&c->peer_index, p->peer_id);
     /* Unregister from pipeline fan-out */
+    rtc_mutex_lock(&c->send_mutex);
+    p->active = false;
     if (c->pipeline)
         media_pipeline_remove_send_peer(c->pipeline, p->peer_id);
-    /* Remove recv streams */
-    if (c->pipeline)
-        media_pipeline_remove_peer(c->pipeline, p->peer_id);
+    rtc_mutex_unlock(&c->send_mutex);
     if (p->pc) {
         rtc_peer_connection_close(p->pc);
         rtc_peer_connection_destroy(p->pc);
     }
-    p->active = false;
+    /* Closing the connection first drains in-flight receive callbacks. */
+    if (c->pipeline)
+        media_pipeline_remove_peer(c->pipeline, p->peer_id);
 }
 
 static void pipeline_on_video(const char *peer_id, const char *label, const video_frame_t *frame,
@@ -127,9 +130,15 @@ static void on_conn_state(rtc_connection_state_t state, void *user) {
     conf_peer_t *p = (conf_peer_t *)user;
     if (state == RTC_CONNECTION_CONNECTED) {
         /* Register this peer's senders for pipeline fan-out */
+        rtc_mutex_lock(&p->conf->send_mutex);
+        if (!p->active) {
+            rtc_mutex_unlock(&p->conf->send_mutex);
+            return;
+        }
         if (p->conf->pipeline)
             media_pipeline_add_send_peer(p->conf->pipeline, p->peer_id, p->video_sender,
                                          p->audio_sender);
+        rtc_mutex_unlock(&p->conf->send_mutex);
         if (p->conf->cfg.callbacks.on_connected)
             p->conf->cfg.callbacks.on_connected(p->peer_id, p->conf->cfg.user_data);
     }
@@ -388,6 +397,11 @@ conference_t *conference_create(const conference_config_t *cfg) {
     conference_t *c = (conference_t *)calloc(1, sizeof(*c));
     if (!c)
         return NULL;
+    if (rtc_mutex_init(&c->send_mutex) != RTC_OK) {
+        RTC_LOG_ERR("Conference send mutex initialization failed");
+        free(c);
+        return NULL;
+    }
     c->cfg = *cfg;
     rtc_str_map_init(&c->source_index);
     rtc_str_map_init(&c->peer_index);
@@ -542,7 +556,10 @@ int conference_push_video(conference_t *c, const char *label, const video_frame_
         return RTC_ERR_INVALID;
     if (!c->pipeline)
         return RTC_ERR_INVALID;
-    return media_pipeline_push_video(c->pipeline, s->stream, frame);
+    rtc_mutex_lock(&c->send_mutex);
+    int rc = media_pipeline_push_video(c->pipeline, s->stream, frame);
+    rtc_mutex_unlock(&c->send_mutex);
+    return rc;
 }
 
 int conference_push_audio(conference_t *c, const char *label, const audio_frame_t *audio) {
@@ -551,7 +568,10 @@ int conference_push_audio(conference_t *c, const char *label, const audio_frame_
         return RTC_ERR_INVALID;
     if (!c->pipeline)
         return RTC_ERR_INVALID;
-    return media_pipeline_push_audio(c->pipeline, s->stream, audio);
+    rtc_mutex_lock(&c->send_mutex);
+    int rc = media_pipeline_push_audio(c->pipeline, s->stream, audio);
+    rtc_mutex_unlock(&c->send_mutex);
+    return rc;
 }
 
 void conference_mute_source(conference_t *c, const char *label, bool mute) {
@@ -614,5 +634,6 @@ void conference_destroy(conference_t *c) {
         media_pipeline_destroy(c->pipeline);
     rtc_str_map_free(&c->source_index);
     rtc_str_map_free(&c->peer_index);
+    rtc_mutex_destroy(&c->send_mutex);
     free(c);
 }

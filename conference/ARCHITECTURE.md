@@ -135,9 +135,13 @@ Signaling → sig_on_offer("charlie", sdp)
 Signaling → sig_on_peer_left("charlie")
   → destroy_peer:
     pipeline.remove_send_peer("charlie")  — stop sending
-    pipeline.remove_peer("charlie")       — remove decoders
     rtc_peer_connection_close/destroy     — stop network
+    pipeline.remove_peer("charlie")       — remove decoders after callbacks drain
+  → app.on_peer_left("charlie")            — remove the participant's gallery tiles
 ```
+
+Send-peer registration/removal and frame encoding/fan-out share a mutex so
+leaving cannot free a sender still in use by the application thread.
 
 ## Usage Example
 

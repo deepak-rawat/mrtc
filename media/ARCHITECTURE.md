@@ -151,6 +151,10 @@ Pipeline manages:
 - `media_pipeline_add_send_peer(peer_id, video_sender, audio_sender)` — register peer
 - `media_pipeline_remove_send_peer(peer_id)` — unregister peer
 
+Registering a new send peer requests a keyframe from each video encoder so
+the peer does not start with undecodable interframes. All fragments of a video
+frame share one RTP timestamp; the sender advances it after the marker packet.
+
 **Recv API:**
 - `media_pipeline_add_recv_stream(peer_id, label, ssrc, is_video, codec)` → `media_recv_stream_t*`
 - `media_pipeline_recv_rtp(pipeline, stream, data, len, seq, ts, marker)` — direct dispatch
@@ -213,6 +217,7 @@ Generate synthetic media when no capture device is available. Part of the public
 | `test_audio_codec` | Opus encode/decode, sample rate handling |
 | `test_jitter_buffer` | Packet reordering, delay compensation, drop logic |
 | `test_media_pipeline` | Stream handles, send fan-out, recv routing, peer add/remove |
+| `test_video_loopback` | Fragmented VP8 over SRTP, timestamp consistency, decoding, new-peer keyframes |
 | `test_video_stats` | Send/recv statistics tracking, PSNR calculation |
 | `test_video_dump` | IVF file creation, frame writing, round-trip |
 | `test_video_debug` | Frame checksum generation, determinism |

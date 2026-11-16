@@ -167,6 +167,10 @@ int media_pipeline_add_send_peer(media_pipeline_t *p, const char *peer_id,
     sp->audio_sender = audio_sender;
     sp->active = true;
 
+    for (int i = 0; i < p->send_count; i++)
+        if (p->send[i].active && p->send[i].is_video)
+            video_encoder_request_keyframe(&p->send[i].video_enc);
+
     RTC_LOG_INFO("Pipeline: added send peer \"%s\"", peer_id);
     return RTC_OK;
 }
@@ -362,8 +366,9 @@ static int push_video_to_stream(media_pipeline_t *p, media_send_stream_t *s,
         if (!sp->active || !sp->video_sender)
             continue;
         for (int i = 0; i < payload_count; i++) {
+            /* The sender advances its timestamp AFTER sending this packet. */
             rtc_rtp_sender_send(sp->video_sender, payloads[i].data, payloads[i].len,
-                                i == 0 ? samples : 0, payloads[i].marker);
+                                payloads[i].marker ? samples : 0, payloads[i].marker);
             s->send_stats.packets_sent++;
             s->send_stats.bytes_sent += payloads[i].len;
         }

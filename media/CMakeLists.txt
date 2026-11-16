@@ -29,7 +29,7 @@ mrtc_set_warnings(mrtc_media)
 
 # Tests (need access to internal headers for component-level testing)
 if(MRTC_BUILD_TESTS)
-    set(MEDIA_TEST_NAMES test_vp8 test_video_codec test_audio_codec test_jitter_buffer test_media_pipeline test_video_stats test_video_dump test_video_debug)
+    set(MEDIA_TEST_NAMES test_vp8 test_video_codec test_audio_codec test_jitter_buffer test_media_pipeline test_video_stats test_video_dump test_video_debug test_video_loopback)
     foreach(test_name ${MEDIA_TEST_NAMES})
         add_executable(${test_name} tests/${test_name}.c)
         target_include_directories(${test_name} PRIVATE
