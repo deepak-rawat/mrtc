@@ -53,7 +53,7 @@ TEST(vp8_packetize_large) {
 
     /* First payload: S-bit set, marker=false */
     ASSERT((payloads[0].data[0] & 0x10) != 0); /* S-bit */
-    ASSERT((payloads[0].data[0] & 0x20) != 0); /* N-bit (non-keyframe) */
+    ASSERT((payloads[0].data[0] & 0x20) == 0); /* Interframes may be references. */
     ASSERT(!payloads[0].marker);
 
     /* Middle payloads: S-bit clear, marker=false */
@@ -73,7 +73,7 @@ TEST(vp8_depacketize_single) {
 
     /* Build a VP8 payload manually: [S-bit descriptor][data] */
     uint8_t vp8_data[50];
-    memset(vp8_data, 0xCD, sizeof(vp8_data));
+    memset(vp8_data, 0xCC, sizeof(vp8_data));
 
     uint8_t payload[VP8_PD_SIZE + sizeof(vp8_data)];
     payload[0] = 0x10; /* S-bit set, keyframe (N=0) */
@@ -83,7 +83,7 @@ TEST(vp8_depacketize_single) {
     size_t frame_len = 0;
     bool is_keyframe = false;
 
-    int rc = rtc_vp8_depacketize(&depac, payload, sizeof(payload), 3000, true, &frame_out,
+    int rc = rtc_vp8_depacketize(&depac, payload, sizeof(payload), 1, 3000, true, &frame_out,
                                  &frame_len, &is_keyframe);
     ASSERT_EQ(rc, RTC_OK); /* Complete frame */
     ASSERT_EQ(frame_len, sizeof(vp8_data));
@@ -113,7 +113,7 @@ TEST(vp8_roundtrip_small) {
     size_t frame_len = 0;
     bool is_keyframe = false;
 
-    rc = rtc_vp8_depacketize(&depac, payloads[0].data, payloads[0].len, 3000, payloads[0].marker,
+    rc = rtc_vp8_depacketize(&depac, payloads[0].data, payloads[0].len, 1, 3000, payloads[0].marker,
                              &frame_out, &frame_len, &is_keyframe);
     ASSERT_EQ(rc, RTC_OK);
     ASSERT_EQ(frame_len, sizeof(frame));
@@ -130,6 +130,7 @@ TEST(vp8_roundtrip_large) {
     ASSERT(frame != NULL);
     for (size_t i = 0; i < frame_size; i++)
         frame[i] = (uint8_t)(i & 0xFF);
+    frame[0] = 1;
 
     /* Packetize */
     rtc_vp8_payload_t payloads[16];
@@ -148,8 +149,8 @@ TEST(vp8_roundtrip_large) {
 
     uint32_t ts = 6000; /* arbitrary shared timestamp */
     for (int i = 0; i < count; i++) {
-        rc = rtc_vp8_depacketize(&depac, payloads[i].data, payloads[i].len, ts, payloads[i].marker,
-                                 &frame_out, &frame_len, &is_keyframe);
+        rc = rtc_vp8_depacketize(&depac, payloads[i].data, payloads[i].len, (uint16_t)i, ts,
+                                 payloads[i].marker, &frame_out, &frame_len, &is_keyframe);
 
         if (i < count - 1) {
             ASSERT(rc != RTC_OK); /* not last, need more */
@@ -159,7 +160,7 @@ TEST(vp8_roundtrip_large) {
     }
 
     ASSERT_EQ(frame_len, frame_size);
-    ASSERT(!is_keyframe); /* N-bit was set */
+    ASSERT(!is_keyframe); /* VP8 P bit is set. */
     ASSERT_MEM_EQ(frame_out, frame, frame_size);
 
     printf("    large frame round-trip: %zu bytes, %d payloads\n", frame_len, count);
@@ -179,7 +180,7 @@ TEST(vp8_depacketize_no_start) {
     size_t frame_len = 0;
     bool is_keyframe = false;
 
-    int rc = rtc_vp8_depacketize(&depac, payload, sizeof(payload), 3000, true, &frame_out,
+    int rc = rtc_vp8_depacketize(&depac, payload, sizeof(payload), 1, 3000, true, &frame_out,
                                  &frame_len, &is_keyframe);
     ASSERT(rc != RTC_OK); /* Should not produce a frame */
 
@@ -212,8 +213,9 @@ TEST(vp8_multiple_frames) {
             size_t frame_len = 0;
             bool is_kf = false;
 
-            rc = rtc_vp8_depacketize(&depac, payloads[i].data, payloads[i].len, ts,
-                                     payloads[i].marker, &frame_out, &frame_len, &is_kf);
+            rc = rtc_vp8_depacketize(&depac, payloads[i].data, payloads[i].len,
+                                     (uint16_t)(f * 4 + i), ts, payloads[i].marker, &frame_out,
+                                     &frame_len, &is_kf);
             if (rc == RTC_OK) {
                 ASSERT_EQ(frame_len, sizeof(frame));
                 uint8_t expected_byte = (uint8_t)(f + 1);
@@ -249,7 +251,7 @@ TEST(vp8_depacketize_long_picid) {
     size_t frame_len = 0;
     bool is_keyframe = false;
 
-    int rc = rtc_vp8_depacketize(&depac, payload, sizeof(payload), 4000, true, &frame_out,
+    int rc = rtc_vp8_depacketize(&depac, payload, sizeof(payload), 1, 4000, true, &frame_out,
                                  &frame_len, &is_keyframe);
     ASSERT_EQ(rc, RTC_OK);
     ASSERT_EQ(frame_len, sizeof(vp8_data));
@@ -259,6 +261,60 @@ TEST(vp8_depacketize_long_picid) {
      * descriptor would be 3 bytes (not 4), so a depacketizer that does NOT
      * honor the M-bit would have included payload[3]=0x34 as VP8 data. */
     printf("    depacketized 2-byte PictureID (M-bit): %zu bytes\n", frame_len);
+}
+
+TEST(vp8_reorder_loss_wrap_and_metadata) {
+    uint8_t frame[VP8_MAX_FRAG_SIZE * 2 + 20];
+    memset(frame, 0x54, sizeof(frame));
+    rtc_vp8_payload_t payloads[4];
+    int count;
+    ASSERT_EQ(rtc_vp8_packetize(frame, sizeof(frame), true, payloads, 4, &count), RTC_OK);
+    ASSERT_EQ(count, 3);
+    rtc_vp8_depacketizer_t d;
+    rtc_vp8_depacketizer_init(&d);
+    const uint8_t *out;
+    size_t len;
+    bool key;
+    /* Last arrives before first; duplicate and wrap must not corrupt output. */
+    ASSERT(rtc_vp8_depacketize(&d, payloads[2].data, payloads[2].len, 0, 100, true, &out, &len,
+                               &key) != RTC_OK);
+    ASSERT(rtc_vp8_depacketize(&d, payloads[0].data, payloads[0].len, 65534, 100, false, &out, &len,
+                               &key) != RTC_OK);
+    ASSERT(rtc_vp8_depacketize(&d, payloads[0].data, payloads[0].len, 65534, 100, false, &out, &len,
+                               &key) != RTC_OK);
+    ASSERT_EQ(rtc_vp8_depacketize(&d, payloads[1].data, payloads[1].len, 65535, 100, false, &out,
+                                  &len, &key),
+              RTC_OK);
+    ASSERT_EQ(len, sizeof(frame));
+    ASSERT_MEM_EQ(out, frame, len);
+    ASSERT(key);
+    /* Neither a missing middle nor a missing end can produce a frame. */
+    ASSERT(rtc_vp8_depacketize(&d, payloads[0].data, payloads[0].len, 1, 200, false, &out, &len,
+                               &key) != RTC_OK);
+    ASSERT(rtc_vp8_depacketize(&d, payloads[2].data, payloads[2].len, 3, 200, true, &out, &len,
+                               &key) != RTC_OK);
+    ASSERT_EQ(len, 0);
+    ASSERT(rtc_vp8_depacketize(&d, payloads[0].data, payloads[0].len, 4, 300, false, &out, &len,
+                               &key) != RTC_OK);
+    ASSERT_EQ(d.dropped_frames, 1);
+    /* S on partition one is not a new frame start. */
+    uint8_t partition[] = {0x11, 0};
+    ASSERT(rtc_vp8_depacketize(&d, partition, sizeof(partition), 6, 400, true, &out, &len, &key) !=
+           RTC_OK);
+    ASSERT_EQ(d.dropped_frames, 2);
+    /* Keyframe P=0 even with N=1; interframe P=1 even with N=0. */
+    uint8_t key_payload[] = {0x30, 0};
+    ASSERT_EQ(rtc_vp8_depacketize(&d, key_payload, sizeof(key_payload), 7, 500, true, &out, &len,
+                                  &key),
+              RTC_OK);
+    ASSERT(key);
+    uint8_t inter_payload[] = {0x10, 1};
+    ASSERT_EQ(rtc_vp8_depacketize(&d, inter_payload, sizeof(inter_payload), 8, 600, true, &out,
+                                  &len, &key),
+              RTC_OK);
+    ASSERT(!key);
+    ASSERT(rtc_vp8_depacketize(&d, key_payload, sizeof(key_payload), 7, 500, true, &out, &len,
+                               &key) != RTC_OK);
 }
 
 int main(void) {
@@ -276,6 +332,7 @@ int main(void) {
     RUN_TEST(vp8_depacketize_no_start);
     RUN_TEST(vp8_multiple_frames);
     RUN_TEST(vp8_depacketize_long_picid);
+    RUN_TEST(vp8_reorder_loss_wrap_and_metadata);
 
     TEST_SUMMARY();
 }

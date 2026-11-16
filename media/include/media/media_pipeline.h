@@ -62,6 +62,11 @@ void media_pipeline_destroy(media_pipeline_t *p);
 int media_pipeline_add_send_peer(media_pipeline_t *p, const char *peer_id,
                                  rtc_rtp_sender_t *video_sender, rtc_rtp_sender_t *audio_sender);
 void media_pipeline_remove_send_peer(media_pipeline_t *p, const char *peer_id);
+/* Thread-safe BWE update; zero removes the cap. Other pipeline calls require
+ * external serialization. Backpressure rejects whole frames, never queues
+ * unbounded media; push returns an error if any peer send/admission fails.
+ * With a cap, synchronous fragment pacing waits at most 50 ms per peer/frame. */
+int media_pipeline_set_peer_bitrate(media_pipeline_t *p, const char *peer_id, uint32_t bitrate_bps);
 
 /* Send streams (local tracks). */
 
@@ -101,7 +106,8 @@ media_recv_stream_t *media_pipeline_add_recv_stream(media_pipeline_t *p, const c
                                                     const char *label, uint32_t ssrc, bool is_video,
                                                     const char *codec);
 
-/* Remove a recv stream (peer left or track removed) */
+/* Remove a recv stream (peer left or track removed). Stop delivery first;
+ * the handle is invalidated and its slot may be reused by the next add. */
 void media_pipeline_remove_recv_stream(media_pipeline_t *p, uint32_t ssrc);
 
 /* Remove all recv streams for a peer */
@@ -114,6 +120,10 @@ void media_pipeline_remove_peer(media_pipeline_t *p, const char *peer_id);
  */
 int media_pipeline_recv_rtp(media_pipeline_t *p, media_recv_stream_t *stream, const uint8_t *data,
                             int len, uint16_t seq, uint32_t timestamp, bool marker);
+/* Callback must use a rate-limited feedback path, e.g.
+ * rtc_rtp_receiver_request_keyframe(). Called on receive/decode thread. */
+int media_pipeline_set_recv_feedback(media_pipeline_t *p, media_recv_stream_t *stream,
+                                     void (*request_keyframe)(void *), void *user);
 
 /* Debug configuration (all features off by default). */
 

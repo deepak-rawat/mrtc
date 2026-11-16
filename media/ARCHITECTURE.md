@@ -2,7 +2,8 @@
 
 Codec support (VP8, Opus), media pipeline for multi-stream encode/decode, jitter buffer, and adaptive rate control.
 
-Depends on `libmrtc` (rtc core) — the pipeline calls `rtc_rtp_sender_send()` directly for send fan-out.
+Depends on `libmrtc_client`, which exposes the sender facade over the RTC core.
+The pipeline calls `rtc_rtp_sender_send()` directly for send fan-out.
 
 ## Architecture
 
@@ -98,10 +99,11 @@ Same vtable pattern as video codecs.
 
 ### VP8 Packetizer (`vp8_packetizer.h/c`)
 
-RFC 7741 RTP payload format for VP8. Two APIs:
+RFC 7741 RTP payload format for VP8:
 
-- `rtc_vp8_fragment()` — stateless, produces VP8 descriptor+data payloads (no RTP header). Used by media_pipeline for fan-out to multiple peer senders.
-- `rtc_vp8_packetize()` — stateful, produces complete RTP packets with headers. Used for direct send paths.
+- `rtc_vp8_packetize()` produces VP8 descriptor + data payloads, without RTP
+  headers. Each peer's sender adds its own RTP header and SRTP protection.
+- `rtc_vp8_depacketize()` assembles payloads into a VP8 bitstream for decoding.
 
 VP8 payload descriptor (1 byte):
 ```
@@ -111,7 +113,14 @@ VP8 payload descriptor (1 byte):
   PID: Partition index
 ```
 
-Depacketizer (`rtc_vp8_depacketize()`) reassembles fragments into complete VP8 frames using marker bit for frame boundary detection.
+The depacketizer uses the marker bit for frame completion and sequence-aware
+receive processing rejects incomplete frames. VP8 frame starts require S=1
+and partition ID 0. Keyframes are identified from the bitstream P bit; the
+descriptor's N bit means non-reference, not non-keyframe.
+
+Receive buffering is bounded to one in-flight frame. Reordering within the
+supported window is handled, while incomplete frames displaced by a new frame
+are discarded rather than passed to the decoder.
 
 ### Jitter Buffer (`jitter_buffer.h/c`)
 
@@ -122,7 +131,7 @@ Packet reordering and adaptive delay compensation for playout.
 - Drops packets exceeding max delay threshold
 - Default: 80ms target delay, 500ms max delay
 
-### Rate Control (`rate_control.h/c`)
+### Rate Control
 
 AIMD (Additive Increase, Multiplicative Decrease) bitrate adaptation.
 
@@ -130,7 +139,8 @@ AIMD (Additive Increase, Multiplicative Decrease) bitrate adaptation.
 - Increases bitrate when loss is low, decreases on high loss
 - Requests keyframes from encoder when needed
 
-Note: Will be replaced by rtc-layer bandwidth estimation (GCC) in future.
+The AIMD controller and GCC bandwidth estimator live in the RTC layer, not
+in a separate media rate-control module.
 
 ### Media Pipeline (`media_pipeline.h/c`)
 
@@ -154,6 +164,16 @@ Pipeline manages:
 Registering a new send peer requests a keyframe from each video encoder so
 the peer does not start with undecodable interframes. All fragments of a video
 frame share one RTP timestamp; the sender advances it after the marker packet.
+Timestamp increments use the stream's configured frame rate.
+
+Inactive send-peer and receive-stream slots are reused. Removing a peer
+invalidates its receive handles; callers must discard those handles before
+registering replacement streams.
+
+`media_pipeline_set_peer_bitrate()` supplies a peer's transport bandwidth
+estimate. The shared encoder follows the weakest active peer. Send pacing is
+synchronous and bounded to 50 ms per peer per frame; it is not an unbounded
+packet queue or a separate pacing thread.
 
 **Recv API:**
 - `media_pipeline_add_recv_stream(peer_id, label, ssrc, is_video, codec)` → `media_recv_stream_t*`
@@ -162,6 +182,12 @@ frame share one RTP timestamp; the sender advances it after the marker packet.
 - `media_pipeline_remove_peer(peer_id)` — remove all recv streams for a peer
 
 **Renderer callbacks:** `on_video_frame(peer_id, label, frame)`, `on_audio_samples(peer_id, label, audio)`
+
+`media_pipeline_set_recv_feedback()` registers the stream's keyframe recovery
+callback. The codec-agnostic RTC receive stream originates bounded NACK feedback
+and rate-limited keyframe requests; the media pipeline handles decoder recovery.
+The pending NACK set is limited to 64 packets. Neither FEC nor arbitrary
+cross-frame packet buffering is provided.
 
 **Debug/Stats API:**
 - `media_pipeline_set_debug(pipeline, cfg)` — configure IVF dumps, frame checksum, PSNR
@@ -205,7 +231,7 @@ Generate synthetic media when no capture device is available. Part of the public
 
 - **libvpx** — VP8 encode/decode
 - **libopus** — Opus encode/decode
-- **libmrtc** — rtc core (rtc_rtp_sender_send, rtc_types, rtc_rtp)
+- **libmrtc_client** — sender facade and transitively the RTC runtime
 - **libmrtc_common** — types, logging
 
 ## Tests

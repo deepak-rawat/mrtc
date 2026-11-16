@@ -31,7 +31,8 @@
 #define VP8_MAX_FRAG_SIZE (VP8_MTU_SIZE - VP8_PD_SIZE)
 
 /* Max reassembly buffer (640x480 keyframe can be ~100KB+) */
-#define VP8_MAX_FRAME_SIZE (256 * 1024)
+#define VP8_MAX_FRAME_SIZE    (256 * 1024)
+#define VP8_MAX_FRAME_PACKETS 256
 
 /* Max VP8 payload size (descriptor + VP8 data) */
 #define VP8_MAX_PAYLOAD (VP8_PD_SIZE + VP8_MAX_FRAG_SIZE)
@@ -50,6 +51,18 @@ typedef struct {
     uint32_t frame_timestamp; /* RTP timestamp of current frame */
     bool collecting;          /* true if we're mid-frame */
     bool got_start;           /* true if we've seen the S-bit payload */
+    bool got_end;
+    bool initialized;
+    bool completed;
+    uint16_t start_seq, end_seq;
+    uint16_t last_end_seq;
+    uint32_t dropped_frames;
+    struct {
+        uint16_t seq;
+        uint16_t len;
+        bool used;
+        uint8_t data[VP8_MAX_FRAG_SIZE];
+    } packets[VP8_MAX_FRAME_PACKETS];
 } rtc_vp8_depacketizer_t;
 
 /*
@@ -59,7 +72,8 @@ typedef struct {
  *
  * Input:
  *   frame, frame_len: raw VP8 bitstream for one frame
- *   is_keyframe: true if this is an IDR/keyframe
+ *   is_keyframe: retained for callers; N is conservatively zero because
+ *     keyframe/interframe status does not identify non-reference frames.
  *
  * Output:
  *   payloads: array of payload outputs (caller allocates)
@@ -79,7 +93,8 @@ int rtc_vp8_depacketizer_init(rtc_vp8_depacketizer_t *d);
  *
  * Input:
  *   payload, len: VP8 RTP payload (descriptor + VP8 data)
- *   timestamp: RTP timestamp (used for frame boundary detection)
+ *   seq: RTP sequence number (duplicates/reordering/wrap handled within frame)
+ *   timestamp: RTP timestamp (only one bounded frame is retained)
  *   marker: RTP marker bit (true = last payload of frame)
  *
  * Output:
@@ -92,7 +107,7 @@ int rtc_vp8_depacketizer_init(rtc_vp8_depacketizer_t *d);
  *   RTC_ERR_GENERIC when more payloads are needed (not an error)
  *   Other negative values on actual error
  */
-int rtc_vp8_depacketize(rtc_vp8_depacketizer_t *d, const uint8_t *payload, size_t len,
+int rtc_vp8_depacketize(rtc_vp8_depacketizer_t *d, const uint8_t *payload, size_t len, uint16_t seq,
                         uint32_t timestamp, bool marker, const uint8_t **frame_out,
                         size_t *frame_len, bool *is_keyframe);
 

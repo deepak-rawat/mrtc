@@ -7,6 +7,7 @@
 #include "media/media_pipeline.h"
 #include "media/video_codec.h"
 #include "media/audio_codec.h"
+#include "vp8_packetizer.h"
 #include <rtc/rtc_client.h>
 #include <string.h>
 #include <stdlib.h>
@@ -129,11 +130,13 @@ TEST(pipeline_video_send) {
     ASSERT_EQ(video_frame_alloc(&frame, 160, 120), RTC_OK);
     fill_test_frame(&frame, 42);
 
-    /* Push succeeds even though sender_send returns error (no SRTP).
-       The pipeline encodes and fragments successfully. */
     int rc = media_pipeline_push_video(p, cam, &frame);
-    /* rc may be RTC_OK (pipeline doesn't propagate per-peer send errors) */
-    (void)rc;
+    ASSERT(rc != RTC_OK);
+    ASSERT_EQ(media_pipeline_get_send_stats(p, 0)->packets_sent, 0);
+    ASSERT_EQ(media_pipeline_set_peer_bitrate(p, "test", 1000), RTC_OK);
+    ASSERT(media_pipeline_push_video(p, cam, &frame) != RTC_OK);
+    ASSERT_EQ(media_pipeline_push_video(p, cam, &frame), RTC_ERR_NOMEM);
+    ASSERT(media_pipeline_get_send_stats(p, 0)->frames_dropped > 0);
     printf("    push_video with real sender: encode+fragment OK\n");
 
     video_frame_free(&frame);
@@ -317,6 +320,102 @@ TEST(pipeline_remove_send_peer) {
     rtc_peer_connection_destroy(pc_b);
 }
 
+TEST(pipeline_slot_churn_and_capacity) {
+    media_pipeline_t *p = media_pipeline_create(&(media_pipeline_config_t){0});
+    ASSERT(p != NULL);
+    for (int i = 0; i < 128; i++) {
+        ASSERT_EQ(media_pipeline_add_send_peer(p, "peer", NULL, NULL), RTC_OK);
+        ASSERT_EQ(media_pipeline_set_peer_bitrate(p, "peer", 250000), RTC_OK);
+        media_pipeline_remove_send_peer(p, "peer");
+        ASSERT(media_pipeline_set_peer_bitrate(p, "peer", 250000) != RTC_OK);
+        media_recv_stream_t *stream =
+            media_pipeline_add_recv_stream(p, "peer", "video", (uint32_t)i + 1, true, "VP8");
+        ASSERT(stream != NULL);
+        media_pipeline_remove_recv_stream(p, (uint32_t)i + 1);
+        ASSERT(media_pipeline_recv_rtp(p, stream, (const uint8_t *)"x", 1, 0, 0, true) != RTC_OK);
+    }
+    for (int i = 0; i < MP_MAX_RECV_STREAMS; i++)
+        ASSERT(media_pipeline_add_recv_stream(p, "peer", "video", (uint32_t)i + 1, true, "VP8") !=
+               NULL);
+    ASSERT(media_pipeline_add_recv_stream(p, "peer", "video", 1, true, "VP8") != NULL);
+    ASSERT(media_pipeline_add_recv_stream(p, "peer", "video", 999, true, "VP8") == NULL);
+    for (int i = 0; i < MP_MAX_SEND_PEERS; i++) {
+        char peer[20];
+        snprintf(peer, sizeof(peer), "peer%d", i);
+        ASSERT_EQ(media_pipeline_add_send_peer(p, peer, NULL, NULL), RTC_OK);
+    }
+    ASSERT_EQ(media_pipeline_add_send_peer(p, "peer0", NULL, NULL), RTC_OK);
+    ASSERT(media_pipeline_add_send_peer(p, "overflow", NULL, NULL) != RTC_OK);
+    media_pipeline_destroy(p);
+}
+
+static void recovery_requested(void *user) {
+    (*(int *)user)++;
+}
+
+TEST(pipeline_loss_reorder_keyframe_recovery) {
+    media_renderer_t renderer = {.on_video_frame = mock_on_video};
+    media_pipeline_t *p = media_pipeline_create(&(media_pipeline_config_t){.renderer = &renderer});
+    ASSERT(p != NULL);
+    media_recv_stream_t *stream =
+        media_pipeline_add_recv_stream(p, "peer", "video", 1, true, "VP8");
+    ASSERT(stream != NULL);
+    int requests = 0;
+    ASSERT_EQ(media_pipeline_set_recv_feedback(p, stream, recovery_requested, &requests), RTC_OK);
+    video_encoder_t encoder;
+    ASSERT_EQ(video_encoder_create(&encoder, "VP8", 320, 240, 1000, 30), RTC_OK);
+    video_frame_t input;
+    ASSERT_EQ(video_frame_alloc(&input, 320, 240), RTC_OK);
+    uint32_t random = 1;
+    for (int y = 0; y < input.height; y++)
+        for (int x = 0; x < input.width; x++) {
+            random = random * 1664525u + 1013904223u;
+            input.planes[0][y * input.stride[0] + x] = (uint8_t)(random >> 24);
+        }
+    memset(input.planes[1], 128, 160 * 120);
+    memset(input.planes[2], 128, 160 * 120);
+    int before = g_video_frame_count;
+    uint16_t seq = 65534;
+    for (int frame = 0; frame < 6; frame++) {
+        /* Lose the middle of frame 1 and the end of frame 4. Frame 2
+         * must be suppressed until frame 3 repairs decoder references. */
+        if (frame != 2)
+            ASSERT_EQ(video_encoder_request_keyframe(&encoder), RTC_OK);
+        video_packet_t packet;
+        ASSERT_EQ(video_encode(&encoder, &input, &packet), RTC_OK);
+        if (frame == 2)
+            ASSERT(!packet.is_keyframe);
+        rtc_vp8_payload_t payloads[64];
+        int count;
+        ASSERT_EQ(rtc_vp8_packetize(packet.data, (size_t)packet.len, packet.is_keyframe, payloads,
+                                    64, &count),
+                  RTC_OK);
+        if (frame == 1 || frame == 4)
+            ASSERT(count >= 3);
+        if (frame == 0) {
+            ASSERT_EQ(media_pipeline_recv_rtp(p, stream, payloads[count - 1].data,
+                                              (int)payloads[count - 1].len,
+                                              (uint16_t)(seq + count - 1), 3000, true),
+                      RTC_OK);
+        }
+        for (int i = 0; i < count; i++) {
+            if ((frame == 1 && i == 1) || (frame == 4 && i == count - 1))
+                continue;
+            ASSERT_EQ(media_pipeline_recv_rtp(p, stream, payloads[i].data, (int)payloads[i].len,
+                                              (uint16_t)(seq + i), (uint32_t)(frame + 1) * 3000,
+                                              payloads[i].marker),
+                      RTC_OK);
+        }
+        seq = (uint16_t)(seq + count);
+    }
+    ASSERT_EQ(g_video_frame_count - before, 3);
+    ASSERT(requests > 0);
+    ASSERT_EQ(media_pipeline_get_recv_stats(p, 0)->frames_decode_failed, 0);
+    video_frame_free(&input);
+    video_encoder_destroy(&encoder);
+    media_pipeline_destroy(p);
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  Media Pipeline Tests\n");
@@ -334,6 +433,8 @@ int main(void) {
     RUN_TEST(pipeline_remove_peer);
     RUN_TEST(pipeline_send_peer_fanout);
     RUN_TEST(pipeline_remove_send_peer);
+    RUN_TEST(pipeline_slot_churn_and_capacity);
+    RUN_TEST(pipeline_loss_reorder_keyframe_recovery);
 
     rtc_client_cleanup();
     TEST_SUMMARY();

@@ -12,7 +12,7 @@ packets mean and which consumers should receive them.
 ## Layer Role
 
 ```
-Application / future SFU server
+Application / signaling_server SFU
         |
         v
 mrtc_routing        router, producer, consumer, fan-out primitives
@@ -45,7 +45,7 @@ UDP -> mrtc transport -> SRTP unprotect -> RTP parse
 
 ## Ownership
 
-- Core transport owns network, ICE, DTLS, SRTP, and the SSRC -> consumer
+- Core transport owns network, ICE, DTLS, SRTP, and the SSRC -> stream
   RTP demux. The router binds each producer's SSRC into its transport via
   `rtc_transport_bind_rtp()`; there is no router-side SSRC map, mutex, or
   global transport registry anymore — the worker loop serializes bind /
@@ -54,11 +54,29 @@ UDP -> mrtc transport -> SRTP unprotect -> RTP parse
 - Producers own consumer lists.
 - Consumers own outbound RTP parameters and forwarding counters.
 
+## Forwarding and Recovery
+
+Consumers use a stable sequence offset and their own SSRC. Source sequence
+gaps, reordering and wraparound remain visible downstream; compacting every
+received packet into a contiguous sequence would hide an incomplete VP8 frame.
+Discontinuous source restarts require a new producer/consumer.
+
+The consumer caches successful **protected wire packets** in 128 sequence
+positions. NACK retransmission uses `rtc_transport_retransmit_rtp()` rather
+than re-encrypting old packets across rollover counters. Retransmission attempts
+are bounded; missing history can request an upstream keyframe through the
+producer. PLI/FIR similarly target the originating producer, not an unrelated
+consumer SSRC.
+
+There is no unbounded per-subscriber queue. Closed/not-ready transports and
+failed sends produce checked failures and drop counters. This is a simple
+forwarder, not a simulcast selector or a full subscriber bitrate allocator.
+
 ## Tests
 
 | Test | Coverage |
 |------|----------|
 | `test_routing_transport` | Routing transport fixture over ICE-lite, DTLS/SRTP, RTP/RTCP/data hooks |
 | `test_routing_ice` | Full ICE transport connecting to ICE-lite transport |
-| `test_routing_media` | Producer/consumer media graph forwarding |
+| `test_routing_media` | Forwarding, real routed VP8 loss/NACK recovery, sequence wrap, bounded history and failed-send accounting |
 | `test_routing_timers` | Runtime timer behavior through routing-created transports |

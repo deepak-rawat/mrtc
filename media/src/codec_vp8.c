@@ -101,7 +101,7 @@ static int vp8_enc_encode(void *ctx, const video_frame_t *frame, video_packet_t 
             out->data = e->out_buf;
             out->len = (int)pkt->data.frame.sz;
             out->is_keyframe = (pkt->data.frame.flags & VPX_FRAME_IS_KEY) != 0;
-            out->timestamp = (uint32_t)(e->pts * (90000 / e->fps));
+            out->timestamp = (uint32_t)((uint64_t)e->pts * 90000 / (unsigned)e->fps);
             break;
         }
     }
@@ -124,8 +124,7 @@ static int vp8_enc_set_bitrate(void *ctx, int bitrate_kbps) {
     cfg.g_error_resilient = VPX_ERROR_RESILIENT_DEFAULT;
     cfg.g_lag_in_frames = 0;
 
-    vpx_codec_enc_config_set(&e->codec, &cfg);
-    return RTC_OK;
+    return vpx_codec_enc_config_set(&e->codec, &cfg) == VPX_CODEC_OK ? RTC_OK : RTC_ERR_GENERIC;
 }
 
 static int vp8_enc_request_keyframe(void *ctx) {

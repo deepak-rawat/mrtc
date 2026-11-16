@@ -14,6 +14,7 @@ int rtc_vp8_packetize(const uint8_t *frame, size_t frame_len, bool is_keyframe,
         return RTC_ERR_INVALID;
 
     *payload_count = 0;
+    (void)is_keyframe;
     size_t offset = 0;
     bool first = true;
 
@@ -34,8 +35,6 @@ int rtc_vp8_packetize(const uint8_t *frame, size_t frame_len, bool is_keyframe,
         uint8_t pd = 0;
         if (first)
             pd |= 0x10; /* S bit: start of partition */
-        if (!is_keyframe)
-            pd |= 0x20; /* N bit: non-reference frame */
         p->data[0] = pd;
 
         /* VP8 frame data */
@@ -58,19 +57,21 @@ int rtc_vp8_depacketizer_init(rtc_vp8_depacketizer_t *d) {
     return RTC_OK;
 }
 
-int rtc_vp8_depacketize(rtc_vp8_depacketizer_t *d, const uint8_t *payload, size_t len,
+int rtc_vp8_depacketize(rtc_vp8_depacketizer_t *d, const uint8_t *payload, size_t len, uint16_t seq,
                         uint32_t timestamp, bool marker, const uint8_t **frame_out,
                         size_t *frame_len, bool *is_keyframe) {
     if (!d || !payload || !frame_out || !frame_len || !is_keyframe)
         return RTC_ERR_INVALID;
+    *frame_out = NULL;
+    *frame_len = 0;
+    *is_keyframe = false;
 
     if (len < VP8_PD_SIZE)
         return RTC_ERR_INVALID;
 
     /* Parse VP8 payload descriptor */
     uint8_t pd = payload[0];
-    bool s_bit = (pd & 0x10) != 0; /* Start of partition */
-    bool n_bit = (pd & 0x20) != 0; /* Non-reference frame */
+    bool s_bit = (pd & 0x10) != 0 && (pd & 0x0f) == 0;
     bool x_bit = (pd & 0x80) != 0; /* Extension present */
 
     /* Skip extension bytes if present (simplified: just skip 1 byte) */
@@ -99,49 +100,80 @@ int rtc_vp8_depacketize(rtc_vp8_depacketizer_t *d, const uint8_t *payload, size_
     const uint8_t *vp8_data = payload + pd_len;
     size_t vp8_len = len - pd_len;
 
-    /* New frame detection: S-bit or different timestamp */
-    if (s_bit || (!d->collecting) || (d->collecting && timestamp != d->frame_timestamp)) {
-        if (s_bit) {
-            /* Start a new frame */
-            d->frame_len = 0;
-            d->frame_timestamp = timestamp;
-            d->collecting = true;
-            d->got_start = true;
-        } else if (d->collecting && timestamp != d->frame_timestamp) {
-            /* Timestamp changed without seeing S-bit — dropped packet, reset */
-            d->collecting = false;
-            d->frame_len = 0;
-            return RTC_ERR_GENERIC; /* need more data */
-        } else {
-            /* Not collecting and no S-bit — ignore orphan fragment */
-            return RTC_ERR_GENERIC;
-        }
-    }
-
-    if (!d->collecting || !d->got_start)
+    if (vp8_len == 0 || vp8_len > VP8_MAX_FRAG_SIZE)
+        return RTC_ERR_INVALID;
+    if (d->initialized && timestamp != d->frame_timestamp &&
+        (int32_t)(timestamp - d->frame_timestamp) < 0)
         return RTC_ERR_GENERIC;
-
-    /* Append VP8 data to frame buffer */
-    if (d->frame_len + vp8_len > VP8_MAX_FRAME_SIZE) {
-        d->collecting = false;
+    if (!d->initialized || timestamp != d->frame_timestamp) {
+        if (d->collecting)
+            d->dropped_frames++;
+        memset(d->packets, 0, sizeof(d->packets));
+        d->initialized = true;
+        d->collecting = true;
+        d->got_start = d->got_end = false;
+        d->frame_timestamp = timestamp;
         d->frame_len = 0;
-        return RTC_ERR_NOMEM;
     }
-    memcpy(d->frame_buf + d->frame_len, vp8_data, vp8_len);
-    d->frame_len += vp8_len;
-
-    /* Marker bit indicates last packet of frame */
+    if (!d->collecting)
+        return RTC_ERR_GENERIC;
+    size_t slot = seq % VP8_MAX_FRAME_PACKETS;
+    if (d->packets[slot].used) {
+        if (d->packets[slot].seq == seq && d->packets[slot].len == vp8_len &&
+            memcmp(d->packets[slot].data, vp8_data, vp8_len) == 0)
+            return RTC_ERR_GENERIC;
+        goto corrupt;
+    }
+    if (s_bit) {
+        if (d->got_start && d->start_seq != seq)
+            goto corrupt;
+        d->got_start = true;
+        d->start_seq = seq;
+    }
     if (marker) {
+        if (d->got_end && d->end_seq != seq)
+            goto corrupt;
+        d->got_end = true;
+        d->end_seq = seq;
+    }
+    d->packets[slot].used = true;
+    d->packets[slot].seq = seq;
+    d->packets[slot].len = (uint16_t)vp8_len;
+    memcpy(d->packets[slot].data, vp8_data, vp8_len);
+    if (d->got_start && d->got_end) {
+        unsigned count = (uint16_t)(d->end_seq - d->start_seq) + 1u;
+        if (count > VP8_MAX_FRAME_PACKETS)
+            goto corrupt;
+        size_t total = 0;
+        for (unsigned i = 0; i < count; i++) {
+            uint16_t expected = (uint16_t)(d->start_seq + i);
+            size_t index = expected % VP8_MAX_FRAME_PACKETS;
+            if (!d->packets[index].used || d->packets[index].seq != expected)
+                return RTC_ERR_GENERIC;
+            if (total + d->packets[index].len > sizeof(d->frame_buf))
+                goto corrupt;
+            total += d->packets[index].len;
+        }
+        size_t offset = 0;
+        for (unsigned i = 0; i < count; i++) {
+            size_t index = (uint16_t)(d->start_seq + i) % VP8_MAX_FRAME_PACKETS;
+            memcpy(d->frame_buf + offset, d->packets[index].data, d->packets[index].len);
+            offset += d->packets[index].len;
+        }
+        d->frame_len = total;
+        if (d->completed && d->start_seq != (uint16_t)(d->last_end_seq + 1))
+            d->dropped_frames++;
+        d->completed = true;
+        d->last_end_seq = d->end_seq;
         *frame_out = d->frame_buf;
-        *frame_len = d->frame_len;
-        /* VP8 keyframe: first byte of VP8 data has bit 0 = 0 for keyframe */
-        *is_keyframe = !n_bit;
-
+        *frame_len = total;
+        *is_keyframe = (d->frame_buf[0] & 1) == 0;
         d->collecting = false;
-        d->frame_len = 0;
         return RTC_OK;
     }
-
-    /* More fragments needed */
     return RTC_ERR_GENERIC;
+corrupt:
+    d->dropped_frames++;
+    d->collecting = false;
+    return RTC_ERR_INVALID;
 }

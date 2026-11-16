@@ -1,8 +1,9 @@
 /*
- * SFU inbound media producer skeleton.
+ * SFU inbound media producer.
  */
 #include "rtc/rtc_producer.h"
 #include "rtc/rtc_vec.h"
+#include "rtc/rtc_rtcp.h"
 
 #include "rtc_consumer_internal.h"
 #include "rtc_producer_internal.h"
@@ -26,6 +27,8 @@ struct rtc_producer {
     _Atomic bool closed;
     _Atomic uint64_t packets_received;
     _Atomic uint64_t bytes_received;
+    _Atomic uint64_t last_keyframe_request_ms;
+    rtc_rtcp_stats_t rtcp;
 };
 
 static _Atomic uint32_t g_next_producer_id = 1;
@@ -60,6 +63,7 @@ rtc_producer_t *rtc_transport_produce(rtc_transport_t *transport,
     producer->rtp = opts->rtp;
     copy_label(producer->label, sizeof(producer->label), opts->label);
     producer->app_data = opts->app_data;
+    rtc_rtcp_stats_init(&producer->rtcp, id);
     if (rtc_vec_init(&producer->consumers, sizeof(rtc_consumer_t *)) != RTC_OK ||
         rtc_mutex_init(&producer->consumers_mutex) != RTC_OK) {
         rtc_vec_free(&producer->consumers);
@@ -120,6 +124,26 @@ int rtc_producer_get_stats(rtc_producer_t *producer, rtc_producer_stats_t *out) 
     return RTC_OK;
 }
 
+int rtc_producer_request_keyframe(rtc_producer_t *producer) {
+    if (!producer || atomic_load_explicit(&producer->closed, memory_order_acquire))
+        return RTC_ERR_INVALID;
+    if (producer->kind != RTC_MEDIA_KIND_VIDEO)
+        return RTC_OK;
+    uint64_t now = rtc_time_ms();
+    uint64_t previous =
+        atomic_load_explicit(&producer->last_keyframe_request_ms, memory_order_relaxed);
+    if (now - previous < 250)
+        return RTC_OK;
+    if (!atomic_compare_exchange_strong(&producer->last_keyframe_request_ms, &previous, now))
+        return RTC_OK;
+    uint8_t packet[64];
+    size_t len = 0;
+    int rc = rtc_rtcp_build_pli(packet, sizeof(packet), &len, 1, producer->rtp.ssrc);
+    if (rc != RTC_OK)
+        return rc;
+    return rtc_transport_send_rtcp(producer->transport, packet, &len, sizeof(packet));
+}
+
 uint32_t rtc_producer_ssrc(const rtc_producer_t *producer) {
     return producer ? producer->rtp.ssrc : 0;
 }
@@ -153,11 +177,28 @@ void rtc_producer_remove_consumer(rtc_producer_t *producer, rtc_consumer_t *cons
 }
 
 void rtc_producer_on_rtp(rtc_producer_t *producer, const rtc_rtp_packet_t *pkt) {
-    if (!producer || !pkt || atomic_load_explicit(&producer->closed, memory_order_acquire))
+    if (!producer || !pkt || pkt->header.ssrc != producer->rtp.ssrc ||
+        atomic_load_explicit(&producer->closed, memory_order_acquire))
         return;
     atomic_fetch_add_explicit(&producer->packets_received, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&producer->bytes_received, (uint64_t)pkt->payload_len,
                               memory_order_relaxed);
+    uint32_t clock_rate = producer->rtp.codec_count ? producer->rtp.codecs[0].clock_rate : 90000;
+    rtc_rtcp_stats_on_rtp_recv(&producer->rtcp, pkt->header.seq, pkt->header.timestamp,
+                               pkt->header.ssrc, clock_rate);
+    uint64_t now = rtc_time_ms();
+    if (now - producer->rtcp.last_report_time >= 1000) {
+        rtc_rtcp_packet_t report;
+        if (rtc_rtcp_build_rr(&report, &producer->rtcp) == RTC_OK) {
+            uint8_t wire[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
+            size_t len = report.buf_len;
+            memcpy(wire, report.buf, len);
+            int rc = rtc_transport_send_rtcp(producer->transport, wire, &len, sizeof(wire));
+            if (rc != RTC_OK)
+                RTC_LOG_WARN("Producer receiver report failed: %d", rc);
+        }
+        producer->rtcp.last_report_time = now;
+    }
 
     rtc_mutex_lock(&producer->consumers_mutex);
     size_t count = rtc_vec_len(&producer->consumers);
