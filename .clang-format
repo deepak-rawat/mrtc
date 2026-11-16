@@ -21,7 +21,7 @@ ColumnLimit: 100
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
 AllowShortCaseLabelsOnASingleLine: false
-AllowShortBlocksInline: Empty
+AllowShortBlocksOnASingleLine: Empty
 AllowShortFunctionsOnASingleLine: Empty
 AllowShortEnumsOnASingleLine: true
 
