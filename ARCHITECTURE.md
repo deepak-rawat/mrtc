@@ -6,7 +6,7 @@
 ┌──────────────────────────────────────┐
 │          Applications                │  app/ (chat, conf_sdl)
 ├──────────────────────────────────────┤
-│          Conference                  │  conference/ (peer lifecycle, fan-out)
+│          Conference                  │  conference/ (SFU sessions, legacy fan-out)
 ├──────────────────────────────────────┤
 │          Media Pipeline              │  media/ (codecs, jitter, packetizer)
 ├──────────────────────────────────────┤
@@ -41,7 +41,25 @@ channels, and stats on top. The optional `libmrtc_routing` layers server-side
 router / producer / consumer primitives on top. Client and routing are siblings:
 neither depends on the other.
 
-All public API functions use the `rtc_` prefix.
+Runtime and client APIs use the `rtc_` prefix. Higher-level libraries retain
+their component prefixes (`media_`, `conference_`, and `signaling_`).
+
+## Default Conference Topology
+
+The signaling server defaults to SFU operation. Each participant publishes to
+one server connection and receives subscription connections for other
+publishers. The server forwards encoded media through the existing
+`rtc_router` / `rtc_producer` / `rtc_consumer` graph; it does not decode and
+re-encode every stream.
+
+Publishing sessions share a server listener. Subscription sessions have
+separate listeners so independent DTLS associations cannot collide when a
+native client shares its local UDP socket. This deliberate simplicity costs
+additional UDP ports. `--mesh` selects the original direct-peer mode.
+
+Both modes use trickle ICE and standard usrsctp SCTP/DCEP data channels.
+Conference users bind signaling before connecting, and disconnect/drain its
+callbacks before destroying peers.
 
 ## Project Structure
 
@@ -68,8 +86,8 @@ All public API functions use the `rtc_` prefix.
 ├── media/                  # Media library (libmrtc_media)
 │   ├── include/media/      #   media_pipeline.h, video_codec.h, audio_codec.h, video_stats.h
 │   ├── src/                #   vp8_packetizer.h (private), jitter_buffer, video_debug/dump
-│   └── tests/              #   8 test executables
-├── signaling/              # Signaling (libmrtc_signaling + server)
+│   └── tests/              #   codec, packetizer, pipeline, and media loopback tests
+├── signaling/              # Signaling library + default SFU server
 │   ├── include/signaling/  #   signaling_client.h
 │   ├── src/                #   signaling_msg.h (private)
 │   ├── server/             #   signaling_server executable
@@ -119,15 +137,16 @@ app/conf_sdl ──→ mrtc_conference ──→ mrtc_client ──→ mrtc ─�
 
 mrtc_routing ──→ mrtc ──→ mrtc_common
 
-app/chat ──→ mrtc_client ──→ mrtc ──→ mrtc_common
-       └──→ mrtc_signaling
+app/chat ──→ mrtc_conference (same orchestration, no local media sources)
 ```
 
 External dependencies:
 - `mrtc_common` → OpenSSL (crypto)
 - `mrtc` → OpenSSL (SSL + crypto)
 - `mrtc_client` → (transitively via `mrtc`)
+- `mrtc_client` → usrsctp (standard SCTP/DCEP data channels)
 - `mrtc_routing` → (transitively via `mrtc`)
 - `mrtc_media` → libvpx, libopus
 - `mrtc_signaling` → libwebsockets, cJSON
+- `signaling_server` → mrtc_client + mrtc_routing for SFU operation
 - `app/conf_sdl` → SDL3

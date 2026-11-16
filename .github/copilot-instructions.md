@@ -17,6 +17,7 @@ and library dependency graph. Per-component design docs:
 - `common/ARCHITECTURE.md` — platform abstractions
 - `rtc/ARCHITECTURE.md` — core RTC runtime + protocol primitives
 - `client/ARCHITECTURE.md` — WebRTC-style peer connection facade
+- `routing/ARCHITECTURE.md` — server-side media routing and feedback
 - `media/ARCHITECTURE.md` — codecs, jitter buffer, media pipeline
 - `signaling/ARCHITECTURE.md` — WebSocket signaling client + server
 - `conference/ARCHITECTURE.md` — multi-peer conferencing
@@ -32,7 +33,9 @@ code already expresses; the code should speak for itself. Prefer clear names and
 straightforward control flow over explanatory comments.
 
 ### API Patterns
-- All public functions use `rtc_` prefix followed by module name (e.g., `rtc_stun_`, `rtc_ice_`, `rtc_peer_`)
+- Runtime and client public functions use `rtc_` followed by the module name
+  (e.g., `rtc_stun_`, `rtc_ice_`, `rtc_peer_`). Higher-level libraries retain
+  their existing `media_`, `conference_`, and `signaling_` prefixes.
 - Functions return `rtc_err_t` (0 = `RTC_OK`, negative = error)
 - Lifecycle depends on ownership:
   - Heap-allocated runtime/public objects (worker, listener, router, transport,
@@ -146,13 +149,15 @@ Common warnings and the preferred fix:
   can leave it unset, and if so fix that path.
 
 After fixing warnings, re-run the build and confirm the output is clean
-before reporting the task done. A clean build is:
+before reporting the task done:
 
 ```bash
-cd build && ninja 2>&1 | grep -E "warning|error" || echo "Clean build"
+cmake --build build --parallel 4
 ```
 
-If that prints `Clean build`, the tree is warning-free.
+Check both the exit status and the unfiltered compiler output. Do not pipe
+the build through a filter that can hide failures or print a success-shaped
+fallback.
 
 ## Formatting
 

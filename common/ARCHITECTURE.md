@@ -7,7 +7,9 @@ data structures shared by all components.
 
 ### Error Handling
 - `rtc_err_t` — standard return type (0 = `RTC_OK`, negative = error)
-- Error codes: `RTC_ERR_GENERIC`, `RTC_ERR_SOCKET`, `RTC_ERR_STUN`, `RTC_ERR_ICE`, `RTC_ERR_DTLS`, `RTC_ERR_SRTP`, `RTC_ERR_TIMEOUT`, `RTC_ERR_INVALID`, `RTC_ERR_SDP`
+- Error codes: `RTC_OK`, `RTC_ERR_GENERIC`, `RTC_ERR_NOMEM`, `RTC_ERR_SOCKET`,
+  `RTC_ERR_TIMEOUT`, `RTC_ERR_INVALID`, `RTC_ERR_SSL`, `RTC_ERR_SRTP`,
+  `RTC_ERR_ICE`, `RTC_ERR_SDP`
 
 ### Socket Abstraction
 - `rtc_socket_t` — `SOCKET` on Windows, `int` on Unix
@@ -38,7 +40,8 @@ RTC_LOG_DBG("Debug: %s", msg);
 
 Configuration:
 - `rtc_set_log_level(level)` — set minimum log level
-- `rtc_set_log_file(path)` — redirect output to file (in addition to stderr)
+- `rtc_set_log_file(path, log_to_stderr)` — redirect output to a file, optionally
+  retaining stderr output
 - `rtc_log_close()` — close log file
 
 ## Data Structures

@@ -1,182 +1,89 @@
 # mrtc — Roadmap
 
-Priority order is based on security risk, interop impact, and user-visible
-product gaps, with RFC_COMPLIANCE.md as the source of truth.
+The immediate goal is a small, testable educational RTC stack, not a complete
+browser implementation or a production conferencing service. Prefer existing
+runtime primitives and bounded state over a parallel networking framework.
 
-## P0: Security and Correctness (do first)
+See [RFC_COMPLIANCE.md](RFC_COMPLIANCE.md) for actual protocol capabilities and
+limits. Do not treat old percentage estimates or already-fixed bugs as new work.
 
-### 1) SRTP replay protection (RFC 3711 §3.3.2)
+## Reliability and Interoperability Baseline
 
-- Why: marked as critical in RFC compliance; currently allows packet replay.
-- Deliverables:
-    - Add replay window tracking per SRTP context.
-    - Reject duplicate/too-old packet indices before decrypt/auth.
-    - Unit tests for in-order, out-of-order, and replayed packets.
-- Primary files:
-    - rtc/src/rtc_srtp.c
-    - rtc/src/rtc_srtp.h
+The P0–P2 work is organized into independently testable areas:
 
-### 2) Fix known protocol bugs from RFC compliance report
+| Area | Acceptance criteria |
+|---|---|
+| Participant lifecycle | Reuse conference/media slots; safely stop callbacks before freeing state; remove departed tiles; pass 120 full-stack reconnect generations |
+| Video integrity | Shared per-frame RTP timestamps; configured frame rates; correct VP8 metadata; reject incomplete frames; bounded reorder/NACK/PLI recovery |
+| Trickle ICE | Forward local candidates and end-of-candidates, apply delayed remote candidates, and surface signaling errors |
+| Transport identity | Pin remote SDP fingerprints, reject mismatches, enforce DTLS 1.2 minimum, and preserve datagram boundaries |
+| ICE lifecycle | Full/lite roles, role conflicts, nomination, consent expiration and active restart with media/data continuity |
+| TURN | Runtime relay-only connectivity with authenticated UDP allocation, permissions/channels, refresh and cleanup against coturn |
+| Live negotiation | Track/direction updates, explicit glare rejection/rollback and safe rejection of unsupported codec changes |
+| Standard data channels | usrsctp SCTP/DCEP, partial reliability, fragmentation, backpressure and stream reset, verified with a browser |
+| Congestion and forwarding | Apply transport estimates to encoders; bounded send/retransmission state; explicit failure/drop reporting |
+| Default SFU | Publisher/subscriber orchestration over existing routing primitives, feedback routing, reconnect and deterministic teardown; explicit `--mesh` fallback |
+| Validation | Native tests, actual browser decoding/message exchange, full-stack churn, cross-platform CI and sanitizer coverage |
 
-- Why: correctness and interop hazards already identified.
-- Deliverables:
-    - STUN IPv6 mapped-address length validation fix.
-    - TURN auth key truncation fix (binary key length-safe HMAC input).
-    - Keep nonce rotation behavior explicit (client/server policy).
-- Primary files:
-    - rtc/src/rtc_stun.c
-    - rtc/src/rtc_turn.c
-    - signaling/server/* (nonce policy)
+The native suite and focused ASan suites exercise these areas. The browser
+harness checks real decoded audio/video and standard data-channel messages,
+not merely ICE connection state or incoming packet counts. Remote CI results
+remain distinct from tests run locally.
 
-## P1: Mid-call negotiation and ICE lifecycle
+## Next Priorities After This Baseline
 
-### 3) Mid-call renegotiation (RFC 3264 / RFC 8829 gaps)
+### 1. Keep the validation matrix green
 
-- Why: major product gap (audio-only call cannot be upgraded to audio+video
-    without recreating peer connection).
-- Current limitation: set_local_desc/set_remote_desc reject updates after
-    connect_started.
-- Deliverables:
-    - Allow repeated offer/answer cycles after connected state.
-    - Add negotiation-in-progress state and glare handling policy.
-    - Apply transceiver deltas safely (add/remove/dir changes) post-connect.
-    - Attach newly added senders to live transport during renegotiation.
-    - Add rollback or defined error policy for failed renegotiation.
-- Primary files:
-    - client/src/rtc_peer.c
-    - client/include/rtc/rtc_peer.h
-    - rtc/src/rtc_sdp.c
+- Run the native suite on Linux, macOS and Windows.
+- Run AddressSanitizer/leak detection on Linux.
+- Keep browser media/data and 120-generation churn tests in CI.
+- Reproduce failures using bounded, isolated loopback fixtures.
+- Extend a focused regression before changing a protocol invariant.
 
-### 4) Post-connect ICE restart (RFC 8445 §12, RFC 8829)
+### 2. Improve RTCP interoperability
 
-- Why: required for network changes, NAT rebinding recovery, and long-lived
-    calls.
-- Current limitation: restart_ice is only allowed pre-connect.
-- Deliverables:
-    - Support ICE restart on active connection (new ufrag/pwd in re-offer).
-    - Re-run ICE checks without full peer recreation.
-    - Preserve media/data continuity across successful restart.
-    - Add restart failure handling and fallback behavior.
-- Primary files:
-    - client/src/rtc_peer.c
-    - rtc/src/rtc_ice.c
-    - rtc/src/rtc_sdp.c
+- Emit compound SR/RR + SDES CNAME where required.
+- Add randomized bandwidth-adaptive intervals and timer reconsideration.
+- Add BYE/source lifecycle coverage and explicit reduced-size RTCP negotiation.
 
-## P2: ICE and TURN interop completeness
+These are more useful next protocol improvements than reimplementing already
+working NACK, PLI, RTP extensions or replay windows.
 
-### 5) SFU server completion and hardening
+### 3. Expand hostile-network and deployment coverage
 
-- Why: SFU is not complete yet and is required for reliable multi-party scale.
-- Deliverables:
-    - Complete server application flow on top of router/producer/consumer APIs.
-    - Robust publisher/subscriber lifecycle (join, leave, reconnect, teardown).
-    - Per-subscriber forwarding policy (keyframe request path, backpressure handling).
-    - Multi-party stability targets (long-run calls, churn, packet loss).
-    - Operational controls (basic metrics, health logs, failure surfacing).
-- Primary files:
-    - conference/src/*
-    - routing/src/*
-    - app/conf_sdl/*
-    - signaling/server/*
+- TURN-over-TCP/TLS and STUN long-term authentication v2.
+- IPv6/dual-stack relay and candidate selection.
+- Network changes and NAT behavior against independent implementations.
+- Fault injection across both SFU media legs, keeping queues and caches bounded.
 
-### 6) TURN relay candidates wired into ICE (RFC 5766/8656 + RFC 8445)
+### 4. Improve SFU efficiency without changing the model
 
-- Why: relay reachability is incomplete until TURN candidates participate in
-    normal checklist/nomination.
-- Deliverables:
-    - Feed TURN allocated relayed candidates into ICE gather output.
-    - Permission/channel/allocation refresh timers.
-    - Validate against coturn in end-to-end tests.
-- Primary files:
-    - rtc/src/rtc_turn.c
-    - rtc/src/rtc_ice.c
+- Per-subscriber bitrate allocation and packet scheduling informed by congestion.
+- Better operational counters and explicit resource limits.
+- Evaluate a single bidirectional bundled connection per participant before
+  adding simulcast or more complex transport sharing.
 
-### 7) Full local trickle ICE and end-of-candidates (RFC 8863/RFC 8839)
+The current separate subscription connections deliberately favor straightforward
+ownership. Their UDP-port cost is documented; separate DTLS associations must
+not be multiplexed over an indistinguishable five-tuple.
 
-- Why: reduces setup latency and improves browser interop.
-- Deliverables:
-    - Emit local candidates incrementally.
-    - Emit explicit end-of-candidates signaling.
-    - Update checklist as new remote candidates arrive.
-- Primary files:
-    - rtc/src/rtc_ice.c
-    - client/src/rtc_peer.c
-    - rtc/src/rtc_sdp.c
+### 5. Add media features only after reliability measurements justify them
 
-### 8) ICE roles, nomination, and checklist behavior (RFC 8445)
+- Opus FEC/DTX negotiation and multi-party audio quality measurements.
+- FEC/RTX and optional additional video codecs.
+- Simulcast/temporal layers if a concrete bandwidth use case requires them.
 
-- Why: current behavior is simplified and always controlling.
-- Deliverables:
-    - Implement controlled role and role-conflict resolution.
-    - Implement regular nomination behavior.
-    - Improve pair ordering and triggered checks.
-- Primary files:
-    - rtc/src/rtc_ice.c
-    - client/src/rtc_peer.c
+### 6. Treat production readiness as a separate project
 
-## P3: SDP and RTCP interop improvements
+Authentication/authorization, secure signaling deployment, quotas, abuse
+prevention, key lifecycle, operational tooling and independent security review
+are not implied by an educational SFU or passing local interoperability tests.
 
-### 9) SDP feedback and options completeness
+## Development Rules
 
-- Why: improves interop consistency with peers that rely on explicit SDP
-    capability lines.
-- Deliverables:
-    - Add a=rtcp-fb generation/parsing coverage where missing.
-    - Add a=end-of-candidates support in SDP/event model.
-    - Track RFC 8866 migration notes in docs.
-- Primary files:
-    - rtc/src/rtc_sdp.c
-    - client/src/rtc_peer.c
-
-### 10) RTCP compound packet and interval compliance (RFC 3550)
-
-- Why: current fixed periodic behavior is simplified.
-- Deliverables:
-    - Compound RTCP support (SR/RR + SDES where required).
-    - Adaptive RTCP interval/timer behavior.
-    - Compliance tests for mixed media sessions.
-- Primary files:
-    - rtc/src/rtc_rtcp.c
-    - client/src/rtc_peer.c
-
-## P4: Media resilience and feature expansion
-
-### 11) UlpFEC (RFC 5109)
-
-- Why: packet-loss robustness for video on poor links.
-- Deliverables:
-    - FEC encode/decode path.
-    - SDP negotiation lines for ulpfec.
-    - Interop validation in loopback and lossy-network tests.
-- Primary files:
-    - media/src/*
-    - rtc/src/rtc_sdp.c
-
-### 12) VP8 payload extension completeness (RFC 7741)
-
-- Why: broader interop with peers using picture-id extensions and temporal
-    layers.
-- Deliverables:
-    - 2-byte PictureID support.
-    - Parse/use optional descriptor extension bits where needed.
-- Primary files:
-    - media/src/vp8_packetizer.c
-    - media/src/vp8_packetizer.h
-
-## Cross-cutting validation plan
-
-For each priority band above, add/extend tests in parallel:
-
-- Renegotiation: audio-only to audio+video upgrade, and reverse.
-- ICE restart: post-connect network switch and recovery.
-- SFU: multi-peer join/leave churn, publisher handoff, and relay stability.
-- TURN relay: coturn-backed end-to-end call establishment.
-- Security: SRTP replay rejection and STUN/TURN bug regression tests.
-
-Suggested test targets:
-
-- client/tests/*
-- rtc/tests/*
-- conference/tests/*
-- routing/tests/*
-- signaling/tests/*
+- Keep client and routing as siblings over the common RTC runtime.
+- Make unsupported behavior explicit instead of silently accepting it.
+- Include focused tests and related documentation in logical commits.
+- Use the available CLI/bundled clang-format on modified C/C++ files.
+- Measure actual outputs: decoded media, delivered messages, successful recovery
+  and resource reuse, rather than success-shaped proxy counters.
