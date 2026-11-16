@@ -32,6 +32,7 @@ set(RTC_RUNTIME_SOURCES
     src/rtc_worker.c
     src/rtc_listener.c
     src/rtc_transport.c
+    src/rtc_turn_runtime.c
 )
 
 set(LIB_SOURCES ${RTC_CORE_SOURCES} ${RTC_PROTOCOL_SOURCES} ${RTC_RUNTIME_SOURCES})
@@ -61,7 +62,7 @@ if(MRTC_BUILD_TESTS)
         test_stun test_rtp test_srtp test_dtls test_ice test_sdp test_packet_io
         test_sdp_video test_rtcp test_turn test_rate_control test_rtcp_feedback
         test_nack_buf test_rtp_ext test_rtp_demux test_media_session test_loopback test_poller
-        test_timer_sched test_worker test_listener test_interceptor
+        test_timer_sched test_worker test_listener test_interceptor test_network_runtime
     )
     if(MRTC_ENABLE_TWCC)
         list(APPEND RUNTIME_TEST_NAMES test_twcc test_bwe)
@@ -76,4 +77,11 @@ if(MRTC_BUILD_TESTS)
         target_link_libraries(${test_name} PRIVATE mrtc)
         add_test(NAME ${test_name} COMMAND ${test_name})
     endforeach()
+    if(UNIX)
+        find_program(MRTC_COTURN_EXECUTABLE turnserver)
+        add_test(NAME test_network_turn
+            COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_turn_runtime.sh
+                "${MRTC_COTURN_EXECUTABLE}" $<TARGET_FILE:test_network_runtime>)
+        set_tests_properties(test_network_turn PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+    endif()
 endif()

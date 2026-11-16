@@ -113,10 +113,28 @@ static rtc_srtp_replay_entry_t *srtp_find_ssrc(rtc_srtp_replay_entry_t *table, s
     return NULL;
 }
 
-/*
- * Find (or allocate) the per-SSRC stream entry for `ssrc` in a table.
- * On overflow evicts the least-recently-used entry. Never fails.
- */
+static uint32_t srtp_estimate_roc(const rtc_srtp_replay_entry_t *stream, uint16_t seq) {
+    if (!stream || !stream->roc_init)
+        return 0;
+    /* RFC 3711 Appendix A: reordering can cross either side of a rollover. */
+    if (stream->last_seq < 0x8000 && (uint32_t)seq > (uint32_t)stream->last_seq + 0x8000)
+        return stream->roc - 1;
+    if (stream->last_seq >= 0x8000 && (uint32_t)stream->last_seq > (uint32_t)seq + 0x8000)
+        return stream->roc + 1;
+    return stream->roc;
+}
+
+static void srtp_update_roc(rtc_srtp_replay_entry_t *stream, uint32_t roc, uint16_t seq) {
+    uint64_t index = ((uint64_t)roc << 16) | seq;
+    uint64_t highest = ((uint64_t)stream->roc << 16) | stream->last_seq;
+    if (!stream->roc_init || index > highest) {
+        stream->roc = roc;
+        stream->last_seq = seq;
+        stream->roc_init = true;
+    }
+}
+
+/* Find or allocate the per-SSRC entry, evicting the least recently used when full. */
 static rtc_srtp_replay_entry_t *srtp_entry_for_ssrc(rtc_srtp_replay_entry_t *table, size_t n,
                                                     uint64_t *lru_tick, uint32_t ssrc) {
     rtc_srtp_replay_entry_t *free_slot = NULL;
@@ -453,12 +471,7 @@ static int srtp_protect_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size
 
     rtc_srtp_replay_entry_t *st =
         srtp_entry_for_ssrc(ctx->rtp_send, SRTP_REPLAY_MAX_STREAMS, &ctx->send_lru_tick, ssrc);
-    if (!st->roc_init)
-        st->roc_init = true;
-    else if (seq < st->last_seq && (st->last_seq - seq) > 0x8000)
-        st->roc++;
-    st->last_seq = seq;
-    uint32_t roc = st->roc;
+    uint32_t roc = srtp_estimate_roc(st, seq);
 
     size_t hdr_len;
     if (srtp_rtp_header_len(buf, *len, &hdr_len) != RTC_OK)
@@ -471,6 +484,7 @@ static int srtp_protect_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size
                           buf + hdr_len, *len - hdr_len, buf + *len, true);
     if (rc != RTC_OK)
         return rc;
+    srtp_update_roc(st, roc, seq);
     *len += SRTP_GCM_TAG_LEN;
     return RTC_OK;
 }
@@ -488,9 +502,7 @@ static int srtp_unprotect_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
 
     /* ROC estimate (non-allocating, pre-auth). */
     rtc_srtp_replay_entry_t *known = srtp_find_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS, ssrc);
-    uint32_t roc = known ? known->roc : 0;
-    if (known && known->roc_init && seq < known->last_seq && (known->last_seq - seq) > 0x8000)
-        roc = known->roc + 1;
+    uint32_t roc = srtp_estimate_roc(known, seq);
 
     size_t hdr_len;
     if (srtp_rtp_header_len(buf, body_len, &hdr_len) != RTC_OK)
@@ -511,11 +523,7 @@ static int srtp_unprotect_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     if (replay_rc != RTC_OK)
         return replay_rc;
 
-    if (!st->roc_init || seq > st->last_seq || (st->last_seq - seq) > 0x8000) {
-        st->last_seq = seq;
-        st->roc = roc;
-        st->roc_init = true;
-    }
+    srtp_update_roc(st, roc, seq);
     *len = body_len;
     return RTC_OK;
 }
@@ -618,13 +626,7 @@ int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_
      * independent sequence spaces, so the ROC must be tracked per SSRC. */
     rtc_srtp_replay_entry_t *st =
         srtp_entry_for_ssrc(ctx->rtp_send, SRTP_REPLAY_MAX_STREAMS, &ctx->send_lru_tick, ssrc);
-    if (!st->roc_init) {
-        st->roc_init = true;
-    } else if (seq < st->last_seq && (st->last_seq - seq) > 0x8000) {
-        st->roc++;
-    }
-    st->last_seq = seq;
-    uint32_t roc = st->roc;
+    uint32_t roc = srtp_estimate_roc(st, seq);
 
     /* Determine header length (handle CSRC and extension) */
     size_t hdr_len = 12;
@@ -668,6 +670,7 @@ int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_
     /* Append truncated (80-bit / 10 byte) tag */
     memcpy(buf + *len, hmac, SRTP_AUTH_TAG_LEN);
     *len += SRTP_AUTH_TAG_LEN;
+    srtp_update_roc(st, roc, seq);
 
     rtc_mutex_unlock(&ctx->lock);
     return RTC_OK;
@@ -698,9 +701,7 @@ int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     /* Estimate ROC per-SSRC. Use a non-allocating lookup here: a spoofed SSRC
      * must not churn the stream table before the auth tag is verified. */
     rtc_srtp_replay_entry_t *known = srtp_find_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS, ssrc);
-    uint32_t roc = known ? known->roc : 0;
-    if (known && known->roc_init && seq < known->last_seq && (known->last_seq - seq) > 0x8000)
-        roc = known->roc + 1;
+    uint32_t roc = srtp_estimate_roc(known, seq);
 
     /* Verify authentication tag */
     uint8_t roc_buf[4];
@@ -761,11 +762,7 @@ int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
     }
 
     /* Update per-SSRC rollover state. */
-    if (!st->roc_init || seq > st->last_seq || (st->last_seq - seq) > 0x8000) {
-        st->last_seq = seq;
-        st->roc = roc;
-        st->roc_init = true;
-    }
+    srtp_update_roc(st, roc, seq);
 
     *len = srtp_len;
     rtc_mutex_unlock(&ctx->lock);

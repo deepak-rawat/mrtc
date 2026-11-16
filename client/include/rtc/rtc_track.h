@@ -94,6 +94,9 @@ void rtc_rtp_sender_on_pli(rtc_rtp_sender_t *sender, rtc_on_pli_fn fn, void *use
 /* Set callback for incoming decoded frames (fires on transport thread) */
 void rtc_rtp_receiver_on_frame(rtc_rtp_receiver_t *receiver, rtc_on_frame_fn fn, void *user);
 
+/* Rate-limited RTCP PLI for decoder recovery on the negotiated transport. */
+int rtc_rtp_receiver_request_keyframe(rtc_rtp_receiver_t *receiver);
+
 /* Get the media kind */
 rtc_kind_t rtc_rtp_receiver_kind(const rtc_rtp_receiver_t *receiver);
 

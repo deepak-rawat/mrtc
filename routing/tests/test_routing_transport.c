@@ -130,10 +130,18 @@ static bool recv_udp_packet(rtc_socket_t sender, uint8_t *buf, size_t buf_len, s
 
 static bool select_transport_tuple(rtc_listener_t *listener, rtc_transport_t *transport,
                                    rtc_socket_t sender, const char *ufrag) {
+    rtc_ice_parameters_t local;
+    rtc_ice_parameters_t remote = {0};
+    snprintf(remote.username_fragment, sizeof(remote.username_fragment), "remote");
+    snprintf(remote.password, sizeof(remote.password), "remote-password-for-test");
+    if (rtc_transport_get_ice_parameters(transport, &local) != RTC_OK ||
+        rtc_transport_set_remote_ice_parameters(transport, &remote) != RTC_OK)
+        return false;
     char username[64];
     snprintf(username, sizeof(username), "%s:remote", ufrag);
     rtc_stun_msg_t req;
-    if (rtc_stun_build_binding_request(&req, username, NULL, 1234, true, 99, true) != RTC_OK)
+    if (rtc_stun_build_binding_request(&req, username, local.password, 1234, true, 99, true) !=
+        RTC_OK)
         return false;
     if (send_udp_from(listener, req.buf, req.buf_len, sender) != RTC_OK)
         return false;
@@ -164,8 +172,21 @@ static bool wait_for_dtls_connected(rtc_transport_t *transport, int timeout_ms) 
 
 static bool drive_dtls_handshake(rtc_listener_t *listener, rtc_transport_t *transport,
                                  rtc_socket_t sender, rtc_dtls_transport_t *client) {
-    dtls_client_send_ctx_t send_ctx = {.listener = listener, .sender = sender};
-    if (rtc_dtls_init(client, RTC_DTLS_ROLE_CLIENT, dtls_client_send, &send_ctx) != RTC_OK)
+    dtls_client_send_ctx_t *send_ctx = malloc(sizeof(*send_ctx));
+    if (!send_ctx)
+        return false;
+    *send_ctx = (dtls_client_send_ctx_t){.listener = listener, .sender = sender};
+    if (rtc_dtls_init(client, RTC_DTLS_ROLE_CLIENT, dtls_client_send, send_ctx) != RTC_OK) {
+        free(send_ctx);
+        return false;
+    }
+    rtc_dtls_parameters_t server;
+    rtc_dtls_parameters_t remote = {.role = RTC_TRANSPORT_DTLS_ROLE_CLIENT};
+    snprintf(remote.fingerprint, sizeof(remote.fingerprint), "%s",
+             rtc_dtls_get_fingerprint(client));
+    if (rtc_transport_get_dtls_parameters(transport, &server) != RTC_OK ||
+        rtc_dtls_set_remote_fingerprint(client, server.fingerprint) != RTC_OK ||
+        rtc_transport_set_remote_dtls_parameters(transport, &remote) != RTC_OK)
         return false;
     if (rtc_dtls_handshake(client) != RTC_OK)
         return false;
@@ -181,6 +202,12 @@ static bool drive_dtls_handshake(rtc_listener_t *listener, rtc_transport_t *tran
         SLEEP_MS(10);
     }
     return client->state == RTC_DTLS_STATE_CONNECTED && wait_for_dtls_connected(transport, 1000);
+}
+
+static void close_dtls_client(rtc_dtls_transport_t *client) {
+    void *send_user = client->send_user;
+    rtc_dtls_close(client);
+    free(send_user);
 }
 
 static bool wait_for_producer_packets(rtc_producer_t *producer, uint64_t target, int timeout_ms) {
@@ -385,21 +412,9 @@ TEST(transport_receives_stun_by_ufrag) {
     rtc_ice_parameters_t ice;
     ASSERT_EQ(rtc_transport_get_ice_parameters(transport, &ice), RTC_OK);
 
-    char username[64];
-    snprintf(username, sizeof(username), "%s:remote", ice.username_fragment);
-    rtc_stun_msg_t req;
-    ASSERT_EQ(rtc_stun_build_binding_request(&req, username, NULL, 1234, true, 99, true), RTC_OK);
     rtc_socket_t sender = make_bound_sender();
     ASSERT(sender != RTC_INVALID_SOCKET);
-    ASSERT_EQ(send_udp_from(listener, req.buf, req.buf_len, sender), RTC_OK);
-    ASSERT(wait_for_transport_packets(transport, 1, 1000));
-
-    uint8_t resp_buf[256];
-    size_t resp_len = 0;
-    ASSERT(recv_stun_response(sender, resp_buf, sizeof(resp_buf), &resp_len, 1000));
-    rtc_stun_msg_t resp;
-    ASSERT_EQ(rtc_stun_parse(&resp, resp_buf, resp_len), RTC_OK);
-    ASSERT_EQ(resp.type, STUN_BINDING_RESPONSE);
+    ASSERT(select_transport_tuple(listener, transport, sender, ice.username_fragment));
 
     rtc_transport_stats_t stats;
     ASSERT_EQ(rtc_transport_get_stats(transport, &stats), RTC_OK);
@@ -449,7 +464,7 @@ TEST(transport_dtls_handshake_exports_srtp) {
     ASSERT(stats.dtls_packets_received > 0);
     ASSERT(stats.srtp_ready);
 
-    rtc_dtls_close(&client);
+    close_dtls_client(&client);
     rtc_close_socket(sender);
     rtc_transport_destroy(transport);
     rtc_router_destroy(router);
@@ -523,7 +538,7 @@ TEST(transport_routes_srtp_to_producer) {
 
     rtc_srtp_close(&client_srtp);
     rtc_producer_destroy(producer);
-    rtc_dtls_close(&client);
+    close_dtls_client(&client);
     rtc_close_socket(sender);
     rtc_transport_destroy(transport);
     rtc_router_destroy(router);
@@ -577,7 +592,7 @@ TEST(transport_invokes_raw_rtp_handler) {
     ASSERT_EQ(g_raw_rtp_payload_len, sizeof(payload));
 
     rtc_srtp_close(&client_srtp);
-    rtc_dtls_close(&client);
+    close_dtls_client(&client);
     rtc_close_socket(sender);
     rtc_transport_destroy(transport);
     rtc_router_destroy(router);
@@ -624,7 +639,7 @@ TEST(transport_invokes_raw_rtcp_handler) {
     ASSERT_EQ(g_raw_rtcp_pt, 201);
 
     rtc_srtp_close(&client_srtp);
-    rtc_dtls_close(&client);
+    close_dtls_client(&client);
     rtc_close_socket(sender);
     rtc_transport_destroy(transport);
     rtc_router_destroy(router);
@@ -678,7 +693,7 @@ TEST(transport_sends_and_receives_app_data) {
     ASSERT_EQ(g_app_data_len, sizeof(client_msg));
     ASSERT_MEM_EQ(g_app_data, client_msg, sizeof(client_msg));
 
-    rtc_dtls_close(&client);
+    close_dtls_client(&client);
     rtc_close_socket(sender);
     rtc_transport_destroy(transport);
     rtc_router_destroy(router);
@@ -783,8 +798,8 @@ TEST(transport_forwards_producer_rtp_to_consumer) {
     rtc_srtp_close(&sub_recv);
     rtc_consumer_destroy(consumer);
     rtc_producer_destroy(producer);
-    rtc_dtls_close(&pub_client);
-    rtc_dtls_close(&sub_client);
+    close_dtls_client(&pub_client);
+    close_dtls_client(&sub_client);
     rtc_close_socket(pub_sock);
     rtc_close_socket(sub_sock);
     rtc_transport_destroy(pub_transport);

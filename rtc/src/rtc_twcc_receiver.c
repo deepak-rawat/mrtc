@@ -2,7 +2,7 @@
  * Transport-Wide CC — Receiver side.
  *
  * Uses run-length status chunks where possible to keep feedback packets small.
- * Receive deltas are emitted in 64µs ticks; values that fit in [-128..127]
+ * Receive deltas are emitted in 250µs ticks; values that fit in [-128..127]
  * use small (1-byte) deltas, others use 2-byte signed deltas. Values outside
  * the 16-bit signed range cause the packet to be marked not-received.
  */
@@ -96,7 +96,7 @@ int rtc_twcc_receiver_build_feedback(rtc_twcc_receiver_t *r, uint32_t sender_ssr
     uint64_t ref_us = r->window[first_recv].recv_time_us;
     /* Reference time is in 64ms units (24-bit). Quantize down. */
     uint32_t ref_time_64ms = (uint32_t)((ref_us / 64000ULL) & 0x00FFFFFFu);
-    uint64_t ref_base_us = (uint64_t)ref_time_64ms * 64000ULL;
+    uint64_t ref_base_us = (ref_us / 64000ULL) * 64000ULL;
 
     /* Compute per-packet 250µs deltas relative to running "previous" time
      * (initialized at ref_base_us). */
@@ -147,9 +147,7 @@ int rtc_twcc_receiver_build_feedback(rtc_twcc_receiver_t *r, uint32_t sender_ssr
     p += 3;
     out[p++] = r->fb_pkt_count++;
 
-    /* Status chunks: emit run-length chunks when 3+ consecutive same-status,
-     * otherwise pack into 14-status-vector chunks (1 bit per status — only
-     * SMALL_DELTA vs NOT_RECV; LARGE_DELTA forces a run-length chunk). */
+    /* Status chunks: prefer runs, then one-bit or two-bit status vectors. */
     int i = 0;
     while (i < r->count) {
         if (cap < p + 2)
@@ -165,17 +163,20 @@ int rtc_twcc_receiver_build_feedback(rtc_twcc_receiver_t *r, uint32_t sender_ssr
             p += 2;
             i += run;
         } else {
-            /* Status-vector chunk T=1, S=0 (1-bit symbols, 14 statuses).
-             * 1-bit symbols only encode {NOT_RECV=0, SMALL_DELTA=1}; if any
-             * LARGE_DELTA appears in the 14-window we'd have entered the
-             * run-length branch above. */
             int n = r->count - i;
             if (n > 14)
                 n = 14;
-            uint16_t chunk = 0x8000; /* T=1, S=0 */
+            bool two_bit = false;
             for (int k = 0; k < n; k++) {
-                if (status[i + k] == STATUS_SMALL_DELTA)
-                    chunk |= (uint16_t)(1 << (13 - k));
+                if (status[i + k] == STATUS_LARGE_DELTA)
+                    two_bit = true;
+            }
+            if (two_bit && n > 7)
+                n = 7;
+            uint16_t chunk = two_bit ? 0xC000 : 0x8000;
+            for (int k = 0; k < n; k++) {
+                int shift = two_bit ? 12 - 2 * k : 13 - k;
+                chunk |= (uint16_t)(status[i + k] << shift);
             }
             w16(&out[p], chunk);
             p += 2;

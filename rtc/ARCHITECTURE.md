@@ -43,6 +43,7 @@ rtc_transport_get_dtls_parameters(transport, &dtls);
 
 // ── Feed in the remote side from your signaling layer ──
 rtc_transport_set_remote_ice_parameters(transport, &remote_ice);
+rtc_transport_set_remote_dtls_parameters(transport, &remote_dtls);
 rtc_transport_add_remote_candidate(transport, &remote_candidate);
 rtc_transport_start_dtls(transport);
 
@@ -121,9 +122,9 @@ consumers.
   negotiates the transport-cc extension. `rtc_transport_on_rtp()` remains
   as a single-stream raw fallback for packets the demux did not route.
 
-The client `rtc_peer_connection_t` (in `libmrtc_client`) creates a
-private worker / listener / transport internally and exposes a
-spec-shaped API on top. Server-side media routing uses `libmrtc_routing`
+The client `rtc_peer_connection_t` (in `libmrtc_client`) acquires a
+shared worker and listener and creates a private transport internally,
+exposing a spec-shaped API on top. Server-side media routing uses `libmrtc_routing`
 to add routers, producers, consumers, and SSRC dispatch on top of core
 transports.
 
@@ -167,15 +168,21 @@ and test target; the active runtime transport does not own an
 |------|-----------------|
 | HOST | Interface enumeration (getifaddrs / GetAdaptersAddresses) |
 | SRFLX | STUN Binding Request to public server |
-| RELAY | TURN allocation (not yet wired into gathering) |
+| RELAY | Worker-owned TURN allocation and permission/channel lifecycle |
 
 **Algorithm:**
 1. Listener exposes local host candidates and transport ICE credentials.
 2. Remote SDP / trickle candidates populate the logical transport.
-3. Full ICE transports send Binding Requests; ICE-lite transports answer
-   Binding Requests.
-4. First successful tuple becomes the selected remote tuple and routes
-   DTLS / RTP / RTCP.
+3. Full ICE transports perform authenticated connectivity checks using
+   controlling/controlled roles, tie-breakers, and nomination. ICE-lite
+   transports answer checks.
+4. The nominated remote tuple routes DTLS / RTP / RTCP. Consent checks
+   detect a peer that stops responding; active ICE restart can replace
+   credentials and reselect the path.
+
+`rtc_transport_set_ice_controlling()` selects the full-ICE role.
+`rtc_transport_restart_ice()` restarts an established transport's ICE state
+without requiring a new transport object.
 
 ### STUN / TURN (`src/rtc_stun.h/c`, `src/rtc_turn.h/c`)
 
@@ -189,17 +196,26 @@ and test target; the active runtime transport does not own an
 - Allocate, Refresh, CreatePermission, ChannelBind methods
 - Long-term credentials (MD5 + realm + nonce)
 - ChannelData framing for peer communication
-- Partially implemented — not yet wired into ICE gathering
+- `rtc_transport_set_turn_server()` attaches the runtime relay path;
+  `rtc_transport_get_relay_candidate()` exposes its allocated candidate
+- Each allocation has an isolated worker-owned UDP socket, avoiding allocation
+  collisions between logical transports sharing the normal UDP listener
+- Allocation, permission, and channel refresh and cleanup are timer-driven
+- UDP TURN only; TCP/TLS TURN and RFC 8489 authentication v2 remain separate work
 
-### DTLS 1.2 (`rtc_dtls.h/c`)
+### DTLS (`rtc_dtls.h/c`)
 
 Implements TLS-over-UDP handshake and SRTP key export.
 
+- Minimum DTLS 1.2, with no maximum pinned; OpenSSL 4 can negotiate DTLS 1.3
+- Datagram-preserving memory BIOs on OpenSSL 3.2+ and an explicit MTU of 1200
+  keep handshake datagram boundaries intact
 - OpenSSL 3.0+ EVP API (modern crypto, no deprecated functions)
 - Memory BIO mode: SSL reads / writes to memory buffers, app controls
   UDP transmission
-- Self-signed certificates generated at init, SHA-256 fingerprint
-  matching
+- Self-signed certificates generated at init; remote SHA-256 fingerprints
+  supplied through `rtc_transport_set_remote_dtls_parameters()` are pinned
+  during the handshake
 - SRTP key export via `SRTP_PROTECTION_PROFILE` after handshake
 
 States: `NEW` → `CONNECTING` → `CONNECTED` → `FAILED` / `CLOSED`
@@ -381,23 +397,24 @@ forwards to `rtc_peer_connection_on_bitrate_estimate()`.
 
 ## Threading Model
 
-The worker owns the only background thread per runtime shard; it is the
-sole owner of all per-transport protocol state.
+The worker owns the event-loop thread per runtime shard. Control operations,
+packet dispatch, and transport timers run there; the hot send path can run
+on the application thread.
 
 - **Main / app thread:** API calls into runtime primitives, frame
   capture, UI rendering. Transport control, query, and teardown calls
   are marshalled onto the worker thread (synchronously) so the caller
-  never touches shared ICE / DTLS / SRTP state directly.
+  never mutates worker-owned ICE / DTLS control state directly. Media sends
+  protect packets through the transport's synchronized SRTP context.
 - **Worker loop thread:** drains the listener socket, runs RFC 7983
   demux and route dispatch, fires timers (ICE checks, DTLS
   retransmission, application-owned RTCP / TWCC), and executes
   marshalled tasks (control ops, socket (de)registration, teardown).
 
-Because packet dispatch, timers, and control/teardown all run on the
-worker thread, transport state needs no per-object locks. The only
-lock-free cross-thread reads are on the hot RTP/RTCP send path, which
-checks the atomic published flags `selected_remote_valid` and
-`srtp_ready` before sending.
+Packet dispatch, timers, and control/teardown are serialized by the worker.
+The hot RTP/RTCP send path checks the atomic published flags
+`selected_remote_valid` and `srtp_ready`; SRTP/SRTCP counters and cryptographic
+state are protected by the per-context mutex described above.
 
 ## Tests
 
@@ -423,6 +440,7 @@ checks the atomic published flags `selected_remote_valid` and
 | `test_twcc` | TWCC sender ring, receiver window, feedback round-trip |
 | `test_bwe` | GCC steady increase, delay-induced decrease, loss clamp, callback |
 | `test_turn` | TURN allocation, ChannelData framing, credentials |
+| `test_network_runtime` | Fingerprint binding, ICE roles/consent/restart, and runtime relay lifecycle |
 | `test_rate_control` | AIMD algorithm, bitrate adaptation, keyframe requests |
 | `test_worker` | Runtime worker lifecycle and timer scheduling |
 | `test_listener` | Shared UDP listener candidates, demux, stats |
@@ -436,10 +454,8 @@ Client-facade tests (`test_peer`, `test_data_channel`,
 
 ## Known Limitations
 
-- Local candidates are still produced synchronously; remote trickle
-  candidate ingestion is implemented.
-- TURN relay candidates not yet wired into ICE gathering.
-- Always ICE-controlling role on the active runtime transport (no
-  nomination negotiation).
+- TURN uses UDP and long-term credentials; TURN-over-TCP/TLS and authentication
+  v2 are not implemented.
 - No RTCP compound packets (single SR or RR per interval).
-- No full SRTP / SRTCP replay hardening audit yet.
+- Replay windows and fingerprint checks are implemented, but this educational
+  stack has not undergone an independent production security audit.

@@ -272,6 +272,9 @@ static bool connect_endpoints(loop_endpoint_t *full, loop_endpoint_t *lite) {
     if (full_dtls.role != RTC_TRANSPORT_DTLS_ROLE_CLIENT ||
         lite_dtls.role != RTC_TRANSPORT_DTLS_ROLE_SERVER)
         return false;
+    if (rtc_transport_set_remote_dtls_parameters(full->transport, &lite_dtls) != RTC_OK ||
+        rtc_transport_set_remote_dtls_parameters(lite->transport, &full_dtls) != RTC_OK)
+        return false;
 
     rtc_ice_parameters_t full_ice;
     rtc_ice_parameters_t lite_ice;
@@ -286,6 +289,7 @@ static bool connect_endpoints(loop_endpoint_t *full, loop_endpoint_t *lite) {
     if (!listener_loopback_candidate(lite->listener, &lite_candidate))
         return false;
     if (rtc_transport_set_remote_ice_parameters(full->transport, &lite_ice) != RTC_OK ||
+        rtc_transport_set_remote_ice_parameters(lite->transport, &full_ice) != RTC_OK ||
         rtc_transport_add_remote_candidate(full->transport, &lite_candidate) != RTC_OK ||
         rtc_transport_start_ice(full->transport) != RTC_OK)
         return false;

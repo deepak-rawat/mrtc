@@ -1,399 +1,245 @@
-/*
- * Data channel component tests.
- *
- * Tests:
- *   1. Create a data channel and verify properties
- *   2. Open handshake: OPEN → ACK transition
- *   3. Send and receive data messages
- *   4. Send text convenience wrapper
- *   5. Close handshake
- *   6. Remote-created data channel
- *   7. Multiple channels
- *   8. Reject send before open
- */
 #include <rtc/rtc_client.h>
 #include "rtc_data_channel_internal.h"
 #include "test_harness.h"
 
-/* Simulate a DTLS transport: messages sent by one side are received by the other */
-static rtc_dc_manager_t *g_peer_a;
-static rtc_dc_manager_t *g_peer_b;
+#ifdef _WIN32
+#  include <windows.h>
+#  define SLEEP_MS(ms) Sleep(ms)
+#else
+#  include <unistd.h>
+#  define SLEEP_MS(ms) usleep((ms) * 1000)
+#endif
 
-static int loopback_send_a(const uint8_t *data, size_t len, void *user) {
-    (void)user;
-    /* A's outgoing data is B's incoming data */
-    return rtc_dc_manager_recv(g_peer_b, data, len);
-}
+typedef struct packet {
+    struct packet *next;
+    rtc_dc_manager_t *destination;
+    size_t len;
+    uint8_t bytes[];
+} packet_t;
 
-static int loopback_send_b(const uint8_t *data, size_t len, void *user) {
-    (void)user;
-    /* B's outgoing data is A's incoming data */
-    return rtc_dc_manager_recv(g_peer_a, data, len);
-}
+typedef struct {
+    rtc_dc_manager_t a, b;
+    packet_t *head, *tail;
+    bool drop_data;
+    unsigned dropped;
+    rtc_data_channel_t *remote;
+    uint8_t received[RTC_DC_MAX_MSG_SIZE];
+    size_t received_len;
+    unsigned messages;
+} pair_t;
 
-static int g_open_count = 0;
-static int g_close_count = 0;
-static uint8_t g_last_msg[1024];
-static size_t g_last_msg_len = 0;
-static rtc_data_channel_t *g_remote_channel = NULL;
+typedef struct {
+    pair_t *pair;
+    rtc_dc_manager_t *destination;
+} link_t;
 
-static void on_open(void *user) {
-    (void)user;
-    g_open_count++;
-}
-
-static void on_close(void *user) {
-    (void)user;
-    g_close_count++;
+static int send_packet(const uint8_t *data, size_t len, void *user) {
+    link_t *link = user;
+    pair_t *pair = link->pair;
+    if (pair->drop_data && len > 12 && data[12] == 0) {
+        pair->drop_data = false;
+        pair->dropped++;
+        return RTC_OK;
+    }
+    packet_t *packet = malloc(sizeof(*packet) + len);
+    if (!packet)
+        return RTC_ERR_NOMEM;
+    packet->next = NULL;
+    packet->destination = link->destination;
+    packet->len = len;
+    memcpy(packet->bytes, data, len);
+    if (pair->tail)
+        pair->tail->next = packet;
+    else
+        pair->head = packet;
+    pair->tail = packet;
+    return RTC_OK;
 }
 
 static void on_message(const uint8_t *data, size_t len, void *user) {
-    (void)user;
-    if (len > sizeof(g_last_msg))
-        len = sizeof(g_last_msg);
-    memcpy(g_last_msg, data, len);
-    g_last_msg_len = len;
+    pair_t *pair = user;
+    if (len <= sizeof(pair->received)) {
+        memcpy(pair->received, data, len);
+        pair->received_len = len;
+        pair->messages++;
+    }
 }
 
-static void on_remote_channel(rtc_data_channel_t *dc, void *user) {
-    (void)user;
-    g_remote_channel = dc;
+static void on_channel(rtc_data_channel_t *channel, void *user) {
+    pair_t *pair = user;
+    pair->remote = channel;
+    rtc_data_channel_on_message(channel, on_message, pair);
 }
 
-static void reset_globals(void) {
-    g_open_count = 0;
-    g_close_count = 0;
-    g_last_msg_len = 0;
-    g_remote_channel = NULL;
-    memset(g_last_msg, 0, sizeof(g_last_msg));
+static void on_low(void *user) {
+    unsigned *count = user;
+    (*count)++;
 }
 
-TEST(dc_create) {
-    rtc_dc_manager_t mgr;
-    rtc_dc_manager_init(&mgr, loopback_send_a, NULL);
+static bool pump_until(pair_t *pair, rtc_data_channel_t *channel, unsigned messages,
+                       int timeout_ms) {
+    uint64_t deadline = rtc_time_ms() + (uint64_t)timeout_ms;
+    do {
+        unsigned budget = 10000;
+        while (pair->head && budget--) {
+            packet_t *packet = pair->head;
+            pair->head = packet->next;
+            if (!pair->head)
+                pair->tail = NULL;
+            rtc_dc_manager_recv(packet->destination, packet->bytes, packet->len);
+            free(packet);
+        }
+        rtc_dc_manager_tick(&pair->a, 0);
+        rtc_dc_manager_tick(&pair->b, 0);
+        if ((!channel || rtc_data_channel_state(channel) == RTC_DC_OPEN) &&
+            pair->messages >= messages)
+            return true;
+        SLEEP_MS(5);
+    } while (rtc_time_ms() < deadline);
+    return false;
+}
 
-    rtc_data_channel_init_t opts = {.ordered = true,
-                                    .max_retransmits = -1,
+static void close_pair(pair_t *pair) {
+    rtc_dc_manager_close(&pair->a);
+    rtc_dc_manager_close(&pair->b);
+    while (pair->head) {
+        packet_t *packet = pair->head;
+        pair->head = packet->next;
+        free(packet);
+    }
+}
+
+TEST(sctp_dcep_loss_fragmentation_and_close) {
+    pair_t pair = {0};
+    link_t ab = {&pair, &pair.b}, ba = {&pair, &pair.a};
+    ASSERT_EQ(rtc_dc_manager_init(&pair.a, send_packet, &ab), RTC_OK);
+    ASSERT_EQ(rtc_dc_manager_init(&pair.b, send_packet, &ba), RTC_OK);
+    rtc_dc_manager_on_channel(&pair.b, on_channel, &pair);
+    rtc_data_channel_t *channel = rtc_dc_manager_create_channel(&pair.a, "reliable", NULL);
+    ASSERT(channel != NULL);
+    ASSERT(rtc_data_channel_send_text(channel, "not open") != RTC_OK);
+    ASSERT_EQ(rtc_dc_manager_connect(&pair.a, true), RTC_OK);
+    ASSERT_EQ(rtc_dc_manager_connect(&pair.b, false), RTC_OK);
+    ASSERT(pump_until(&pair, channel, 0, 5000));
+    ASSERT(pair.remote != NULL);
+    ASSERT_STR_EQ(rtc_data_channel_label(pair.remote), "reliable");
+    ASSERT_EQ(rtc_data_channel_id(channel) % 2, 0);
+    uint8_t payload[48000];
+    for (size_t i = 0; i < sizeof(payload); i++)
+        payload[i] = (uint8_t)(i * 31);
+    pair.drop_data = true;
+    ASSERT_EQ(rtc_data_channel_send(channel, payload, sizeof(payload)), RTC_OK);
+    ASSERT(pump_until(&pair, channel, 1, 10000));
+    ASSERT_EQ(pair.dropped, 1);
+    ASSERT_EQ(pair.received_len, sizeof(payload));
+    ASSERT_MEM_EQ(pair.received, payload, sizeof(payload));
+    ASSERT_EQ(rtc_data_channel_bytes_sent(channel), sizeof(payload));
+    ASSERT_EQ(rtc_data_channel_bytes_received(pair.remote), sizeof(payload));
+    ASSERT_EQ(rtc_data_channel_send_text(channel, ""), RTC_OK);
+    ASSERT(pump_until(&pair, channel, 2, 3000));
+    ASSERT_EQ(pair.received_len, 0);
+    unsigned low_events = 0, queued = 0;
+    rtc_data_channel_on_buffered_amount_low(channel, on_low, &low_events);
+    while (!rtc_data_channel_buffered_amount(channel) && queued < 64) {
+        ASSERT_EQ(rtc_data_channel_send(channel, payload, sizeof(payload)), RTC_OK);
+        queued++;
+    }
+    ASSERT(rtc_data_channel_buffered_amount(channel) > 0);
+    ASSERT_EQ(low_events, 0);
+    ASSERT(pump_until(&pair, channel, 2 + queued, 10000));
+    ASSERT_EQ(rtc_data_channel_buffered_amount(channel), 0);
+    ASSERT(low_events > 0);
+    rtc_data_channel_close(channel);
+    uint64_t deadline = rtc_time_ms() + 5000;
+    while (rtc_time_ms() < deadline && rtc_data_channel_state(pair.remote) != RTC_DC_CLOSED) {
+        (void)pump_until(&pair, NULL, 0, 10);
+        SLEEP_MS(5);
+    }
+    ASSERT_EQ(rtc_data_channel_state(pair.remote), RTC_DC_CLOSED);
+    close_pair(&pair);
+}
+
+TEST(sctp_negotiated_options_and_validation) {
+    pair_t pair = {0};
+    link_t ab = {&pair, &pair.b}, ba = {&pair, &pair.a};
+    ASSERT_EQ(rtc_dc_manager_init(&pair.a, send_packet, &ab), RTC_OK);
+    ASSERT_EQ(rtc_dc_manager_init(&pair.b, send_packet, &ba), RTC_OK);
+    rtc_data_channel_init_t opts = {.ordered = false,
+                                    .max_retransmits = 0,
                                     .max_packet_life = -1,
-                                    .protocol = "",
-                                    .negotiated = false,
-                                    .id = -1};
-
-    rtc_data_channel_t *dc = rtc_dc_manager_create_channel(&mgr, "test-channel", &opts);
-    ASSERT(dc != NULL);
-    ASSERT_STR_EQ(rtc_data_channel_label(dc), "test-channel");
-    ASSERT_EQ(rtc_data_channel_state(dc), RTC_DC_CONNECTING);
-    ASSERT_EQ(rtc_data_channel_id(dc), 0);
-
-    printf("    created channel: label=\"%s\" id=%u state=CONNECTING\n", rtc_data_channel_label(dc),
-           rtc_data_channel_id(dc));
-    rtc_dc_manager_close(&mgr);
-}
-
-TEST(dc_open_handshake) {
-    reset_globals();
-    rtc_dc_manager_t mgr_a, mgr_b;
-    g_peer_a = &mgr_a;
-    g_peer_b = &mgr_b;
-
-    rtc_dc_manager_init(&mgr_a, loopback_send_a, NULL);
-    rtc_dc_manager_init(&mgr_b, loopback_send_b, NULL);
-
-    /* B listens for remote channels */
-    rtc_dc_manager_on_channel(&mgr_b, on_remote_channel, NULL);
-
-    /* A creates a channel */
-    rtc_data_channel_t *dc_a = rtc_dc_manager_create_channel(&mgr_a, "chat", NULL);
-    ASSERT(dc_a != NULL);
-    rtc_data_channel_on_open(dc_a, on_open, NULL);
-
-    /* Simulate DTLS connected on both sides */
-    rtc_dc_manager_on_dtls_connected(&mgr_a);
-    /* After A sends OPEN, B auto-creates remote channel and sends ACK */
-
-    /* A should now be OPEN (ACK received) */
-    ASSERT_EQ(rtc_data_channel_state(dc_a), RTC_DC_OPEN);
-    ASSERT_EQ(g_open_count, 1);
-
-    /* B should have received the remote channel */
-    ASSERT(g_remote_channel != NULL);
-    ASSERT_STR_EQ(rtc_data_channel_label(g_remote_channel), "chat");
-    ASSERT_EQ(rtc_data_channel_state(g_remote_channel), RTC_DC_OPEN);
-
-    rtc_dc_manager_close(&mgr_a);
-    rtc_dc_manager_close(&mgr_b);
-    printf("    OPEN/ACK handshake completed\n");
-}
-
-TEST(dc_send_recv) {
-    reset_globals();
-    rtc_dc_manager_t mgr_a, mgr_b;
-    g_peer_a = &mgr_a;
-    g_peer_b = &mgr_b;
-
-    rtc_dc_manager_init(&mgr_a, loopback_send_a, NULL);
-    rtc_dc_manager_init(&mgr_b, loopback_send_b, NULL);
-    rtc_dc_manager_on_channel(&mgr_b, on_remote_channel, NULL);
-
-    rtc_data_channel_t *dc_a = rtc_dc_manager_create_channel(&mgr_a, "data", NULL);
-    rtc_data_channel_on_open(dc_a, on_open, NULL);
-    rtc_dc_manager_on_dtls_connected(&mgr_a);
-
-    ASSERT_EQ(rtc_data_channel_state(dc_a), RTC_DC_OPEN);
-    ASSERT(g_remote_channel != NULL);
-
-    /* Register message handler on B's channel */
-    rtc_data_channel_on_message(g_remote_channel, on_message, NULL);
-
-    /* A sends data to B */
-    uint8_t test_data[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x42};
-    int rc = rtc_data_channel_send(dc_a, test_data, sizeof(test_data));
-    ASSERT_EQ(rc, RTC_OK);
-
-    /* B should have received the message */
-    ASSERT_EQ(g_last_msg_len, sizeof(test_data));
-    ASSERT_MEM_EQ(g_last_msg, test_data, sizeof(test_data));
-
-    printf("    sent %zu bytes A→B, received correctly\n", sizeof(test_data));
-
-    /* B sends back to A */
-    g_last_msg_len = 0;
-    rtc_data_channel_on_message(dc_a, on_message, NULL);
-    uint8_t reply[] = {0x01, 0x02, 0x03};
-    rc = rtc_data_channel_send(g_remote_channel, reply, sizeof(reply));
-    ASSERT_EQ(rc, RTC_OK);
-    ASSERT_EQ(g_last_msg_len, sizeof(reply));
-    ASSERT_MEM_EQ(g_last_msg, reply, sizeof(reply));
-
-    printf("    sent %zu bytes B→A, received correctly\n", sizeof(reply));
-
-    rtc_dc_manager_close(&mgr_a);
-    rtc_dc_manager_close(&mgr_b);
-}
-
-TEST(dc_send_text) {
-    reset_globals();
-    rtc_dc_manager_t mgr_a, mgr_b;
-    g_peer_a = &mgr_a;
-    g_peer_b = &mgr_b;
-
-    rtc_dc_manager_init(&mgr_a, loopback_send_a, NULL);
-    rtc_dc_manager_init(&mgr_b, loopback_send_b, NULL);
-    rtc_dc_manager_on_channel(&mgr_b, on_remote_channel, NULL);
-
-    rtc_data_channel_t *dc_a = rtc_dc_manager_create_channel(&mgr_a, "text", NULL);
-    rtc_dc_manager_on_dtls_connected(&mgr_a);
-
-    ASSERT(g_remote_channel != NULL);
-    rtc_data_channel_on_message(g_remote_channel, on_message, NULL);
-
-    int rc = rtc_data_channel_send_text(dc_a, "Hello, World!");
-    ASSERT_EQ(rc, RTC_OK);
-    ASSERT_EQ(g_last_msg_len, 13);
-    ASSERT(memcmp(g_last_msg, "Hello, World!", 13) == 0);
-
-    printf("    text message sent and received: \"%.*s\"\n", (int)g_last_msg_len, g_last_msg);
-
-    rtc_dc_manager_close(&mgr_a);
-    rtc_dc_manager_close(&mgr_b);
-}
-
-TEST(dc_close) {
-    reset_globals();
-    rtc_dc_manager_t mgr_a, mgr_b;
-    g_peer_a = &mgr_a;
-    g_peer_b = &mgr_b;
-
-    rtc_dc_manager_init(&mgr_a, loopback_send_a, NULL);
-    rtc_dc_manager_init(&mgr_b, loopback_send_b, NULL);
-    rtc_dc_manager_on_channel(&mgr_b, on_remote_channel, NULL);
-
-    rtc_data_channel_t *dc_a = rtc_dc_manager_create_channel(&mgr_a, "closeme", NULL);
-    rtc_dc_manager_on_dtls_connected(&mgr_a);
-
-    ASSERT(g_remote_channel != NULL);
-    rtc_data_channel_on_close(g_remote_channel, on_close, NULL);
-
-    /* A closes the channel */
-    rtc_data_channel_close(dc_a);
-    ASSERT_EQ(rtc_data_channel_state(dc_a), RTC_DC_CLOSED);
-    /* B should have received close notification */
-    ASSERT_EQ(g_close_count, 1);
-    ASSERT_EQ(rtc_data_channel_state(g_remote_channel), RTC_DC_CLOSED);
-
-    printf("    close handshake completed\n");
-
-    rtc_dc_manager_close(&mgr_a);
-    rtc_dc_manager_close(&mgr_b);
-}
-
-TEST(dc_multiple_channels) {
-    reset_globals();
-    rtc_dc_manager_t mgr_a, mgr_b;
-    g_peer_a = &mgr_a;
-    g_peer_b = &mgr_b;
-
-    rtc_dc_manager_init(&mgr_a, loopback_send_a, NULL);
-    rtc_dc_manager_init(&mgr_b, loopback_send_b, NULL);
-
-    int remote_count = 0;
-    rtc_dc_manager_on_channel(&mgr_b, on_remote_channel, NULL);
-
-    rtc_data_channel_t *ch1 = rtc_dc_manager_create_channel(&mgr_a, "channel-1", NULL);
-    rtc_data_channel_t *ch2 = rtc_dc_manager_create_channel(&mgr_a, "channel-2", NULL);
-
-    ASSERT(ch1 != NULL);
-    ASSERT(ch2 != NULL);
-    ASSERT(rtc_data_channel_id(ch1) != rtc_data_channel_id(ch2));
-
-    /* Connect both */
-    rtc_dc_manager_on_dtls_connected(&mgr_a);
-
-    ASSERT_EQ(rtc_data_channel_state(ch1), RTC_DC_OPEN);
-    ASSERT_EQ(rtc_data_channel_state(ch2), RTC_DC_OPEN);
-    ASSERT_EQ((int)rtc_u32_map_len(&mgr_b.channels), 2);
-
-    printf("    created 2 channels with IDs %u and %u\n", rtc_data_channel_id(ch1),
-           rtc_data_channel_id(ch2));
-
-    rtc_dc_manager_close(&mgr_a);
-    rtc_dc_manager_close(&mgr_b);
-}
-
-TEST(dc_send_before_open) {
-    rtc_dc_manager_t mgr;
-    rtc_dc_manager_init(&mgr, loopback_send_a, NULL);
-
-    rtc_data_channel_t *dc = rtc_dc_manager_create_channel(&mgr, "pending", NULL);
-    ASSERT(dc != NULL);
-    ASSERT_EQ(rtc_data_channel_state(dc), RTC_DC_CONNECTING);
-
-    /* Try to send — should fail */
-    uint8_t data[] = {0x01, 0x02};
-    int rc = rtc_data_channel_send(dc, data, sizeof(data));
-    ASSERT(rc != RTC_OK);
-
-    printf("    correctly rejected send on non-open channel\n");
-
-    rtc_dc_manager_close(&mgr);
-}
-
-TEST(dc_large_channel_id) {
-    reset_globals();
-    rtc_dc_manager_t mgr_a, mgr_b;
-    g_peer_a = &mgr_a;
-    g_peer_b = &mgr_b;
-
-    rtc_dc_manager_init(&mgr_a, loopback_send_a, NULL);
-    rtc_dc_manager_init(&mgr_b, loopback_send_b, NULL);
-    rtc_dc_manager_on_channel(&mgr_b, on_remote_channel, NULL);
-
-    /* Force a negotiated channel ID well past the 8-bit boundary. */
-    rtc_data_channel_init_t opts = {.ordered = true,
-                                    .max_retransmits = -1,
-                                    .max_packet_life = -1,
-                                    .protocol = "",
                                     .negotiated = true,
-                                    .id = 0x1234};
-    rtc_data_channel_t *dc_a = rtc_dc_manager_create_channel(&mgr_a, "wide", &opts);
-    ASSERT(dc_a != NULL);
-    ASSERT_EQ(rtc_data_channel_id(dc_a), 0x1234);
-
-    rtc_data_channel_on_open(dc_a, on_open, NULL);
-    rtc_dc_manager_on_dtls_connected(&mgr_a);
-
-    /* The OPEN message must carry the full 16-bit ID; if the wire format
-     * truncated to 8 bits, B would create a channel with id 0x34 and the
-     * ACK would never match A's pending channel. */
-    ASSERT_EQ(rtc_data_channel_state(dc_a), RTC_DC_OPEN);
-    ASSERT(g_remote_channel != NULL);
-    ASSERT_EQ(rtc_data_channel_id(g_remote_channel), 0x1234);
-
-    /* Data round-trip on the high-id channel */
-    rtc_data_channel_on_message(g_remote_channel, on_message, NULL);
-    uint8_t payload[] = {0x55, 0xAA, 0x55, 0xAA};
-    int rc = rtc_data_channel_send(dc_a, payload, sizeof(payload));
-    ASSERT_EQ(rc, RTC_OK);
-    ASSERT_EQ(g_last_msg_len, sizeof(payload));
-    ASSERT_MEM_EQ(g_last_msg, payload, sizeof(payload));
-
-    printf("    16-bit channel id 0x%04x round-trip OK\n", rtc_data_channel_id(dc_a));
-
-    rtc_dc_manager_close(&mgr_a);
-    rtc_dc_manager_close(&mgr_b);
+                                    .id = 0x1234,
+                                    .protocol = "telemetry"};
+    rtc_data_channel_t *a = rtc_dc_manager_create_channel(&pair.a, "negotiated", &opts);
+    rtc_data_channel_t *b = rtc_dc_manager_create_channel(&pair.b, "negotiated", &opts);
+    ASSERT(a && b);
+    ASSERT(rtc_dc_manager_create_channel(&pair.a, "duplicate", &opts) == NULL);
+    opts.max_packet_life = 10;
+    ASSERT(rtc_dc_manager_create_channel(&pair.a, "conflicting reliability", &opts) == NULL);
+    opts.max_packet_life = -1;
+    opts.id = -1;
+    ASSERT(rtc_dc_manager_create_channel(&pair.a, "missing negotiated id", &opts) == NULL);
+    rtc_data_channel_on_message(b, on_message, &pair);
+    ASSERT_EQ(rtc_dc_manager_connect(&pair.a, true), RTC_OK);
+    ASSERT_EQ(rtc_dc_manager_connect(&pair.b, false), RTC_OK);
+    ASSERT(pump_until(&pair, a, 0, 5000));
+    ASSERT_EQ(rtc_data_channel_state(b), RTC_DC_OPEN);
+    ASSERT_EQ(rtc_data_channel_id(a), 0x1234);
+    pair.drop_data = true;
+    ASSERT_EQ(rtc_data_channel_send_text(a, "must not retransmit"), RTC_OK);
+    (void)pump_until(&pair, NULL, 0, 10);
+    ASSERT_EQ(rtc_data_channel_send_text(a, "unordered partial reliability"), RTC_OK);
+    ASSERT(pump_until(&pair, a, 1, 3000));
+    ASSERT_EQ(pair.received_len, strlen("unordered partial reliability"));
+    ASSERT_MEM_EQ(pair.received, "unordered partial reliability", pair.received_len);
+    ASSERT(!pump_until(&pair, a, 2, 4500));
+    ASSERT_EQ(pair.dropped, 1);
+    ASSERT_EQ(rtc_u32_map_len(&pair.b.channels), 1);
+    opts.id = 0x1236;
+    opts.max_retransmits = -1;
+    opts.max_packet_life = 10;
+    rtc_data_channel_t *ttl_a = rtc_dc_manager_create_channel(&pair.a, "ttl", &opts);
+    rtc_data_channel_t *ttl_b = rtc_dc_manager_create_channel(&pair.b, "ttl", &opts);
+    ASSERT(ttl_a && ttl_b);
+    rtc_data_channel_on_message(ttl_b, on_message, &pair);
+    pair.drop_data = true;
+    ASSERT_EQ(rtc_data_channel_send_text(ttl_a, "expired"), RTC_OK);
+    (void)pump_until(&pair, NULL, 0, 10);
+    SLEEP_MS(30);
+    ASSERT_EQ(rtc_data_channel_send_text(ttl_a, "fresh"), RTC_OK);
+    ASSERT(pump_until(&pair, ttl_a, 2, 3000));
+    ASSERT_EQ(pair.received_len, 5);
+    ASSERT_MEM_EQ(pair.received, "fresh", 5);
+    ASSERT(!pump_until(&pair, ttl_a, 3, 4500));
+    ASSERT_EQ(pair.dropped, 2);
+    unsigned close_events = 0;
+    rtc_data_channel_on_close(a, on_low, &close_events);
+    close_pair(&pair);
+    ASSERT_EQ(close_events, 1);
 }
 
-static int g_buffered_low_count = 0;
-static void on_buffered_low(void *user) {
-    (void)user;
-    g_buffered_low_count++;
-}
-
-TEST(dc_buffered_amount) {
-    rtc_dc_manager_t mgr_a, mgr_b;
-    g_peer_a = &mgr_a;
-    g_peer_b = &mgr_b;
-    rtc_dc_manager_init(&mgr_a, loopback_send_a, NULL);
-    rtc_dc_manager_init(&mgr_b, loopback_send_b, NULL);
-    g_remote_channel = NULL;
-    rtc_dc_manager_on_channel(&mgr_b, on_remote_channel, NULL);
-
-    rtc_data_channel_t *dc_a = rtc_dc_manager_create_channel(&mgr_a, "buf", NULL);
-    ASSERT(dc_a != NULL);
-    rtc_dc_manager_on_dtls_connected(&mgr_a);
-    rtc_dc_manager_on_dtls_connected(&mgr_b);
-    ASSERT(g_remote_channel != NULL);
-
-    /* Initial state. */
-    ASSERT_EQ((int)rtc_data_channel_buffered_amount(dc_a), 0);
-    ASSERT_EQ((int)rtc_data_channel_bytes_sent(dc_a), 0);
-    ASSERT_EQ((int)rtc_data_channel_bytes_received(g_remote_channel), 0);
-    ASSERT_EQ((int)rtc_data_channel_buffered_amount_low_threshold(dc_a), 0);
-
-    /* Threshold + callback: any send completes with buffered<=threshold. */
-    g_buffered_low_count = 0;
-    rtc_data_channel_set_buffered_amount_low_threshold(dc_a, 1024);
-    ASSERT_EQ((int)rtc_data_channel_buffered_amount_low_threshold(dc_a), 1024);
-    rtc_data_channel_on_buffered_amount_low(dc_a, on_buffered_low, NULL);
-
-    rtc_data_channel_on_message(g_remote_channel, on_message, NULL);
-    const char *payload = "hello, world!";
-    size_t plen = strlen(payload);
-    ASSERT_EQ(rtc_data_channel_send(dc_a, (const uint8_t *)payload, plen), RTC_OK);
-
-    ASSERT_EQ((int)rtc_data_channel_buffered_amount(dc_a), 0);
-    ASSERT_EQ((int)rtc_data_channel_bytes_sent(dc_a), (int)plen);
-    ASSERT_EQ((int)rtc_data_channel_bytes_received(g_remote_channel), (int)plen);
-    ASSERT_EQ(g_buffered_low_count, 1);
-
-    /* NULL safety on all new getters. */
-    ASSERT_EQ((int)rtc_data_channel_buffered_amount(NULL), 0);
-    ASSERT_EQ((int)rtc_data_channel_bytes_sent(NULL), 0);
-    ASSERT_EQ((int)rtc_data_channel_bytes_received(NULL), 0);
-    ASSERT_EQ((int)rtc_data_channel_buffered_amount_low_threshold(NULL), 0);
-
-    rtc_dc_manager_close(&mgr_a);
-    rtc_dc_manager_close(&mgr_b);
+TEST(sctp_dtls_server_allocates_odd_dcep_stream) {
+    pair_t pair = {0};
+    link_t ab = {&pair, &pair.b}, ba = {&pair, &pair.a};
+    ASSERT_EQ(rtc_dc_manager_init(&pair.a, send_packet, &ab), RTC_OK);
+    ASSERT_EQ(rtc_dc_manager_init(&pair.b, send_packet, &ba), RTC_OK);
+    rtc_dc_manager_on_channel(&pair.b, on_channel, &pair);
+    rtc_data_channel_t *a = rtc_dc_manager_create_channel(&pair.a, "server channel", NULL);
+    ASSERT(a != NULL);
+    ASSERT_EQ(rtc_dc_manager_connect(&pair.a, false), RTC_OK);
+    ASSERT_EQ(rtc_dc_manager_connect(&pair.b, true), RTC_OK);
+    ASSERT(pump_until(&pair, a, 0, 5000));
+    ASSERT_EQ(rtc_data_channel_id(a) % 2, 1);
+    ASSERT(pair.remote != NULL);
+    close_pair(&pair);
 }
 
 int main(void) {
-    printf("========================================\n");
-    printf("  Data Channel Tests\n");
-    printf("========================================\n\n");
-
-    rtc_client_init();
-    rtc_set_log_level(RTC_LOG_DEBUG);
-
-    RUN_TEST(dc_create);
-    RUN_TEST(dc_open_handshake);
-    RUN_TEST(dc_send_recv);
-    RUN_TEST(dc_send_text);
-    RUN_TEST(dc_close);
-    RUN_TEST(dc_multiple_channels);
-    RUN_TEST(dc_send_before_open);
-    RUN_TEST(dc_large_channel_id);
-    RUN_TEST(dc_buffered_amount);
-
+    if (rtc_client_init() != RTC_OK)
+        return 1;
+    RUN_TEST(sctp_dcep_loss_fragmentation_and_close);
+    RUN_TEST(sctp_negotiated_options_and_validation);
+    RUN_TEST(sctp_dtls_server_allocates_odd_dcep_stream);
     rtc_client_cleanup();
     TEST_SUMMARY();
 }

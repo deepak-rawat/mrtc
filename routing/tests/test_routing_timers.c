@@ -109,10 +109,18 @@ static bool wait_for_worker_timers(rtc_worker_t *worker, int target, int timeout
 
 static bool select_transport_tuple(rtc_listener_t *listener, rtc_transport_t *transport,
                                    rtc_socket_t sender, const char *ufrag) {
+    rtc_ice_parameters_t local;
+    rtc_ice_parameters_t remote = {0};
+    snprintf(remote.username_fragment, sizeof(remote.username_fragment), "remote");
+    snprintf(remote.password, sizeof(remote.password), "remote-password-for-test");
+    if (rtc_transport_get_ice_parameters(transport, &local) != RTC_OK ||
+        rtc_transport_set_remote_ice_parameters(transport, &remote) != RTC_OK)
+        return false;
     char username[64];
     snprintf(username, sizeof(username), "%s:remote", ufrag);
     rtc_stun_msg_t req;
-    if (rtc_stun_build_binding_request(&req, username, NULL, 1234, true, 99, true) != RTC_OK)
+    if (rtc_stun_build_binding_request(&req, username, local.password, 1234, true, 99, true) !=
+        RTC_OK)
         return false;
     if (send_udp_from(listener, req.buf, req.buf_len, sender) != RTC_OK)
         return false;
@@ -147,14 +155,22 @@ TEST(logical_transport_uses_worker_timer_for_dtls) {
     rtc_socket_t sender = make_bound_sender();
     ASSERT(sender != RTC_INVALID_SOCKET);
     ASSERT(select_transport_tuple(listener, transport, sender, ice.username_fragment));
-    ASSERT(wait_for_worker_timers(worker, 0, 1000));
+    rtc_worker_stats_t initial_timers;
+    ASSERT_EQ(rtc_worker_get_stats(worker, &initial_timers), RTC_OK);
 
     dtls_client_send_ctx_t send_ctx = {.listener = listener, .sender = sender};
     rtc_dtls_transport_t client;
     ASSERT_EQ(rtc_dtls_init(&client, RTC_DTLS_ROLE_CLIENT, dtls_client_send, &send_ctx), RTC_OK);
+    rtc_dtls_parameters_t server;
+    rtc_dtls_parameters_t remote = {.role = RTC_TRANSPORT_DTLS_ROLE_CLIENT};
+    snprintf(remote.fingerprint, sizeof(remote.fingerprint), "%s",
+             rtc_dtls_get_fingerprint(&client));
+    ASSERT_EQ(rtc_transport_get_dtls_parameters(transport, &server), RTC_OK);
+    ASSERT_EQ(rtc_dtls_set_remote_fingerprint(&client, server.fingerprint), RTC_OK);
+    ASSERT_EQ(rtc_transport_set_remote_dtls_parameters(transport, &remote), RTC_OK);
     ASSERT_EQ(rtc_dtls_handshake(&client), RTC_OK);
     ASSERT(wait_for_transport_packets(transport, 2, 1000));
-    ASSERT(wait_for_worker_timers(worker, 1, 1000));
+    ASSERT(wait_for_worker_timers(worker, initial_timers.timers_pending + 1, 1000));
 
     rtc_transport_close(transport);
     ASSERT(wait_for_worker_timers(worker, 0, 1000));

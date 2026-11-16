@@ -36,6 +36,7 @@ typedef struct {
     rtc_vec_t recv_streams;        /* rtc_rtp_recv_stream_t* (RTP resolve + RR emission) */
     rtc_interceptor_chain_t chain; /* RTCP handling: report, NACK, PLI + custom */
     rtc_worker_timer_t report_timer;
+    uint64_t next_report_ms;
     uint8_t mid_ext_id; /* negotiated MID header-extension id (0 = none) */
     _Atomic bool running;
     bool ready;

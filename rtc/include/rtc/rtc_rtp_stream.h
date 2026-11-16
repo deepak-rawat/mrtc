@@ -4,6 +4,9 @@
  * Composed RTP/RTCP stream API over rtc_transport_t. This layer owns RTP
  * sequencing, RTCP stats, NACK retransmission, PLI rate limiting, and SR/RR
  * emission while keeping the storage layout private.
+ * Sending and explicit keyframe requests marshal to the transport worker so
+ * RTP sequencing/cache publication cannot race inbound NACK/PLI processing.
+ * Configure other stream state before starting media, or on that worker.
  */
 #ifndef RTC_RTP_STREAM_H
 #define RTC_RTP_STREAM_H
@@ -24,6 +27,7 @@ typedef void (*rtc_rtp_recv_stream_frame_fn)(const uint8_t *payload, size_t len,
                                              void *user);
 typedef void (*rtc_rtp_send_stream_nack_fn)(const uint16_t *lost_seqs, int count, void *user);
 typedef void (*rtc_rtp_send_stream_pli_fn)(void *user);
+typedef int (*rtc_rtp_recv_stream_feedback_fn)(const uint8_t *data, size_t len, void *user);
 
 typedef struct {
     uint8_t payload_type;
@@ -90,5 +94,13 @@ void rtc_rtp_recv_stream_on_frame(rtc_rtp_recv_stream_t *stream, rtc_rtp_recv_st
 void rtc_rtp_recv_stream_on_packet(rtc_rtp_recv_stream_t *stream, const rtc_rtp_packet_t *pkt);
 void rtc_rtp_recv_stream_on_sr(rtc_rtp_recv_stream_t *stream, const rtc_rtcp_sr_t *sr);
 void rtc_rtp_recv_stream_emit_rr(rtc_rtp_recv_stream_t *stream, rtc_transport_t *transport);
+/* Session binds the protected RTCP path; callback override is useful for
+ * alternate transports. Invoke tick on the same worker as on_packet. */
+void rtc_rtp_recv_stream_attach_transport(rtc_rtp_recv_stream_t *stream,
+                                          rtc_transport_t *transport);
+void rtc_rtp_recv_stream_on_feedback(rtc_rtp_recv_stream_t *stream,
+                                     rtc_rtp_recv_stream_feedback_fn fn, void *user);
+void rtc_rtp_recv_stream_tick(rtc_rtp_recv_stream_t *stream, uint64_t now_ms);
+int rtc_rtp_recv_stream_request_keyframe(rtc_rtp_recv_stream_t *stream);
 
 #endif /* RTC_RTP_STREAM_H */

@@ -284,6 +284,72 @@ TEST(resolve_falls_back_to_payload_type) {
     rtc_rtp_recv_stream_destroy(r);
 }
 
+typedef struct {
+    int nack_count, pli_count;
+    rtc_rtcp_nack_t nack;
+} recv_fb_t;
+
+static int capture_feedback(const uint8_t *data, size_t len, void *user) {
+    recv_fb_t *fb = user;
+    if (data[1] == RTCP_PT_RTPFB) {
+        fb->nack_count++;
+        if (rtc_rtcp_parse_nack(&fb->nack, data, len) != RTC_OK)
+            return RTC_ERR_INVALID;
+    } else if (data[1] == RTCP_PT_PSFB) {
+        fb->pli_count++;
+    }
+    return RTC_OK;
+}
+
+TEST(receiver_originates_nack_and_limited_pli) {
+    rtc_rtp_recv_stream_t *stream = make_recv(96, NULL);
+    recv_fb_t fb = {0};
+    rtc_rtp_recv_stream_on_feedback(stream, capture_feedback, &fb);
+    rtc_rtp_recv_stream_set_ssrc(stream, 0x1234);
+    uint8_t payload[] = {0x10, 1};
+    rtc_rtp_packet_t pkt, parsed;
+    ASSERT_EQ(rtc_rtp_build(&pkt, 96, 65534, 100, 0x1234, true, payload, sizeof(payload)), RTC_OK);
+    ASSERT_EQ(rtc_rtp_parse(&parsed, pkt.buf, pkt.buf_len), RTC_OK);
+    rtc_rtp_recv_stream_on_packet(stream, &parsed);
+    ASSERT_EQ(rtc_rtp_build(&pkt, 96, 1, 200, 0x1234, true, payload, sizeof(payload)), RTC_OK);
+    ASSERT_EQ(rtc_rtp_parse(&parsed, pkt.buf, pkt.buf_len), RTC_OK);
+    rtc_rtp_recv_stream_on_packet(stream, &parsed);
+    ASSERT_EQ(fb.nack_count, 1);
+    ASSERT_EQ(fb.nack.media_ssrc, 0x1234);
+    ASSERT_EQ(fb.nack.lost_count, 2);
+    ASSERT(fb.nack.lost_seqs[0] == 0 || fb.nack.lost_seqs[1] == 0);
+    ASSERT(fb.nack.lost_seqs[0] == 65535 || fb.nack.lost_seqs[1] == 65535);
+    /* A late retransmission cancels its retry, not the remaining loss. */
+    ASSERT_EQ(rtc_rtp_build(&pkt, 96, 65535, 100, 0x1234, true, payload, sizeof(payload)), RTC_OK);
+    ASSERT_EQ(rtc_rtp_parse(&parsed, pkt.buf, pkt.buf_len), RTC_OK);
+    rtc_rtp_recv_stream_on_packet(stream, &parsed);
+    uint64_t now = rtc_time_ms();
+    rtc_rtp_recv_stream_tick(stream, now + 50);
+    ASSERT_EQ(fb.nack_count, 2);
+    ASSERT_EQ(fb.nack.lost_count, 1);
+    ASSERT_EQ(fb.nack.lost_seqs[0], 0);
+    rtc_rtp_recv_stream_tick(stream, now + 250);
+    ASSERT_EQ(fb.pli_count, 1);
+    ASSERT_EQ(rtc_rtp_recv_stream_request_keyframe(stream), RTC_OK);
+    ASSERT_EQ(fb.pli_count, 1);
+    uint8_t extended_key[] = {0x90, 0x80, 0x80, 1, 0};
+    ASSERT_EQ(rtc_rtp_build(&pkt, 96, 2, 300, 0x1234, true, extended_key, sizeof(extended_key)),
+              RTC_OK);
+    ASSERT_EQ(rtc_rtp_parse(&parsed, pkt.buf, pkt.buf_len), RTC_OK);
+    rtc_rtp_recv_stream_on_packet(stream, &parsed);
+    rtc_rtp_recv_stream_tick(stream, now + 1000);
+    ASSERT_EQ(fb.pli_count, 1);
+    /* A missing final packet has no following gap: the timer still recovers. */
+    ASSERT_EQ(rtc_rtp_build(&pkt, 96, 3, 400, 0x1234, false, payload, sizeof(payload)), RTC_OK);
+    ASSERT_EQ(rtc_rtp_parse(&parsed, pkt.buf, pkt.buf_len), RTC_OK);
+    rtc_rtp_recv_stream_on_packet(stream, &parsed);
+    rtc_rtp_recv_stream_tick(stream, now + 1500);
+    ASSERT_EQ(fb.pli_count, 2);
+    rtc_rtp_recv_stream_tick(stream, now + 1510);
+    ASSERT_EQ(fb.pli_count, 2);
+    rtc_rtp_recv_stream_destroy(stream);
+}
+
 int main(void) {
     printf("=== rtc_media_session tests ===\n");
     RUN_TEST(nack_routes_to_named_sender);
@@ -293,5 +359,6 @@ int main(void) {
     RUN_TEST(custom_interceptor_sees_rtcp_and_is_freed);
     RUN_TEST(resolve_routes_same_pt_by_mid);
     RUN_TEST(resolve_falls_back_to_payload_type);
+    RUN_TEST(receiver_originates_nack_and_limited_pli);
     TEST_SUMMARY();
 }

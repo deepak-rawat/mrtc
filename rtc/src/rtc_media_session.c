@@ -8,7 +8,8 @@
 
 #include <stdlib.h>
 
-#define RTC_MEDIA_SESSION_REPORT_MS 5000
+#define RTC_MEDIA_SESSION_REPORT_MS   5000
+#define RTC_MEDIA_SESSION_FEEDBACK_MS 20
 
 /* ---- Transport RTP router: deliver + resolve ---- */
 
@@ -265,9 +266,15 @@ static void session_report_timer(void *user) {
     if (!atomic_load_explicit(&s->running, memory_order_acquire))
         return;
 
-    rtc_interceptor_chain_tick(&s->chain, rtc_time_ms());
+    uint64_t now = rtc_time_ms();
+    for (size_t i = 0; i < rtc_vec_len(&s->recv_streams); i++)
+        rtc_rtp_recv_stream_tick(session_recv_at(s, i), now);
+    if (now >= s->next_report_ms) {
+        rtc_interceptor_chain_tick(&s->chain, now);
+        s->next_report_ms = now + RTC_MEDIA_SESSION_REPORT_MS;
+    }
 
-    s->report_timer = rtc_worker_add_timer(s->worker, rtc_time_ms() + RTC_MEDIA_SESSION_REPORT_MS,
+    s->report_timer = rtc_worker_add_timer(s->worker, rtc_time_ms() + RTC_MEDIA_SESSION_FEEDBACK_MS,
                                            session_report_timer, s);
 }
 
@@ -288,6 +295,8 @@ rtc_err_t rtc_media_session_init(rtc_media_session_t *s, rtc_transport_t *transp
     s->transport = transport;
     s->worker = worker;
     s->report_timer = RTC_WORKER_TIMER_INVALID;
+    s->next_report_ms = 0;
+    s->mid_ext_id = 0;
     atomic_store_explicit(&s->running, false, memory_order_relaxed);
     s->ready = true;
 
@@ -317,7 +326,10 @@ rtc_err_t rtc_media_session_add_sender(rtc_media_session_t *s, rtc_rtp_send_stre
 rtc_err_t rtc_media_session_add_receiver(rtc_media_session_t *s, rtc_rtp_recv_stream_t *stream) {
     if (!s || !s->ready || !stream)
         return RTC_ERR_INVALID;
-    return rtc_vec_push(&s->recv_streams, &stream);
+    rtc_err_t rc = rtc_vec_push(&s->recv_streams, &stream);
+    if (rc == RTC_OK)
+        rtc_rtp_recv_stream_attach_transport(stream, s->transport);
+    return rc;
 }
 
 void rtc_media_session_bind_receiver(rtc_media_session_t *s, rtc_rtp_recv_stream_t *stream,
@@ -346,8 +358,10 @@ void rtc_media_session_start(rtc_media_session_t *s) {
     if (atomic_exchange_explicit(&s->running, true, memory_order_acq_rel))
         return;
     if (s->report_timer == RTC_WORKER_TIMER_INVALID)
+        s->next_report_ms = rtc_time_ms() + RTC_MEDIA_SESSION_REPORT_MS;
+    if (s->report_timer == RTC_WORKER_TIMER_INVALID)
         s->report_timer = rtc_worker_add_timer(
-            s->worker, rtc_time_ms() + RTC_MEDIA_SESSION_REPORT_MS, session_report_timer, s);
+            s->worker, rtc_time_ms() + RTC_MEDIA_SESSION_FEEDBACK_MS, session_report_timer, s);
 }
 
 void rtc_media_session_stop(rtc_media_session_t *s) {

@@ -254,6 +254,61 @@ TEST(srtp_per_ssrc_rollover) {
     rtc_srtp_close(&recv_ctx);
 }
 
+TEST(srtp_reordered_packets_across_rollover) {
+    const rtc_srtp_profile_t profiles[] = {RTC_SRTP_PROFILE_AES128_CM_SHA1_80,
+                                           RTC_SRTP_PROFILE_AEAD_AES_128_GCM,
+                                           RTC_SRTP_PROFILE_AEAD_AES_256_GCM};
+    const uint16_t sequences[] = {65533, 65535, 0, 1};
+    const size_t reordered[] = {0, 2, 1, 3};
+    for (size_t p = 0; p < sizeof(profiles) / sizeof(profiles[0]); p++) {
+        rtc_srtp_ctx_t ordered_send, reordered_send, receive;
+        const uint8_t *key =
+            profiles[p] == RTC_SRTP_PROFILE_AEAD_AES_256_GCM ? test_key256 : test_key;
+        size_t key_len = profiles[p] == RTC_SRTP_PROFILE_AEAD_AES_256_GCM ? 32 : 16;
+        const uint8_t *salt = p == 0 ? test_salt : test_gcm_salt;
+        size_t salt_len = p == 0 ? sizeof(test_salt) : sizeof(test_gcm_salt);
+        ASSERT_EQ(rtc_srtp_init_profile(&ordered_send, profiles[p], key, key_len, salt, salt_len),
+                  RTC_OK);
+        ASSERT_EQ(rtc_srtp_init_profile(&reordered_send, profiles[p], key, key_len, salt, salt_len),
+                  RTC_OK);
+        ASSERT_EQ(rtc_srtp_init_profile(&receive, profiles[p], key, key_len, salt, salt_len),
+                  RTC_OK);
+        rtc_rtp_packet_t plain[4];
+        uint8_t ordered_wire[4][SRTP_MAX_PACKET];
+        size_t wire_lengths[4];
+        const uint8_t payload[] = "late packet across rollover";
+        for (size_t i = 0; i < 4; i++) {
+            ASSERT_EQ(rtc_rtp_build(&plain[i], 111, sequences[i], (uint32_t)i * 3000, 0x12345678,
+                                    false, payload, sizeof(payload)),
+                      RTC_OK);
+            memcpy(ordered_wire[i], plain[i].buf, plain[i].buf_len);
+            wire_lengths[i] = plain[i].buf_len;
+            ASSERT_EQ(rtc_srtp_protect(&ordered_send, ordered_wire[i], &wire_lengths[i],
+                                       sizeof(ordered_wire[i])),
+                      RTC_OK);
+        }
+        for (size_t i = 0; i < 4; i++) {
+            size_t index = reordered[i];
+            uint8_t wire[SRTP_MAX_PACKET];
+            memcpy(wire, plain[index].buf, plain[index].buf_len);
+            size_t len = plain[index].buf_len;
+            ASSERT_EQ(rtc_srtp_protect(&reordered_send, wire, &len, sizeof(wire)), RTC_OK);
+            ASSERT_EQ(len, wire_lengths[index]);
+            ASSERT_MEM_EQ(wire, ordered_wire[index], len);
+            ASSERT_EQ(rtc_srtp_unprotect(&receive, wire, &len), RTC_OK);
+            ASSERT_EQ(len, plain[index].buf_len);
+            ASSERT_MEM_EQ(wire, plain[index].buf, len);
+        }
+        uint8_t replay[SRTP_MAX_PACKET];
+        memcpy(replay, ordered_wire[1], wire_lengths[1]);
+        size_t replay_len = wire_lengths[1];
+        ASSERT_EQ(rtc_srtp_unprotect(&receive, replay, &replay_len), RTC_ERR_SRTP);
+        rtc_srtp_close(&ordered_send);
+        rtc_srtp_close(&reordered_send);
+        rtc_srtp_close(&receive);
+    }
+}
+
 TEST(srtp_gcm_roundtrip) {
     rtc_srtp_ctx_t send_ctx, recv_ctx;
     ASSERT_EQ(rtc_srtp_init_profile(&send_ctx, RTC_SRTP_PROFILE_AEAD_AES_128_GCM, test_key,
@@ -562,6 +617,7 @@ int main(void) {
     RUN_TEST(srtp_wrong_key_fails);
     RUN_TEST(srtp_multiple_packets);
     RUN_TEST(srtp_per_ssrc_rollover);
+    RUN_TEST(srtp_reordered_packets_across_rollover);
     RUN_TEST(srtp_gcm_roundtrip);
     RUN_TEST(srtp_gcm256_roundtrip);
     RUN_TEST(srtp_gcm_wrong_key_fails);

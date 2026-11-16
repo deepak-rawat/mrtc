@@ -5,6 +5,7 @@
 
 #include "rtc/rtc.h"
 #include "rtc/rtc_client.h"
+#include "rtc_data_channel_internal.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -222,7 +223,7 @@ int rtc_client_init(void) {
         rtc_cleanup();
         return rc;
     }
-    return RTC_OK;
+    return rtc_dc_global_init();
 }
 
 void rtc_client_cleanup(void) {
@@ -234,6 +235,7 @@ void rtc_client_cleanup(void) {
         /* Leak the mutex too -- pending releases still need it. */
         RTC_LOG_WARN("Client cleanup with live peer connection(s); leaking runtime");
     } else {
+        rtc_dc_global_cleanup();
         rtc_mutex_destroy(&g_runtime_lock);
     }
     rtc_cleanup();

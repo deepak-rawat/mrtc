@@ -9,8 +9,8 @@
 #include "rtc_sdp.h"
 #include "rtc_worker.h"
 
-#define RTC_ICE_UFRAG_MAX                   8
-#define RTC_ICE_PWD_MAX                     24
+#define RTC_ICE_UFRAG_MAX                   257
+#define RTC_ICE_PWD_MAX                     257
 #define RTC_DTLS_FINGERPRINT_MAX            96
 #define RTC_TRANSPORT_RTP_PROTECT_OVERHEAD  16 /* AES-GCM tag (RFC 7714) */
 #define RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD 20 /* GCM tag (16) + SRTCP index (4) */
@@ -74,6 +74,7 @@ typedef struct {
     bool enable_sctp;
     bool enable_twcc;
     uint32_t initial_outgoing_bitrate_bps;
+    uint32_t consent_timeout_ms; /* zero: RFC 7675 default of 30 seconds */
 } rtc_transport_config_t;
 
 typedef struct {
@@ -86,6 +87,9 @@ typedef struct {
     uint64_t packets_received;
     uint64_t bytes_received;
     uint64_t dtls_packets_received;
+    bool ice_controlling;
+    bool consent_expired;
+    bool ice_restarting;
 } rtc_transport_stats_t;
 
 rtc_transport_t *rtc_transport_create(rtc_worker_t *worker, const rtc_transport_config_t *cfg);
@@ -98,6 +102,21 @@ int rtc_transport_add_remote_candidate(rtc_transport_t *transport,
 int rtc_transport_candidate_from_ice(rtc_transport_candidate_t *out, const rtc_ice_candidate_t *in);
 int rtc_transport_start_ice(rtc_transport_t *transport);
 int rtc_transport_start_dtls(rtc_transport_t *transport);
+/* Pin the remote SHA-256 certificate fingerprint before starting DTLS.
+ * The role describes the remote endpoint; the local role is its inverse. */
+int rtc_transport_set_remote_dtls_parameters(rtc_transport_t *transport,
+                                             const rtc_dtls_parameters_t *remote);
+int rtc_transport_set_ice_controlling(rtc_transport_t *transport, bool controlling);
+/* Configure a UDP TURN allocation before connectivity starts. Relay-only:
+ * all checks, DTLS and media use this allocation, never the listener socket.
+ * Allocation is asynchronous; poll get_relay_candidate until RTC_OK. */
+int rtc_transport_set_turn_server(rtc_transport_t *transport, const char *host, uint16_t port,
+                                  const char *username, const char *credential);
+int rtc_transport_get_relay_candidate(rtc_transport_t *transport,
+                                      rtc_transport_candidate_t *candidate);
+typedef void (*rtc_transport_task_fn)(void *user);
+int rtc_transport_invoke(rtc_transport_t *transport, rtc_transport_task_fn fn, void *user);
+bool rtc_transport_on_worker_thread(rtc_transport_t *transport);
 int rtc_transport_set_dtls_role(rtc_transport_t *transport, rtc_transport_dtls_role_t role);
 int rtc_transport_get_dtls_parameters(rtc_transport_t *transport, rtc_dtls_parameters_t *out);
 int rtc_transport_get_stats(rtc_transport_t *transport, rtc_transport_stats_t *out);
@@ -142,6 +161,9 @@ void rtc_transport_report_rtcp_loss(rtc_transport_t *transport, uint8_t fraction
 
 int rtc_transport_send_data(rtc_transport_t *transport, const uint8_t *data, size_t len);
 int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap);
+/* Resend cached wire bytes from a successful send_rtp on this transport.
+ * Runs on the worker, checks readiness/consent, and does not change SRTP state. */
+int rtc_transport_retransmit_rtp(rtc_transport_t *transport, const uint8_t *wire, size_t len);
 int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap);
 void rtc_transport_close(rtc_transport_t *transport);
 void rtc_transport_destroy(rtc_transport_t *transport);

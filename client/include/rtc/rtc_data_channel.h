@@ -3,7 +3,7 @@
  *
  * Mirrors the W3C RTCDataChannel interface. A data channel is created
  * from a peer connection (see rtc_peer_connection_create_data_channel)
- * and delivers reliable, ordered messages over the DTLS transport.
+ * and delivers SCTP messages over DTLS (RFC 8831), with DCEP (RFC 8832).
  *
  * The wire format and the manager that owns channels are internal to
  * the library (see client/src/rtc_data_channel_internal.h).
@@ -19,7 +19,10 @@
 /* Opaque data channel handle */
 typedef struct rtc_data_channel rtc_data_channel_t;
 
-/* Data channel initialization options (mirrors RTCDataChannelInit) */
+/* NULL options select reliable ordered delivery, automatic stream id.
+ * With explicit options initialize both reliability fields and id to -1
+ * unless used. Reliability limits are mutually exclusive (0..65535);
+ * negotiated channels require an explicit id on both endpoints. */
 typedef struct {
     bool ordered;         /* Default: true */
     int max_retransmits;  /* -1 = unlimited (default) */
@@ -57,28 +60,22 @@ void rtc_data_channel_on_open(rtc_data_channel_t *dc, rtc_on_dc_open_fn fn, void
 void rtc_data_channel_on_close(rtc_data_channel_t *dc, rtc_on_dc_close_fn fn, void *user);
 void rtc_data_channel_on_message(rtc_data_channel_t *dc, rtc_on_dc_message_fn fn, void *user);
 
-/* Property getters */
+/* Automatic stream ids are provisional until the DTLS role is negotiated. */
 const char *rtc_data_channel_label(const rtc_data_channel_t *dc);
 uint16_t rtc_data_channel_id(const rtc_data_channel_t *dc);
 rtc_data_channel_state_t rtc_data_channel_state(const rtc_data_channel_t *dc);
 
-/* Bytes queued in user-space awaiting transmission.
- * mrtc sends synchronously today (no internal queue), so this is always
- * 0. The API is exposed for spec parity and forward compatibility. */
+/* Bytes queued in the bounded user-space queue while SCTP is backpressured.
+ * Bytes already accepted into SCTP's retransmission buffer are excluded. */
 uint64_t rtc_data_channel_buffered_amount(const rtc_data_channel_t *dc);
 
-/* bufferedAmountLowThreshold (spec): when bufferedAmount drops below
- * this value the on_buffered_amount_low callback fires. With the
- * current synchronous send path bufferedAmount never rises above 0,
- * so the callback only fires if the threshold is configured > 0 and
- * a send completes. */
+/* Fires only on an actual downward crossing of the configured threshold. */
 uint64_t rtc_data_channel_buffered_amount_low_threshold(const rtc_data_channel_t *dc);
 void rtc_data_channel_set_buffered_amount_low_threshold(rtc_data_channel_t *dc, uint64_t threshold);
 void rtc_data_channel_on_buffered_amount_low(rtc_data_channel_t *dc,
                                              rtc_on_dc_buffered_amount_low_fn fn, void *user);
 
-/* Cumulative byte counters (mrtc extension, not in W3C spec). Useful
- * for observability when there is no real send queue to inspect. */
+/* Cumulative accepted/delivered application bytes (mrtc extension). */
 uint64_t rtc_data_channel_bytes_sent(const rtc_data_channel_t *dc);
 uint64_t rtc_data_channel_bytes_received(const rtc_data_channel_t *dc);
 

@@ -16,8 +16,8 @@
 
 /* ICE candidate types (shared with ICE agent internals) */
 #define ICE_MAX_CANDIDATES 16
-#define ICE_UFRAG_LEN      8
-#define ICE_PWD_LEN        24
+#define ICE_UFRAG_LEN      257
+#define ICE_PWD_LEN        257
 
 typedef enum {
     ICE_CANDIDATE_HOST,
@@ -35,7 +35,7 @@ typedef struct {
     char foundation[32];
 } rtc_ice_candidate_t;
 
-#define SDP_MAX_MEDIA      4
+#define SDP_MAX_MEDIA      16
 #define SDP_MAX_EXTMAP     6
 #define SDP_EXTMAP_URI_LEN 96
 
@@ -65,6 +65,9 @@ typedef struct {
     char codec_name[32]; /* e.g. "opus", "VP8", "H264" */
     int mid_index;       /* m= line index (0, 1, 2, ...) */
     uint32_t ssrc;       /* a=ssrc:<NNN> ... 0 means not present */
+    int direction;       /* 0: sendrecv, 1: sendonly, 2: recvonly, 3: inactive */
+    uint16_t sctp_port;
+    uint32_t max_message_size;
 
     /* Negotiated RTP header extensions for this m-section (a=extmap:). */
     rtc_sdp_extmap_t extmaps[SDP_MAX_EXTMAP];
@@ -95,6 +98,7 @@ typedef struct {
 
     /* a=ice-options:trickle present (RFC 8839 §5.4). */
     bool ice_options_trickle;
+    bool ice_lite;
 
     /* Candidates (rtc_ice_candidate_t). Lazy-initialised on first add;
      * memset(&sdp, 0, sizeof(sdp)) is a valid empty state. Use

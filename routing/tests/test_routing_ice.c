@@ -98,8 +98,13 @@ TEST(full_transport_connects_to_lite_transport) {
     ASSERT_EQ(rtc_transport_get_dtls_parameters(lite.transport, &lite_dtls), RTC_OK);
     ASSERT_EQ(full_dtls.role, RTC_TRANSPORT_DTLS_ROLE_CLIENT);
     ASSERT_EQ(lite_dtls.role, RTC_TRANSPORT_DTLS_ROLE_SERVER);
+    ASSERT_EQ(rtc_transport_set_remote_dtls_parameters(full.transport, &lite_dtls), RTC_OK);
+    ASSERT_EQ(rtc_transport_set_remote_dtls_parameters(lite.transport, &full_dtls), RTC_OK);
 
     rtc_ice_parameters_t lite_ice;
+    rtc_ice_parameters_t full_ice;
+    ASSERT_EQ(rtc_transport_get_ice_parameters(full.transport, &full_ice), RTC_OK);
+    ASSERT_EQ(rtc_transport_set_remote_ice_parameters(lite.transport, &full_ice), RTC_OK);
     ASSERT_EQ(rtc_transport_get_ice_parameters(lite.transport, &lite_ice), RTC_OK);
     rtc_transport_candidate_t lite_candidate;
     ASSERT(listener_loopback_candidate(lite.listener, &lite_candidate));

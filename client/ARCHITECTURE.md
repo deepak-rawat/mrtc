@@ -83,6 +83,8 @@ headers. On disk they live in `client/include/rtc/`.
 - `rtc_data_channel.h` — `RTCDataChannel`
 - `rtc_stats.h` — `getStats()` snapshot reporting (W3C webrtc-stats subset)
 - `rtc_client.h` — umbrella include (pulls in `rtc.h` + the four above)
+- `rtc_sctp.h` — SCTP endpoint helpers for applications using runtime transports
+  directly, including the signaling/SFU server
 
 ## Module Details
 
@@ -163,33 +165,51 @@ receiver are thin handles over the core `rtc_rtp_send_stream` /
 
 ### Data Channels (`rtc_data_channel.h/c`)
 
-Text/binary message exchange over DTLS. Fully functional with create,
-send, receive, and close.
+Text/binary messages use standard SCTP over DTLS through **usrsctp >= 0.9.5**.
+DCEP OPEN/ACK establishes in-band channels; negotiated channels use an explicit
+stream ID on both endpoints. DTLS role determines in-band stream-ID parity.
+The old custom DTLS framing is not used.
 
-Wire format: `[1B channel_id] [1B msg_type] [2B length BE] [payload]`
-
-Message types: OPEN, ACK, DATA, CLOSE. Up to 16 concurrent channels
-(`RTC_DC_MAX_CHANNELS`). The manager handles OPEN/ACK handshake and
-dispatches via callbacks (`on_open`, `on_message`, `on_close`). Channels
-can be created locally via `rtc_peer_connection_create_data_channel()` or
-received remotely via the `on_data_channel` callback.
+The manager handles reliable, unordered, retransmit-limited, and
+lifetime-limited delivery, SCTP fragmentation/reassembly, empty-message PPIDs,
+and stream resets on close. Channels can be created locally via
+`rtc_peer_connection_create_data_channel()` or received through
+`on_data_channel`. Application callbacks and association changes are serialized
+with the peer's worker.
 
 Per-channel observability: `rtc_data_channel_bytes_sent` /
 `_bytes_received` expose cumulative byte counters. The W3C
 `bufferedAmount`, `bufferedAmountLowThreshold`, and `onbufferedamountlow`
-surface is implemented but `bufferedAmount` is always 0 today because
-sends are synchronous (no internal queue); the API exists for spec parity
-and future async backpressure.
+reflect SCTP backpressure and threshold crossings. Callers must handle a send
+failure instead of assuming every message has been queued.
 
 Key functions: `rtc_data_channel_send()`,
 `rtc_data_channel_send_text()`, `rtc_data_channel_close()`.
+
+### Live Negotiation and ICE Restart
+
+Repeated offer/answer cycles can add or remove tracks and change directions
+after a connection is established. Changes are applied on the worker rather
+than by mutating live protocol objects from the application thread.
+
+Glare is rejected explicitly; applications can call
+`rtc_peer_connection_rollback()` before accepting the competing offer.
+Changing an established codec or payload type is not supported and is rejected
+without changing the current descriptions.
+
+`rtc_peer_connection_restart_ice()` supports an active connection. The
+application exchanges the new ICE credentials through another offer/answer
+cycle; a successful restart preserves the SCTP association and RTP streams.
+
+The client supports one authenticated UDP TURN URL, including relay-only
+gathering and asynchronous candidate/end-of-candidates callbacks. TURN over
+TCP/TLS and multiple TURN URLs are rejected rather than silently ignored.
 
 ### Stats Reporting (`rtc_stats.h`, `rtc_peer.c`)
 
 `rtc_peer_connection_get_stats()` snapshots per-transceiver counters into
 a `rtc_stats_report_t` (subset of W3C `RTCStatsReport`). The values are
-monotonic counters; the read is best-effort lock-free across the main
-and runtime threads.
+monotonic counters; snapshots are serialized with the runtime worker.
 
 ### Integrated Protocol Features
 
@@ -239,6 +259,8 @@ the reader.
 | `test_peer` | Full peer-connection lifecycle, offer/answer, ICE candidates |
 | `test_data_channel` | Channel open/close, message send/recv, multi-channel |
 | `test_rtp_sender_loopback` | Client RTP sender end-to-end over a real runtime transport |
+| `test_peer_integration` | Live track changes, glare/rollback, late data channels, and ICE restart continuity |
+| `test_peer_turn` | Relay-only media/data, refresh, and restart against a local coturn fixture |
 
 `test_rtp_sender_loopback` brings up an in-process runtime (worker /
 listener / router / transport + DTLS / SRTP loopback) as fixture and
@@ -253,6 +275,8 @@ the scaffolding touches runtime internals.
 - Stats report covers per-transceiver RTP counters only; ICE / DTLS /
   data-channel counters are accessible only through the runtime
   transport's `rtc_transport_get_stats()` and per-channel byte counters.
-- Always ICE-controlling role (no nomination negotiation).
-- Single peer-connection-per-process is supported, but all peers share
-  one default runtime; per-peer worker isolation is not yet a public knob.
+- Established codec/payload-type changes are rejected; live track and
+  direction changes are supported.
+- TURN supports one authenticated UDP URL, not TCP/TLS or multiple servers.
+- Multiple peer connections share one default runtime; per-peer worker
+  isolation is not a public knob.

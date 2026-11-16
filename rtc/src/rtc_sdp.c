@@ -72,7 +72,10 @@ static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media
 
     /* Direction (for RTP media) */
     if (m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) {
-        SDP_WRITE(p, remain, "a=sendrecv\r\n");
+        static const char *directions[] = {"sendrecv", "sendonly", "recvonly", "inactive"};
+        if (m->direction < 0 || m->direction > 3)
+            return RTC_ERR_INVALID;
+        SDP_WRITE(p, remain, "a=%s\r\n", directions[m->direction]);
         SDP_WRITE(p, remain, "a=rtcp-mux\r\n");
     }
 
@@ -100,7 +103,9 @@ static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media
 
     /* Data channel attributes */
     if (m->media_type == RTC_MEDIA_APPLICATION) {
-        SDP_WRITE(p, remain, "a=sctp-port:5000\r\n");
+        SDP_WRITE(p, remain, "a=sctp-port:%u\r\n", m->sctp_port ? m->sctp_port : 5000);
+        SDP_WRITE(p, remain, "a=max-message-size:%u\r\n",
+                  m->max_message_size ? m->max_message_size : 65536);
     }
 
     /* SSRC (audio/video only). cname is required by RFC 5576; mrtc does not
@@ -126,6 +131,8 @@ int rtc_sdp_generate(rtc_sdp_t *sdp) {
     SDP_WRITE(&p, &remain, "o=mrtc %s 1 IN IP4 0.0.0.0\r\n", sdp->session_id);
     SDP_WRITE(&p, &remain, "s=mrtc\r\n");
     SDP_WRITE(&p, &remain, "t=0 0\r\n");
+    if (sdp->ice_lite)
+        SDP_WRITE(&p, &remain, "a=ice-lite\r\n");
 
     /* Determine media count: use multi-media array if populated, else legacy single */
     int effective_media_count = sdp->media_count;
@@ -158,21 +165,22 @@ int rtc_sdp_generate(rtc_sdp_t *sdp) {
     SDP_WRITE(&p, &remain, "a=ice-options:trickle\r\n");
     sdp->ice_options_trickle = true;
 
-    /* Write each media section */
     for (int i = 0; i < effective_media_count; i++) {
         int rc = sdp_write_media_section(&p, &remain, &effective_media[i], sdp);
         if (rc != RTC_OK)
             return rc;
-    }
-
-    /* Candidates (after all media sections — applies to BUNDLE) */
-    size_t ncand = rtc_vec_len(&sdp->candidates);
-    for (size_t i = 0; i < ncand; i++) {
-        const rtc_ice_candidate_t *c = (const rtc_ice_candidate_t *)rtc_vec_at(&sdp->candidates, i);
-        char cand_line[256];
-        if (rtc_ice_candidate_to_string(c, cand_line, sizeof(cand_line)) != RTC_OK)
+        if (i != 0)
             continue;
-        SDP_WRITE(&p, &remain, "a=%s\r\n", cand_line);
+        /* The first bundled m-section owns the shared ICE transport. */
+        size_t ncand = rtc_vec_len(&sdp->candidates);
+        for (size_t j = 0; j < ncand; j++) {
+            const rtc_ice_candidate_t *c =
+                (const rtc_ice_candidate_t *)rtc_vec_at(&sdp->candidates, j);
+            char cand_line[256];
+            if (rtc_ice_candidate_to_string(c, cand_line, sizeof(cand_line)) != RTC_OK)
+                return RTC_ERR_INVALID;
+            SDP_WRITE(&p, &remain, "a=%s\r\n", cand_line);
+        }
     }
 
     sdp->raw_len = (size_t)(p - sdp->raw);
@@ -367,6 +375,10 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
         while (nl < end && *nl != '\n' && *nl != '\r')
             nl++;
         size_t line_len = (size_t)(nl - line);
+        if (line_len == 10 && memcmp(line, "a=ice-lite", 10) == 0)
+            sdp->ice_lite = true;
+        if (sdp_line_starts_n(line, line_len, "m=") && sdp->media_count == SDP_MAX_MEDIA)
+            return RTC_ERR_NOMEM;
 
         /* Media type */
         if (sdp_line_starts(line, "m=audio")) {
@@ -410,6 +422,29 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
                 m->media_type = RTC_MEDIA_APPLICATION;
                 m->mid_index = current_media;
                 sdp->media_count++;
+            }
+        }
+
+        if (current_media >= 0 && current_media < sdp->media_count) {
+            rtc_sdp_media_t *m = &sdp->media[current_media];
+            if (sdp_line_starts_n(line, line_len, "a=sendrecv"))
+                m->direction = 0;
+            else if (sdp_line_starts_n(line, line_len, "a=sendonly"))
+                m->direction = 1;
+            else if (sdp_line_starts_n(line, line_len, "a=recvonly"))
+                m->direction = 2;
+            else if (sdp_line_starts_n(line, line_len, "a=inactive"))
+                m->direction = 3;
+            else if (sdp_line_starts_n(line, line_len, "a=sctp-port:")) {
+                unsigned port = 0;
+                if (sscanf(line + 12, "%u", &port) != 1 || port == 0 || port > 65535)
+                    return RTC_ERR_INVALID;
+                m->sctp_port = (uint16_t)port;
+            } else if (sdp_line_starts_n(line, line_len, "a=max-message-size:")) {
+                unsigned size = 0;
+                if (sscanf(line + 19, "%u", &size) != 1)
+                    return RTC_ERR_INVALID;
+                m->max_message_size = size;
             }
         }
 

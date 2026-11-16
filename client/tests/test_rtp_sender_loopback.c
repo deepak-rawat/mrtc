@@ -3,6 +3,7 @@
  */
 #include <rtc/rtc_client.h>
 #include <rtc/rtc_listener.h>
+#include <rtc/rtc_rtp_ext.h>
 #include <rtc/rtc_sdp.h>
 #include <rtc/rtc_transport.h>
 #include <rtc/rtc_worker.h>
@@ -32,6 +33,11 @@ static int g_rtp_count;
 static uint8_t g_rtp_payload[128];
 static size_t g_rtp_payload_len;
 static uint8_t g_rtp_payload_type;
+#ifdef MRTC_ENABLE_TWCC
+static unsigned g_twcc_count;
+static uint16_t g_twcc_first_seq;
+static uint16_t g_twcc_last_seq;
+#endif
 
 static void on_peer_state(rtc_connection_state_t state, void *user) {
     (void)user;
@@ -47,6 +53,21 @@ static void on_plain_rtp(const rtc_rtp_packet_t *pkt, void *user) {
     if (g_rtp_payload_len > sizeof(g_rtp_payload))
         g_rtp_payload_len = sizeof(g_rtp_payload);
     memcpy(g_rtp_payload, pkt->payload, g_rtp_payload_len);
+#ifdef MRTC_ENABLE_TWCC
+    rtc_rtp_ext_t extensions[RTC_RTP_EXT_MAX_ENTRIES];
+    size_t count = RTC_RTP_EXT_MAX_ENTRIES;
+    if (pkt->header.extension &&
+        rtc_rtp_ext_parse_body(pkt->ext_data, pkt->ext_len, extensions, &count) == RTC_OK) {
+        const rtc_rtp_ext_t *twcc = rtc_rtp_ext_find(extensions, count, 5);
+        if (twcc && twcc->len == 2) {
+            uint16_t seq = rtc_rtp_ext_read_transport_cc(twcc);
+            if (g_twcc_count == 0)
+                g_twcc_first_seq = seq;
+            g_twcc_last_seq = seq;
+            g_twcc_count++;
+        }
+    }
+#endif
     rtc_cond_signal(&g_rtp_cond);
     rtc_mutex_unlock(&g_rtp_lock);
 }
@@ -95,6 +116,18 @@ static bool build_runtime_answer(remote_env_t *remote, const rtc_desc_t *offer,
     memset(&parsed_offer, 0, sizeof(parsed_offer));
     if (rtc_sdp_parse(&parsed_offer, offer->sdp, offer->sdp_len) != RTC_OK)
         return false;
+    rtc_dtls_parameters_t remote_dtls = {.role = RTC_TRANSPORT_DTLS_ROLE_CLIENT};
+    snprintf(remote_dtls.fingerprint, sizeof(remote_dtls.fingerprint), "%s",
+             parsed_offer.fingerprint);
+    rtc_ice_parameters_t remote_ice = {.mode = RTC_ICE_MODE_FULL};
+    snprintf(remote_ice.username_fragment, sizeof(remote_ice.username_fragment), "%s",
+             parsed_offer.ice_ufrag);
+    snprintf(remote_ice.password, sizeof(remote_ice.password), "%s", parsed_offer.ice_pwd);
+    if (rtc_transport_set_remote_dtls_parameters(remote->transport, &remote_dtls) != RTC_OK ||
+        rtc_transport_set_remote_ice_parameters(remote->transport, &remote_ice) != RTC_OK) {
+        rtc_sdp_close(&parsed_offer);
+        return false;
+    }
 
     rtc_sdp_t sdp;
     memset(&sdp, 0, sizeof(sdp));
@@ -169,6 +202,11 @@ TEST(sender_send_over_logical_transport) {
     g_rtp_count = 0;
     g_rtp_payload_len = 0;
     g_rtp_payload_type = 0;
+#ifdef MRTC_ENABLE_TWCC
+    g_twcc_count = 0;
+    g_twcc_first_seq = 0;
+    g_twcc_last_seq = 0;
+#endif
     memset(g_rtp_payload, 0, sizeof(g_rtp_payload));
 
     rtc_config_t config;
@@ -200,11 +238,16 @@ TEST(sender_send_over_logical_transport) {
 
     const uint8_t payload[] = {0xFE, 0xED, 0xFA, 0xCE};
     ASSERT_EQ(rtc_rtp_sender_send(sender, payload, sizeof(payload), 3000, true), RTC_OK);
-    ASSERT(wait_for_rtp(1, 1000));
+    ASSERT_EQ(rtc_rtp_sender_send(sender, payload, sizeof(payload), 3000, true), RTC_OK);
+    ASSERT(wait_for_rtp(2, 1000));
 
     ASSERT_EQ(g_rtp_payload_type, 96);
     ASSERT_EQ(g_rtp_payload_len, sizeof(payload));
     ASSERT_MEM_EQ(g_rtp_payload, payload, sizeof(payload));
+#ifdef MRTC_ENABLE_TWCC
+    ASSERT_EQ(g_twcc_count, 2);
+    ASSERT_EQ(g_twcc_last_seq, (uint16_t)(g_twcc_first_seq + 1));
+#endif
 
     rtc_peer_connection_close(peer);
     rtc_peer_connection_destroy(peer);

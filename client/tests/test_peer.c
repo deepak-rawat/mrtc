@@ -335,6 +335,18 @@ static bool build_runtime_answer(peer_remote_env_t *remote, const rtc_desc_t *of
     memset(&parsed_offer, 0, sizeof(parsed_offer));
     if (rtc_sdp_parse(&parsed_offer, offer->sdp, offer->sdp_len) != RTC_OK)
         return false;
+    rtc_dtls_parameters_t remote_dtls = {.role = RTC_TRANSPORT_DTLS_ROLE_CLIENT};
+    snprintf(remote_dtls.fingerprint, sizeof(remote_dtls.fingerprint), "%s",
+             parsed_offer.fingerprint);
+    rtc_ice_parameters_t remote_ice = {.mode = RTC_ICE_MODE_FULL};
+    snprintf(remote_ice.username_fragment, sizeof(remote_ice.username_fragment), "%s",
+             parsed_offer.ice_ufrag);
+    snprintf(remote_ice.password, sizeof(remote_ice.password), "%s", parsed_offer.ice_pwd);
+    if (rtc_transport_set_remote_dtls_parameters(remote->transport, &remote_dtls) != RTC_OK ||
+        rtc_transport_set_remote_ice_parameters(remote->transport, &remote_ice) != RTC_OK) {
+        rtc_sdp_close(&parsed_offer);
+        return false;
+    }
 
     rtc_sdp_t sdp;
     memset(&sdp, 0, sizeof(sdp));

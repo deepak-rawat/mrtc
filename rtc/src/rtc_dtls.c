@@ -15,6 +15,7 @@
 #include <openssl/ec.h>
 #include <openssl/evp.h>
 #include <openssl/srtp.h>
+#include <openssl/crypto.h>
 
 /* Generate a self-signed ECDSA certificate + key */
 static int dtls_generate_cert(X509 **cert_out, EVP_PKEY **pkey_out, char *fp_out, size_t fp_size) {
@@ -51,8 +52,8 @@ static int dtls_generate_cert(X509 **cert_out, EVP_PKEY **pkey_out, char *fp_out
     name = X509_NAME_new();
     if (!name)
         goto fail;
-    if (X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
-                                   (const unsigned char *)"mrtc", -1, -1, 0) <= 0)
+    if (X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (const unsigned char *)"mrtc", -1, -1,
+                                   0) <= 0)
         goto fail;
     if (X509_set_subject_name(x509, name) <= 0 || X509_set_issuer_name(x509, name) <= 0)
         goto fail;
@@ -128,6 +129,11 @@ static int dtls_setup_ssl(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role) {
         RTC_LOG_ERR("DTLS: SSL_CTX_new failed");
         return RTC_ERR_SSL;
     }
+    if (SSL_CTX_set_min_proto_version(dtls->ctx, DTLS1_2_VERSION) != 1) {
+        RTC_LOG_ERR("DTLS: failed to require DTLS 1.2 or newer");
+        dtls_close_ssl(dtls);
+        return RTC_ERR_SSL;
+    }
 
     /* Offer AEAD_AES_128_GCM (preferred) and AES-CM. The peer/handshake picks
      * one; the actual profile is read back at key export. */
@@ -155,8 +161,14 @@ static int dtls_setup_ssl(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role) {
         return RTC_ERR_SSL;
     }
 
-    BIO *rbio = BIO_new(BIO_s_mem());
-    BIO *wbio = BIO_new(BIO_s_mem());
+#if OPENSSL_VERSION_NUMBER >= 0x30200000L
+    /* A stream BIO loses UDP boundaries, which can split DTLS records when drained. */
+    const BIO_METHOD *bio_method = BIO_s_dgram_mem();
+#else
+    const BIO_METHOD *bio_method = BIO_s_mem();
+#endif
+    BIO *rbio = BIO_new(bio_method);
+    BIO *wbio = BIO_new(bio_method);
     if (!rbio || !wbio) {
         if (rbio)
             BIO_free(rbio);
@@ -171,6 +183,8 @@ static int dtls_setup_ssl(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role) {
     SSL_set_bio(dtls->ssl, rbio, wbio);
     dtls->rbio = rbio;
     dtls->wbio = wbio;
+    SSL_set_options(dtls->ssl, SSL_OP_NO_QUERY_MTU);
+    SSL_set_mtu(dtls->ssl, 1200);
 
     if (role == RTC_DTLS_ROLE_CLIENT)
         SSL_set_connect_state(dtls->ssl);
@@ -236,6 +250,58 @@ const char *rtc_dtls_get_fingerprint(const rtc_dtls_transport_t *dtls) {
     return dtls->local_fingerprint;
 }
 
+static int dtls_hex(char c) {
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+int rtc_dtls_set_remote_fingerprint(rtc_dtls_transport_t *dtls, const char *fingerprint) {
+    uint8_t digest[32];
+    if (!dtls || !fingerprint || strlen(fingerprint) != 95)
+        return RTC_ERR_INVALID;
+    for (size_t i = 0; i < sizeof(digest); i++) {
+        int hi = dtls_hex(fingerprint[i * 3]);
+        int lo = dtls_hex(fingerprint[i * 3 + 1]);
+        if (hi < 0 || lo < 0 || (i < 31 && fingerprint[i * 3 + 2] != ':'))
+            return RTC_ERR_INVALID;
+        digest[i] = (uint8_t)((hi << 4) | lo);
+    }
+    if (dtls->state != RTC_DTLS_STATE_NEW) {
+        return dtls->remote_fingerprint_set &&
+                       CRYPTO_memcmp(digest, dtls->remote_fingerprint, sizeof(digest)) == 0
+                   ? RTC_OK
+                   : RTC_ERR_INVALID;
+    }
+    memcpy(dtls->remote_fingerprint, digest, sizeof(digest));
+    dtls->remote_fingerprint_set = true;
+    return RTC_OK;
+}
+
+static int dtls_verify_peer(rtc_dtls_transport_t *dtls) {
+    if (!dtls->remote_fingerprint_set)
+        return RTC_OK;
+    X509 *peer = SSL_get1_peer_certificate(dtls->ssl);
+    uint8_t digest[EVP_MAX_MD_SIZE];
+    unsigned int len = 0;
+    bool valid = peer && X509_digest(peer, EVP_sha256(), digest, &len) == 1 &&
+                 len == sizeof(dtls->remote_fingerprint) &&
+                 CRYPTO_memcmp(digest, dtls->remote_fingerprint, len) == 0;
+    X509_free(peer);
+    if (!valid) {
+        dtls->state = RTC_DTLS_STATE_FAILED;
+        dtls->srtp_keys_ready = false;
+        RTC_LOG_ERR("DTLS: remote certificate fingerprint mismatch");
+        return RTC_ERR_SSL;
+    }
+    dtls->peer_verified = true;
+    return RTC_OK;
+}
+
 /* Flush outgoing BIO data via the send callback */
 static int dtls_flush_wbio(rtc_dtls_transport_t *dtls) {
     uint8_t buf[2048];
@@ -258,6 +324,8 @@ int rtc_dtls_handshake(rtc_dtls_transport_t *dtls) {
     dtls_flush_wbio(dtls);
 
     if (ret == 1) {
+        if (dtls_verify_peer(dtls) != RTC_OK)
+            return RTC_ERR_SSL;
         dtls->state = RTC_DTLS_STATE_CONNECTED;
         RTC_LOG_INFO("DTLS: handshake complete");
         return RTC_OK;
@@ -303,7 +371,8 @@ int rtc_dtls_recv(rtc_dtls_transport_t *dtls, const uint8_t *data, size_t len) {
 }
 
 int rtc_dtls_export_srtp_keys(rtc_dtls_transport_t *dtls) {
-    if (dtls->state != RTC_DTLS_STATE_CONNECTED)
+    if (dtls->state != RTC_DTLS_STATE_CONNECTED ||
+        (dtls->remote_fingerprint_set && !dtls->peer_verified))
         return RTC_ERR_SSL;
 
     /* Which profile did the handshake select? GCM uses a 12-byte salt and no

@@ -104,11 +104,61 @@ TEST(empty_feedback_rejected) {
     ASSERT(rtc_twcc_receiver_build_feedback(&r, 1, 2, fb, sizeof(fb), &fb_len) != RTC_OK);
 }
 
+TEST(feedback_reference_wrap_preserves_arrivals) {
+    const uint64_t wrap_us = (1ULL << 24) * 64000ULL;
+    const uint64_t bases[] = {wrap_us - 10000, wrap_us + 10000, 3 * wrap_us + 10000};
+    for (size_t j = 0; j < sizeof(bases) / sizeof(bases[0]); j++) {
+        rtc_twcc_receiver_t receiver;
+        rtc_twcc_receiver_init(&receiver);
+        for (int i = 0; i < 5; i++)
+            rtc_twcc_receiver_on_packet(&receiver, (uint16_t)(100 + i),
+                                        bases[j] + (uint64_t)i * 10000);
+        uint8_t feedback[256];
+        size_t len = 0;
+        ASSERT_EQ(rtc_twcc_receiver_build_feedback(&receiver, 1, 2, feedback, sizeof(feedback),
+                                                   &len),
+                  RTC_OK);
+        rtc_rtcp_twcc_t parsed;
+        ASSERT_EQ(rtc_rtcp_parse_twcc(&parsed, feedback, len), RTC_OK);
+        ASSERT_EQ(parsed.item_count, 5);
+        for (int i = 0; i < 5; i++) {
+            ASSERT(parsed.items[i].received);
+            ASSERT_EQ(parsed.items[i].seq, 100 + i);
+            if (i)
+                ASSERT_EQ(parsed.items[i].recv_time_us - parsed.items[i - 1].recv_time_us, 10000);
+        }
+    }
+}
+
+TEST(feedback_status_vector_preserves_later_large_delta) {
+    rtc_twcc_receiver_t receiver;
+    rtc_twcc_receiver_init(&receiver);
+    uint64_t base = 6400000;
+    rtc_twcc_receiver_on_packet(&receiver, 10, base);
+    rtc_twcc_receiver_on_packet(&receiver, 11, base + 100000);
+    rtc_twcc_receiver_on_packet(&receiver, 13, base + 110000);
+    uint8_t feedback[256];
+    size_t len = 0;
+    ASSERT_EQ(rtc_twcc_receiver_build_feedback(&receiver, 1, 2, feedback, sizeof(feedback), &len),
+              RTC_OK);
+    rtc_rtcp_twcc_t parsed;
+    ASSERT_EQ(rtc_rtcp_parse_twcc(&parsed, feedback, len), RTC_OK);
+    ASSERT_EQ(parsed.item_count, 4);
+    ASSERT(parsed.items[0].received);
+    ASSERT(parsed.items[1].received);
+    ASSERT(!parsed.items[2].received);
+    ASSERT(parsed.items[3].received);
+    ASSERT_EQ(parsed.items[1].recv_time_us - parsed.items[0].recv_time_us, 100000);
+    ASSERT_EQ(parsed.items[3].recv_time_us - parsed.items[1].recv_time_us, 10000);
+}
+
 int main(void) {
     RUN_TEST(sender_assigns_sequential);
     RUN_TEST(sender_wraparound);
     RUN_TEST(feedback_roundtrip_all_received);
     RUN_TEST(feedback_with_gaps);
     RUN_TEST(empty_feedback_rejected);
-    return 0;
+    RUN_TEST(feedback_reference_wrap_preserves_arrivals);
+    RUN_TEST(feedback_status_vector_preserves_later_large_delta);
+    TEST_SUMMARY();
 }

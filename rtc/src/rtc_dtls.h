@@ -50,6 +50,9 @@ typedef struct {
 
     /* Local certificate fingerprint (SHA-256) */
     char local_fingerprint[RTC_DTLS_FINGERPRINT_SIZE];
+    uint8_t remote_fingerprint[32];
+    bool remote_fingerprint_set;
+    bool peer_verified;
 
     /* SRTP keying material (populated after handshake) */
     uint8_t srtp_client_key[RTC_SRTP_MASTER_KEY_MAX];
@@ -68,6 +71,7 @@ int rtc_dtls_init(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role, rtc_dtls_sen
 
 /* Recreate the DTLS handshake state with the same certificate/fingerprint. */
 int rtc_dtls_set_role(rtc_dtls_transport_t *dtls, rtc_dtls_role_t role);
+int rtc_dtls_set_remote_fingerprint(rtc_dtls_transport_t *dtls, const char *fingerprint);
 
 /* Get the local certificate fingerprint (SHA-256 hex) */
 const char *rtc_dtls_get_fingerprint(const rtc_dtls_transport_t *dtls);

@@ -49,6 +49,7 @@ find_package(OpenSSL REQUIRED)
 
 # Testing
 if(MRTC_BUILD_TESTS)
+    include(CTest)
     enable_testing()
 endif()
 

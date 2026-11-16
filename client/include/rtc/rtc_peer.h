@@ -1,7 +1,7 @@
 /*
  * Peer Connection - WebRTC-style API (mirrors RTCPeerConnection).
  *
- * Opaque type, heap-allocated. Owns a transport thread that drives
+ * Opaque type, heap-allocated. Uses a shared worker that drives
  * ICE, DTLS, and SRTP. All protocol state is touched only on the
  * transport thread — no mutexes on protocol state.
  *
@@ -37,11 +37,14 @@ typedef struct {
 typedef struct {
     const char *urls[4];
     int url_count;
-    const char *username;   /* TURN only (unused) */
-    const char *credential; /* TURN only (unused) */
+    const char *username;
+    const char *credential;
 } rtc_ice_server_t;
 
 typedef struct {
+    /* STUN and one authenticated turn: URL (UDP only) are supported.
+     * Configuring TURN enforces relay-only routing; unsupported URLs,
+     * transports and multiple TURN URLs fail creation explicitly. */
     rtc_ice_server_t ice_servers[4];
     int ice_server_count;
     const char *stun_server;
@@ -94,14 +97,15 @@ typedef void (*rtc_on_data_channel_fn)(rtc_data_channel_t *channel, void *user);
 /* Create a new peer connection (heap-allocated, opaque). Returns NULL on error. */
 rtc_peer_connection_t *rtc_peer_connection_create(const rtc_config_t *config);
 
-/* Tear down the connection (stops ICE, DTLS, transport thread). */
+/* Tear down the connection. Call close/destroy outside worker callbacks.
+ * The application must serialize destruction against its own API calls. */
 void rtc_peer_connection_close(rtc_peer_connection_t *pc);
 
 /* Free memory. Must be called after close(). */
 void rtc_peer_connection_destroy(rtc_peer_connection_t *pc);
 
 /* Add a track (creates a transceiver with sendrecv direction).
- * Must be called before create_offer/create_answer.
+ * Live changes take effect after a successful offer/answer exchange.
  * Returns the sender, or NULL on error. */
 rtc_rtp_sender_t *rtc_peer_connection_add_track(rtc_peer_connection_t *pc, rtc_kind_t kind,
                                                 const rtc_codec_t *codec);
@@ -112,7 +116,7 @@ typedef struct {
 } rtc_rtp_transceiver_init_t;
 
 /* Add a transceiver with explicit direction (mirrors addTransceiver()).
- * Must be called before create_offer/create_answer.
+ * Live changes take effect after a successful offer/answer exchange.
  * Returns the transceiver, or NULL on error. */
 rtc_rtp_transceiver_t *rtc_peer_connection_add_transceiver(rtc_peer_connection_t *pc,
                                                            rtc_kind_t kind,
@@ -142,6 +146,13 @@ int rtc_peer_connection_set_local_desc(rtc_peer_connection_t *pc, const rtc_desc
  * connection (ICE + DTLS + SRTP) starts automatically. */
 int rtc_peer_connection_set_remote_desc(rtc_peer_connection_t *pc, const rtc_desc_t *desc);
 
+/* Glare policy: competing offers and invalid signaling transitions return
+ * RTC_ERR_INVALID without changing descriptions. One application-selected
+ * endpoint may cancel its pending local offer, then accept the competing
+ * offer. Track intents and a requested ICE restart survive rollback.
+ * Runtime application failures fail the connection closed; recreate it. */
+int rtc_peer_connection_rollback(rtc_peer_connection_t *pc);
+
 /* Access current descriptions (NULL if not set). */
 const rtc_desc_t *rtc_peer_connection_local_desc(const rtc_peer_connection_t *pc);
 const rtc_desc_t *rtc_peer_connection_remote_desc(const rtc_peer_connection_t *pc);
@@ -150,10 +161,8 @@ const rtc_desc_t *rtc_peer_connection_remote_desc(const rtc_peer_connection_t *p
 int rtc_peer_connection_add_ice_candidate(rtc_peer_connection_t *pc,
                                           const rtc_ice_candidate_desc_t *cand);
 
-/* Trigger an ICE restart: regenerates local ufrag/pwd so the next
- * create_offer/create_answer carries fresh credentials. Must be called
- * before the connection has started (this build does not support
- * mid-session renegotiation). Returns RTC_ERR_INVALID otherwise. */
+/* Regenerate credentials while stable. The next offer carries them;
+ * an established DTLS/SRTP/SCTP session is preserved during ICE checking. */
 int rtc_peer_connection_restart_ice(rtc_peer_connection_t *pc);
 
 /* Create a data channel with the given label and options.
@@ -163,7 +172,8 @@ rtc_data_channel_t *rtc_peer_connection_create_data_channel(rtc_peer_connection_
                                                             const char *label,
                                                             const rtc_data_channel_init_t *opts);
 
-/* Set these before the connection starts. */
+/* Register before negotiation to avoid missing events. Changes are marshaled
+ * to the shared worker; callbacks may call control APIs but not close/destroy. */
 void rtc_peer_connection_on_signaling_state(rtc_peer_connection_t *pc, rtc_on_signaling_state_fn fn,
                                             void *user);
 void rtc_peer_connection_on_ice_gathering_state(rtc_peer_connection_t *pc,

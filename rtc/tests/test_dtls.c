@@ -15,34 +15,52 @@
 #include "rtc_srtp.h"
 #include "test_harness.h"
 
-/* Buffer to shuttle DTLS packets between client and server */
 typedef struct {
     uint8_t data[4096];
     size_t len;
-    bool has_data;
+} dtls_datagram_t;
+
+typedef struct {
+    dtls_datagram_t packets[16];
+    size_t head;
+    size_t count;
 } dtls_pipe_t;
 
 static dtls_pipe_t pipe_to_server;
 static dtls_pipe_t pipe_to_client;
 
+static int pipe_send(dtls_pipe_t *pipe, const uint8_t *data, size_t len) {
+    size_t capacity = sizeof(pipe->packets) / sizeof(pipe->packets[0]);
+    if (pipe->count == capacity || len > sizeof(pipe->packets[0].data))
+        return RTC_ERR_NOMEM;
+    /* A handshake flight can invoke send more than once before the peer runs. */
+    dtls_datagram_t *packet = &pipe->packets[(pipe->head + pipe->count) % capacity];
+    memcpy(packet->data, data, len);
+    packet->len = len;
+    pipe->count++;
+    return RTC_OK;
+}
+
+static int pipe_receive(dtls_pipe_t *pipe, rtc_dtls_transport_t *peer) {
+    while (pipe->count) {
+        dtls_datagram_t *packet = &pipe->packets[pipe->head];
+        int rc = rtc_dtls_recv(peer, packet->data, packet->len);
+        if (rc != RTC_OK)
+            return rc;
+        pipe->head = (pipe->head + 1) % (sizeof(pipe->packets) / sizeof(pipe->packets[0]));
+        pipe->count--;
+    }
+    return RTC_OK;
+}
+
 static int client_send_fn(const uint8_t *data, size_t len, void *user) {
     (void)user;
-    if (len > sizeof(pipe_to_server.data))
-        return RTC_ERR_GENERIC;
-    memcpy(pipe_to_server.data, data, len);
-    pipe_to_server.len = len;
-    pipe_to_server.has_data = true;
-    return RTC_OK;
+    return pipe_send(&pipe_to_server, data, len);
 }
 
 static int server_send_fn(const uint8_t *data, size_t len, void *user) {
     (void)user;
-    if (len > sizeof(pipe_to_client.data))
-        return RTC_ERR_GENERIC;
-    memcpy(pipe_to_client.data, data, len);
-    pipe_to_client.len = len;
-    pipe_to_client.has_data = true;
-    return RTC_OK;
+    return pipe_send(&pipe_to_client, data, len);
 }
 
 TEST(dtls_init_client) {
@@ -53,6 +71,7 @@ TEST(dtls_init_client) {
     ASSERT_EQ(dtls.state, RTC_DTLS_STATE_NEW);
     ASSERT(dtls.ctx != NULL);
     ASSERT(dtls.ssl != NULL);
+    ASSERT_EQ(SSL_CTX_get_min_proto_version(dtls.ctx), DTLS1_2_VERSION);
 
     /* Fingerprint should be a non-empty SHA-256 hex string with colons */
     const char *fp = rtc_dtls_get_fingerprint(&dtls);
@@ -71,6 +90,7 @@ TEST(dtls_init_server) {
     int rc = rtc_dtls_init(&dtls, RTC_DTLS_ROLE_SERVER, NULL, NULL);
     ASSERT_EQ(rc, RTC_OK);
     ASSERT_EQ(dtls.role, RTC_DTLS_ROLE_SERVER);
+    ASSERT_EQ(SSL_CTX_get_min_proto_version(dtls.ctx), DTLS1_2_VERSION);
 
     const char *fp = rtc_dtls_get_fingerprint(&dtls);
     ASSERT(strlen(fp) == 95);
@@ -127,29 +147,28 @@ TEST(dtls_handshake) {
     /* Kick off the handshake from the client side */
     rc = rtc_dtls_handshake(&client);
     ASSERT_EQ(rc, RTC_OK);
-    ASSERT(pipe_to_server.has_data); /* ClientHello should be queued */
+    ASSERT(pipe_to_server.count > 0);
 
     /* Drive the handshake: shuttle data between client and server */
     int max_rounds = 20;
     for (int round = 0; round < max_rounds; round++) {
         bool progress = false;
 
-        if (pipe_to_server.has_data) {
-            pipe_to_server.has_data = false;
-            rc = rtc_dtls_recv(&server, pipe_to_server.data, pipe_to_server.len);
+        if (pipe_to_server.count) {
+            rc = pipe_receive(&pipe_to_server, &server);
             ASSERT_EQ(rc, RTC_OK);
             progress = true;
         }
 
-        if (pipe_to_client.has_data) {
-            pipe_to_client.has_data = false;
-            rc = rtc_dtls_recv(&client, pipe_to_client.data, pipe_to_client.len);
+        if (pipe_to_client.count) {
+            rc = pipe_receive(&pipe_to_client, &client);
             ASSERT_EQ(rc, RTC_OK);
             progress = true;
         }
 
         if (client.state == RTC_DTLS_STATE_CONNECTED && server.state == RTC_DTLS_STATE_CONNECTED) {
-            printf("    handshake complete in %d rounds\n", round + 1);
+            printf("    %s handshake complete in %d rounds\n", SSL_get_version(client.ssl),
+                   round + 1);
             break;
         }
 
@@ -170,23 +189,24 @@ TEST(dtls_srtp_key_export) {
     rtc_dtls_transport_t client, server;
     rtc_dtls_init(&client, RTC_DTLS_ROLE_CLIENT, client_send_fn, NULL);
     rtc_dtls_init(&server, RTC_DTLS_ROLE_SERVER, server_send_fn, NULL);
+    ASSERT_EQ(SSL_set_max_proto_version(server.ssl, DTLS1_2_VERSION), 1);
 
     /* Complete handshake */
-    rtc_dtls_handshake(&client);
+    ASSERT_EQ(rtc_dtls_handshake(&client), RTC_OK);
     for (int i = 0; i < 20; i++) {
-        if (pipe_to_server.has_data) {
-            pipe_to_server.has_data = false;
-            rtc_dtls_recv(&server, pipe_to_server.data, pipe_to_server.len);
+        if (pipe_to_server.count) {
+            ASSERT_EQ(pipe_receive(&pipe_to_server, &server), RTC_OK);
         }
-        if (pipe_to_client.has_data) {
-            pipe_to_client.has_data = false;
-            rtc_dtls_recv(&client, pipe_to_client.data, pipe_to_client.len);
+        if (pipe_to_client.count) {
+            ASSERT_EQ(pipe_receive(&pipe_to_client, &client), RTC_OK);
         }
         if (client.state == RTC_DTLS_STATE_CONNECTED && server.state == RTC_DTLS_STATE_CONNECTED)
             break;
     }
     ASSERT_EQ(client.state, RTC_DTLS_STATE_CONNECTED);
     ASSERT_EQ(server.state, RTC_DTLS_STATE_CONNECTED);
+    ASSERT_EQ(SSL_version(client.ssl), DTLS1_2_VERSION);
+    ASSERT_EQ(SSL_version(server.ssl), DTLS1_2_VERSION);
 
     /* Export SRTP keys */
     int rc = rtc_dtls_export_srtp_keys(&client);
@@ -225,15 +245,13 @@ TEST(dtls_srtp_e2e) {
     rtc_dtls_init(&server, RTC_DTLS_ROLE_SERVER, server_send_fn, NULL);
 
     /* Handshake */
-    rtc_dtls_handshake(&client);
+    ASSERT_EQ(rtc_dtls_handshake(&client), RTC_OK);
     for (int i = 0; i < 20; i++) {
-        if (pipe_to_server.has_data) {
-            pipe_to_server.has_data = false;
-            rtc_dtls_recv(&server, pipe_to_server.data, pipe_to_server.len);
+        if (pipe_to_server.count) {
+            ASSERT_EQ(pipe_receive(&pipe_to_server, &server), RTC_OK);
         }
-        if (pipe_to_client.has_data) {
-            pipe_to_client.has_data = false;
-            rtc_dtls_recv(&client, pipe_to_client.data, pipe_to_client.len);
+        if (pipe_to_client.count) {
+            ASSERT_EQ(pipe_receive(&pipe_to_client, &client), RTC_OK);
         }
         if (client.state == RTC_DTLS_STATE_CONNECTED && server.state == RTC_DTLS_STATE_CONNECTED)
             break;

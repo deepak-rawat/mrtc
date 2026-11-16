@@ -42,9 +42,10 @@ struct rtc_rtp_receiver {
 };
 
 struct rtc_rtp_transceiver {
+    rtc_peer_connection_t *owner;
     struct rtc_rtp_sender sender;
     struct rtc_rtp_receiver receiver;
-    rtc_direction_t direction;
+    _Atomic rtc_direction_t direction;
     char mid[32];
     int mid_index;
     bool used;
@@ -56,6 +57,13 @@ struct rtc_peer_connection {
     rtc_transport_t *runtime_transport;
     bool runtime_registered;
     rtc_worker_timer_t runtime_connect_timer;
+    rtc_worker_timer_t sctp_timer;
+    rtc_worker_timer_t relay_timer;
+    rtc_worker_timer_t health_timer;
+    uint64_t connect_deadline;
+    bool relay_only;
+    bool relay_candidate_emitted;
+    uint64_t relay_deadline;
     char runtime_fingerprint[RTC_DTLS_FINGERPRINT_MAX];
     bool runtime_connected;
 
@@ -65,10 +73,14 @@ struct rtc_peer_connection {
     /* Transceivers (main thread before connect, transport thread after) */
     struct rtc_rtp_transceiver transceivers[RTC_MAX_TRANSCEIVERS];
     int transceiver_count;
+    int next_mid;
+    int application_mid;
 
     /* Descriptions */
     rtc_desc_t local_desc;
     rtc_desc_t remote_desc;
+    rtc_desc_t previous_local_desc;
+    bool had_previous_local_desc;
     bool has_local_desc;
     bool has_remote_desc;
     rtc_sdp_t local_sdp;
@@ -98,6 +110,7 @@ struct rtc_peer_connection {
 
     /* Connection started flag */
     bool connect_started;
+    bool ice_restart_pending;
 
     /* Per-peer RTP/RTCP media session: owns the send/receive streams over the
      * runtime transport and drives RTP routing, RTCP feedback, and SR/RR. */
@@ -114,12 +127,16 @@ struct rtc_peer_connection {
 /* State helpers used by both the peer and packets TUs. */
 
 static inline void peer_set_signaling(rtc_peer_connection_t *pc, rtc_signaling_state_t s) {
+    if (pc->signaling_state == s)
+        return;
     pc->signaling_state = s;
     if (pc->on_signaling_state)
         pc->on_signaling_state(s, pc->on_signaling_state_user);
 }
 
 static inline void peer_set_ice_gathering(rtc_peer_connection_t *pc, rtc_ice_gathering_state_t s) {
+    if (pc->ice_gathering_state == s)
+        return;
     pc->ice_gathering_state = s;
     if (pc->on_ice_gathering_state)
         pc->on_ice_gathering_state(s, pc->on_ice_gathering_state_user);
@@ -127,12 +144,16 @@ static inline void peer_set_ice_gathering(rtc_peer_connection_t *pc, rtc_ice_gat
 
 static inline void peer_set_ice_connection(rtc_peer_connection_t *pc,
                                            rtc_ice_connection_state_t s) {
+    if (pc->ice_connection_state == s)
+        return;
     pc->ice_connection_state = s;
     if (pc->on_ice_connection_state)
         pc->on_ice_connection_state(s, pc->on_ice_connection_state_user);
 }
 
 static inline void peer_set_connection(rtc_peer_connection_t *pc, rtc_connection_state_t s) {
+    if (pc->connection_state == s)
+        return;
     pc->connection_state = s;
     if (pc->on_connection_state)
         pc->on_connection_state(s, pc->on_connection_state_user);

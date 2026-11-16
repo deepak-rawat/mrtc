@@ -66,6 +66,10 @@ void rtc_rtp_receiver_on_frame(rtc_rtp_receiver_t *receiver, rtc_on_frame_fn fn,
         rtc_rtp_recv_stream_on_frame(receiver->stream, fn, user);
 }
 
+int rtc_rtp_receiver_request_keyframe(rtc_rtp_receiver_t *receiver) {
+    return receiver ? rtc_rtp_recv_stream_request_keyframe(receiver->stream) : RTC_ERR_INVALID;
+}
+
 rtc_kind_t rtc_rtp_receiver_kind(const rtc_rtp_receiver_t *receiver) {
     return receiver ? receiver->kind : RTC_KIND_AUDIO;
 }
@@ -78,9 +82,24 @@ rtc_direction_t rtc_rtp_transceiver_direction(const rtc_rtp_transceiver_t *t) {
     return t ? t->direction : RTC_DIR_INACTIVE;
 }
 
+typedef struct {
+    rtc_rtp_transceiver_t *transceiver;
+    rtc_direction_t direction;
+} direction_call_t;
+
+static void set_direction_call(void *arg) {
+    direction_call_t *call = arg;
+    call->transceiver->direction = call->direction;
+}
+
 void rtc_rtp_transceiver_set_direction(rtc_rtp_transceiver_t *t, rtc_direction_t dir) {
-    if (t)
-        t->direction = dir;
+    if (!t || dir < RTC_DIR_SENDRECV || dir > RTC_DIR_INACTIVE)
+        return;
+    direction_call_t call = {.transceiver = t, .direction = dir};
+    if (t->owner && t->owner->runtime_transport)
+        (void)rtc_transport_invoke(t->owner->runtime_transport, set_direction_call, &call);
+    else
+        set_direction_call(&call);
 }
 
 rtc_rtp_sender_t *rtc_rtp_transceiver_sender(rtc_rtp_transceiver_t *t) {
@@ -181,6 +200,7 @@ void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc
     m->channels = t->sender.codec.channels;
     m->mid_index = t->mid_index;
     m->ssrc = rtc_rtp_send_stream_ssrc(t->sender.stream);
+    m->direction = t->direction;
 
     /* Advertise the MID extension so the peer tags inbound RTP with its MID,
      * letting us route bundled m-sections that share a payload type. */

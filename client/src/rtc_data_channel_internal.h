@@ -3,7 +3,7 @@
  * NOT part of the public API.
  *
  * The data channel manager is embedded inside rtc_peer_connection and
- * drives the OPEN/ACK/DATA/CLOSE handshake over the DTLS application-data
+ * drives SCTP and DCEP over the DTLS application-data
  * path. Only rtc_peer.c, rtc_data_channel.c, and the data channel unit
  * test should include this header.
  */
@@ -14,13 +14,6 @@
 #include "rtc/rtc_u32_map.h"
 
 #define RTC_DC_MAX_CHANNELS 16
-#define RTC_DC_HEADER_SIZE  6
-
-/* Wire-level message types (sent in the msg_type byte of the header). */
-#define RTC_DC_MSG_OPEN  0x01
-#define RTC_DC_MSG_ACK   0x02
-#define RTC_DC_MSG_DATA  0x03
-#define RTC_DC_MSG_CLOSE 0x04
 
 typedef struct rtc_dc_manager rtc_dc_manager_t;
 
@@ -45,6 +38,12 @@ int rtc_dc_manager_recv(rtc_dc_manager_t *mgr, const uint8_t *data, size_t len);
 
 /* Notify manager that DTLS is connected (triggers OPEN for pending channels). */
 int rtc_dc_manager_on_dtls_connected(rtc_dc_manager_t *mgr);
+int rtc_dc_manager_connect(rtc_dc_manager_t *mgr, bool dtls_client);
+void rtc_dc_manager_tick(rtc_dc_manager_t *mgr, uint32_t elapsed_ms);
+int rtc_dc_global_init(void);
+void rtc_dc_global_cleanup(void);
+typedef int (*rtc_dc_dispatch_fn)(void *owner, void (*fn)(void *), void *arg);
+void rtc_dc_manager_set_dispatch(rtc_dc_manager_t *mgr, rtc_dc_dispatch_fn fn, void *owner);
 
 /* Close all channels and free resources. */
 void rtc_dc_manager_close(rtc_dc_manager_t *mgr);
@@ -58,6 +57,15 @@ struct rtc_dc_manager {
     rtc_dc_on_channel_fn on_channel;
     void *on_channel_user;
     bool dtls_connected;
+    bool association_up;
+    bool dtls_client;
+    struct socket *socket;
+    rtc_dc_dispatch_fn dispatch;
+    void *dispatch_owner;
+    void *events_head;
+    void *events_tail;
+    uint16_t remote_port;
+    uint32_t max_message_size;
 };
 
 #endif /* RTC_DATA_CHANNEL_INTERNAL_H */
