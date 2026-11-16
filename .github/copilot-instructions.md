@@ -154,21 +154,34 @@ cd build && ninja 2>&1 | grep -E "warning|error" || echo "Clean build"
 
 If that prints `Clean build`, the tree is warning-free.
 
-## Formatting (no external clang-format required)
+## Formatting
 
-`clang-format` CLI is **not** installed. The repo's `.clang-format` is applied
-by the VS Code C/C++ extension (`ms-vscode.cpptools`), which bundles its own
-clang-format.
+Use an available `clang-format` executable with the repository's `.clang-format`
+configuration. Run it from the repository root; no editor commands or Computer
+Use are needed.
+
+1. Prefer `clang-format` on `PATH`.
+2. Otherwise, use the executable bundled with the VS Code C/C++ extension
+   (`ms-vscode.cpptools`), including on macOS. Locate the extension with
+   `code --locate-extension ms-vscode.cpptools`, then look under `LLVM/bin`
+   for `clang-format` (`clang-format.exe` on Windows). Discover the installed
+   path rather than hard-coding an extension version.
 
 After editing any C/C++ file (`*.c`, `*.h`, `*.cc`, `*.cpp`, `*.hpp`), before
-staging it for commit:
+staging it for commit, format each modified file explicitly:
 
-1. Open the file in the editor (run VS Code command `vscode.open` with the file URI).
-2. Run the VS Code command `editor.action.formatDocument`.
-3. Run the VS Code command `workbench.action.files.save` to persist.
+```bash
+clang-format --style=file -i path/to/changed.c path/to/changed.h
+```
 
-Do this for every C/C++ file you modified in the change before `git add`. Do
-not invoke `clang-format` from the terminal — it is not available.
+If using the bundled executable, substitute its quoted full path for
+`clang-format` in the command above.
+
+Format only files modified by the change, not the entire repository. Run the
+relevant build and tests after formatting and before `git add`.
+
+Only if neither executable is available, report the missing tool and ask for
+it to be installed rather than using Computer Use.
 
 ## Explaining Code
 
