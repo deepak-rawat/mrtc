@@ -5,6 +5,32 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <openssl/crypto.h>
+
+static CRYPTO_ONCE cname_once = CRYPTO_ONCE_STATIC_INIT;
+static char local_cname[33];
+
+static void init_cname(void) {
+    if (rtc_random_string(local_cname, sizeof(local_cname)) != RTC_OK) {
+        local_cname[0] = '\0';
+        RTC_LOG_ERR("RTCP CNAME generation failed");
+    }
+}
+
+const char *rtc_rtcp_cname(void) {
+    if (!CRYPTO_THREAD_run_once(&cname_once, init_cname) || !local_cname[0])
+        return NULL;
+    return local_cname;
+}
+
+static uint8_t fraction_lost(const rtc_rtcp_stats_t *stats) {
+    uint32_t expected = stats->packets_expected - stats->expected_prior;
+    uint32_t received = stats->packets_received - stats->received_prior;
+    if (!expected || received >= expected)
+        return 0;
+    uint64_t fraction = ((uint64_t)(expected - received) << 8) / expected;
+    return (uint8_t)(fraction > 255 ? 255 : fraction);
+}
 
 static void write_u16(uint8_t *p, uint16_t v) {
     p[0] = (uint8_t)(v >> 8);
@@ -68,14 +94,9 @@ void rtc_rtcp_stats_on_rtp_recv(rtc_rtcp_stats_t *stats, uint16_t seq, uint32_t 
     stats->packets_received++;
 
     /* Extended highest sequence number */
-    uint32_t seq32 = (stats->highest_seq & 0xFFFF0000u) | seq;
-    if (seq < (stats->highest_seq & 0xFFFF)) {
-        /* Possible wraparound */
-        if ((stats->highest_seq & 0xFFFF) - seq > 0x8000)
-            seq32 += 0x10000; /* sequence number wrapped */
-    }
-    if (seq32 > stats->highest_seq)
-        stats->highest_seq = seq32;
+    int16_t delta = (int16_t)(seq - (uint16_t)stats->highest_seq);
+    if (delta > 0)
+        stats->highest_seq += (uint16_t)delta;
 
     /* Expected packets (RFC 3550 §A.3): highest_seq - base_seq + 1.
      * The base_seq itself is an extended 32-bit value (the upper 16 bits are
@@ -95,11 +116,11 @@ void rtc_rtcp_stats_on_rtp_recv(rtc_rtcp_stats_t *stats, uint16_t seq, uint32_t 
         uint32_t transit = arrival_ts - timestamp;
 
         if (stats->last_transit != 0) {
-            int32_t d = (int32_t)(transit - stats->last_transit);
+            int64_t d = (int32_t)(transit - stats->last_transit);
             if (d < 0)
                 d = -d;
             /* jitter += (1/16) * (|d| - jitter) */
-            stats->jitter += ((uint32_t)d - stats->jitter + 8) >> 4;
+            stats->jitter = (uint32_t)((int64_t)stats->jitter + (d - stats->jitter) / 16);
         }
         stats->last_transit = transit;
     }
@@ -160,12 +181,9 @@ int rtc_rtcp_build_sr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats) {
         rtc_rtcp_rr_block_t *rr = &pkt->reports[0];
         rr->ssrc = stats->remote_ssrc;
 
-        if (stats->packets_expected > 0) {
-            uint32_t lost = stats->packets_lost;
-            uint32_t expected = stats->packets_expected;
-            rr->fraction_lost = (uint8_t)((lost * 256) / expected);
-        }
-        rr->cumulative_lost = (int32_t)stats->packets_lost;
+        rr->fraction_lost = fraction_lost(stats);
+        rr->cumulative_lost =
+            (int32_t)(stats->packets_lost > 0x7fffff ? 0x7fffff : stats->packets_lost);
         rr->highest_seq = stats->highest_seq;
         rr->jitter = stats->jitter;
         rr->last_sr = stats->last_sr_ntp;
@@ -256,12 +274,9 @@ int rtc_rtcp_build_rr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats) {
         rtc_rtcp_rr_block_t *rr = &pkt->reports[0];
         rr->ssrc = stats->remote_ssrc;
 
-        if (stats->packets_expected > 0) {
-            uint32_t lost = stats->packets_lost;
-            uint32_t expected = stats->packets_expected;
-            rr->fraction_lost = (uint8_t)((lost * 256) / expected);
-        }
-        rr->cumulative_lost = (int32_t)stats->packets_lost;
+        rr->fraction_lost = fraction_lost(stats);
+        rr->cumulative_lost =
+            (int32_t)(stats->packets_lost > 0x7fffff ? 0x7fffff : stats->packets_lost);
         rr->highest_seq = stats->highest_seq;
         rr->jitter = stats->jitter;
         rr->last_sr = stats->last_sr_ntp;
@@ -312,6 +327,38 @@ int rtc_rtcp_build_rr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats) {
     return RTC_OK;
 }
 
+int rtc_rtcp_build_report(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats, bool sender) {
+    const char *cname = rtc_rtcp_cname();
+    if (!cname)
+        return RTC_ERR_SSL;
+    int rc = sender ? rtc_rtcp_build_sr(pkt, stats) : rtc_rtcp_build_rr(pkt, stats);
+    if (rc != RTC_OK)
+        return rc;
+    size_t name_len = strlen(cname);
+    size_t chunk_len = (4 + 4 + 2 + name_len + 1 + 3) & ~(size_t)3;
+    if (chunk_len > sizeof(pkt->buf) - pkt->buf_len)
+        return RTC_ERR_NOMEM;
+    uint8_t *chunk = pkt->buf + pkt->buf_len;
+    memset(chunk, 0, chunk_len);
+    chunk[0] = 0x81;
+    chunk[1] = RTCP_PT_SDES;
+    write_u16(chunk + 2, (uint16_t)(chunk_len / 4 - 1));
+    write_u32(chunk + 4, stats->ssrc);
+    chunk[8] = 1;
+    chunk[9] = (uint8_t)name_len;
+    memcpy(chunk + 10, cname, name_len);
+    pkt->buf_len += chunk_len;
+    return RTC_OK;
+}
+
+void rtc_rtcp_stats_report_sent(rtc_rtcp_stats_t *stats) {
+    if (stats) {
+        stats->expected_prior = stats->packets_expected;
+        stats->received_prior = stats->packets_received;
+        stats->last_report_time = rtc_time_ms();
+    }
+}
+
 int rtc_rtcp_parse(rtc_rtcp_packet_t *pkt, const uint8_t *data, size_t len) {
     if (!pkt || !data)
         return RTC_ERR_INVALID;
@@ -332,8 +379,21 @@ int rtc_rtcp_parse(rtc_rtcp_packet_t *pkt, const uint8_t *data, size_t len) {
 
     /* Verify length */
     size_t expected_len = ((size_t)pkt->header.length + 1) * 4;
-    if (expected_len > len)
+    if (expected_len < 8 || expected_len > len ||
+        (pkt->header.packet_type != RTCP_PT_SR && pkt->header.packet_type != RTCP_PT_RR))
         return RTC_ERR_INVALID;
+    size_t content_len = expected_len;
+    if (pkt->header.padding) {
+        uint8_t padding = data[expected_len - 1];
+        if (!padding || padding > expected_len - 8)
+            return RTC_ERR_INVALID;
+        content_len -= padding;
+    }
+    size_t required = 8 + (pkt->header.packet_type == RTCP_PT_SR ? RTCP_SR_SIZE : 0) +
+                      (size_t)pkt->header.count * RTCP_RR_BLOCK_SIZE;
+    if (required != content_len)
+        return RTC_ERR_INVALID;
+    len = content_len;
 
     /* SSRC of sender */
     pkt->sender_ssrc = read_u32(data + 4);

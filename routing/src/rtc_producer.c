@@ -189,15 +189,16 @@ void rtc_producer_on_rtp(rtc_producer_t *producer, const rtc_rtp_packet_t *pkt) 
     uint64_t now = rtc_time_ms();
     if (now - producer->rtcp.last_report_time >= 1000) {
         rtc_rtcp_packet_t report;
-        if (rtc_rtcp_build_rr(&report, &producer->rtcp) == RTC_OK) {
+        if (rtc_rtcp_build_report(&report, &producer->rtcp, false) == RTC_OK) {
             uint8_t wire[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
             size_t len = report.buf_len;
             memcpy(wire, report.buf, len);
             int rc = rtc_transport_send_rtcp(producer->transport, wire, &len, sizeof(wire));
             if (rc != RTC_OK)
                 RTC_LOG_WARN("Producer receiver report failed: %d", rc);
+            else
+                rtc_rtcp_stats_report_sent(&producer->rtcp);
         }
-        producer->rtcp.last_report_time = now;
     }
 
     rtc_mutex_lock(&producer->consumers_mutex);

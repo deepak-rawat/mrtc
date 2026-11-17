@@ -12,7 +12,7 @@ changes there alone do not change client or SFU connectivity.
 
 | Standard | Implemented behavior | Remaining boundary |
 |---|---|---|
-| RFC 3550 — RTP/RTCP | RTP headers, sequence/timestamp tracking, SR/RR, loss/jitter statistics, incoming compound RTCP dispatch | Outgoing SDES/CNAME compound reports, adaptive intervals, BYE and collision handling are incomplete |
+| RFC 3550 — RTP/RTCP | RTP headers, sequence/timestamp tracking, compound SR/RR + random shared SDES/CNAME, interval loss/jitter statistics, incoming compound RTCP dispatch | Adaptive intervals, reduced-size feedback negotiation, BYE and collision handling are incomplete |
 | RFC 3711 — SRTP/SRTCP | AES-128-CM/HMAC-SHA1-80, per-SSRC rollover/replay state, authenticated replay rejection, capacity checks | No MKI/rekeying API or independent hardening audit |
 | RFC 7714 — SRTP AEAD | AES-128-GCM and AES-256-GCM; RTP/SRTCP protection and DTLS profile negotiation | Not every optional cipher/profile is offered |
 | RFC 8489 / RFC 5389 — STUN | UDP messages, integrity/fingerprint, address validation, ICE checks and credential-based TURN authentication | Authentication v2, alternate servers and TCP/TLS STUN are not implemented |
@@ -158,7 +158,7 @@ success does not certify every SDL device/launch configuration.
 
 ## Deferred Work and Deployment Limits
 
-- Outgoing compound RTCP with SDES/CNAME and bandwidth-adaptive intervals.
+- Bandwidth-adaptive RTCP intervals, reduced-size feedback negotiation, BYE and collision handling.
 - FEC/RTX, simulcast/SVC and additional codecs.
 - TURN over TCP/TLS, dual-stack completeness and STUN authentication v2.
 - Full SDP/Unified Plan coverage and established codec changes.

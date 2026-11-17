@@ -4,6 +4,7 @@
  * Supports multiple m= lines: audio, video, and application (data channel).
  */
 #include "rtc/rtc_sdp.h"
+#include "rtc/rtc_rtcp.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -111,16 +112,19 @@ static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media
                   m->max_message_size ? m->max_message_size : 65536);
     }
 
-    /* SSRC (audio/video only). cname is required by RFC 5576; mrtc does not
-     * use it for correlation so a fixed token suffices. */
     if ((m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) && m->ssrc != 0) {
-        SDP_WRITE(p, remain, "a=ssrc:%u cname:mrtc\r\n", m->ssrc);
+        const char *cname = rtc_rtcp_cname();
+        if (!cname)
+            return RTC_ERR_SSL;
+        SDP_WRITE(p, remain, "a=ssrc:%u cname:%s\r\n", m->ssrc, cname);
     }
 
     return RTC_OK;
 }
 
 int rtc_sdp_generate(rtc_sdp_t *sdp) {
+    if (!sdp || sdp->media_count < 0 || sdp->media_count > SDP_MAX_MEDIA)
+        return RTC_ERR_INVALID;
     char *p = sdp->raw;
     size_t remain = sizeof(sdp->raw);
 

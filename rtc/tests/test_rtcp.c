@@ -14,6 +14,46 @@
 #include "rtc/rtc_rtcp.h"
 #include "test_harness.h"
 
+TEST(rtcp_compound_cname_and_report_boundaries) {
+    rtc_rtcp_stats_t stats;
+    ASSERT_EQ(rtc_rtcp_stats_init(&stats, 0x11223344), RTC_OK);
+    rtc_rtcp_packet_t packet, parsed;
+    ASSERT_EQ(rtc_rtcp_build_report(&packet, &stats, false), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_parse(&parsed, packet.buf, packet.buf_len), RTC_OK);
+    ASSERT_EQ(parsed.report_count, 0);
+    ASSERT_EQ(packet.buf[8], 0x81);
+    ASSERT_EQ(packet.buf[9], RTCP_PT_SDES);
+    ASSERT_EQ(packet.buf[16], 1);
+    ASSERT_EQ(packet.buf[17], strlen(rtc_rtcp_cname()));
+    ASSERT_MEM_EQ(packet.buf + 18, rtc_rtcp_cname(), packet.buf[17]);
+    ASSERT_EQ(packet.buf_len % 4, 0);
+    packet.buf[0] = 0x81;
+    /* A following SDES chunk must not satisfy a missing RR report block. */
+    ASSERT_EQ(rtc_rtcp_parse(&parsed, packet.buf, packet.buf_len), RTC_ERR_INVALID);
+    ASSERT_EQ(rtc_rtcp_build_report(&packet, &stats, true), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_parse(&parsed, packet.buf, packet.buf_len), RTC_OK);
+    ASSERT_EQ(packet.buf[29], RTCP_PT_SDES);
+}
+
+TEST(rtcp_interval_loss_and_late_rollover) {
+    rtc_rtcp_stats_t stats;
+    rtc_rtcp_packet_t packet;
+    rtc_rtcp_stats_init(&stats, 1);
+    rtc_rtcp_stats_on_rtp_recv(&stats, 65534, 0, 2, 0);
+    rtc_rtcp_stats_on_rtp_recv(&stats, 1, 960, 2, 0);
+    ASSERT_EQ(stats.highest_seq, 65537);
+    ASSERT_EQ(stats.packets_expected, 4);
+    rtc_rtcp_stats_on_rtp_recv(&stats, 65535, 480, 2, 0);
+    ASSERT_EQ(stats.highest_seq, 65537);
+    ASSERT_EQ(rtc_rtcp_build_rr(&packet, &stats), RTC_OK);
+    ASSERT_EQ(packet.reports[0].fraction_lost, 64);
+    rtc_rtcp_stats_report_sent(&stats);
+    rtc_rtcp_stats_on_rtp_recv(&stats, 2, 1920, 2, 0);
+    ASSERT_EQ(rtc_rtcp_build_rr(&packet, &stats), RTC_OK);
+    ASSERT_EQ(packet.reports[0].fraction_lost, 0);
+    ASSERT_EQ(packet.reports[0].cumulative_lost, 1);
+}
+
 TEST(rtcp_build_sr) {
     rtc_rtcp_stats_t stats;
     rtc_rtcp_stats_init(&stats, 0xDEADBEEF);
@@ -276,6 +316,8 @@ int main(void) {
     rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(rtcp_build_sr);
+    RUN_TEST(rtcp_compound_cname_and_report_boundaries);
+    RUN_TEST(rtcp_interval_loss_and_late_rollover);
     RUN_TEST(rtcp_build_rr);
     RUN_TEST(rtcp_sr_roundtrip);
     RUN_TEST(rtcp_rr_roundtrip);

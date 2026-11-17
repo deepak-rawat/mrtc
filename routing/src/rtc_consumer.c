@@ -221,14 +221,15 @@ void rtc_consumer_on_producer_rtp(rtc_consumer_t *consumer, const rtc_rtp_packet
     uint64_t now = rtc_time_ms();
     if (now - consumer->rtcp.last_report_time >= 1000) {
         rtc_rtcp_packet_t report;
-        if (rtc_rtcp_build_sr(&report, &consumer->rtcp) == RTC_OK) {
+        if (rtc_rtcp_build_report(&report, &consumer->rtcp, true) == RTC_OK) {
             uint8_t wire[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
             size_t len = report.buf_len;
             memcpy(wire, report.buf, len);
             if (rtc_transport_send_rtcp(consumer->transport, wire, &len, sizeof(wire)) != RTC_OK)
                 atomic_fetch_add(&consumer->packets_dropped, 1);
+            else
+                rtc_rtcp_stats_report_sent(&consumer->rtcp);
         }
-        consumer->rtcp.last_report_time = now;
     }
     rtc_mutex_unlock(&consumer->media_mutex);
 }

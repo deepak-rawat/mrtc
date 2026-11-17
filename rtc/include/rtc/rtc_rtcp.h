@@ -95,6 +95,8 @@ typedef struct {
     uint32_t packets_received;
     uint32_t packets_expected;
     uint32_t packets_lost;
+    uint32_t expected_prior;
+    uint32_t received_prior;
     uint32_t base_seq;     /* extended seq of first packet received (RFC 3550 §A.1) */
     uint32_t highest_seq;  /* highest seq received (with ROC in upper 16 bits) */
     uint32_t jitter;       /* interarrival jitter (Q16.16 fixed point) */
@@ -130,6 +132,13 @@ int rtc_rtcp_build_sr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats);
 
 /* Build a Receiver Report */
 int rtc_rtcp_build_rr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats);
+
+/* Process-local random CNAME, shared by SDP and RTCP. NULL on RNG failure. */
+const char *rtc_rtcp_cname(void);
+
+/* Build SR/RR followed by an SDES CNAME chunk (RFC 3550 section 6.1). */
+int rtc_rtcp_build_report(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats, bool sender);
+void rtc_rtcp_stats_report_sent(rtc_rtcp_stats_t *stats);
 
 /* Parse an RTCP packet from raw bytes */
 int rtc_rtcp_parse(rtc_rtcp_packet_t *pkt, const uint8_t *data, size_t len);

@@ -55,7 +55,7 @@ have been replaced. See [the layout](ARCHITECTURE.md),
 
 ### 2. Improve RTCP interoperability
 
-- Emit compound SR/RR + SDES CNAME where required.
+- Preserve compound SR/RR + SDES CNAME on native and routing report paths.
 - Add randomized bandwidth-adaptive intervals and timer reconsideration.
 - Add BYE/source lifecycle coverage and explicit reduced-size RTCP negotiation.
 

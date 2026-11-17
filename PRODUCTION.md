@@ -76,3 +76,10 @@ production promise.
 The starting native baseline on macOS passed all 59 CTests, including local
 coturn fixtures and desktop media, with a warning-free build. This does not
 establish Linux/Windows/browser qualification or production readiness.
+
+Implemented: native and SFU periodic reports include SDES with the same random
+process-local CNAME advertised in SDP. Report parsing respects sub-packet
+boundaries; loss fractions use report intervals, and late pre-rollover packets
+do not create a false cycle. Focused RTCP/SDP/media/routing/peer/SFU tests pass
+locally. Adaptive scheduling, reduced-size feedback negotiation and source
+retirement remain required work; compound reports alone do not complete RTCP.
