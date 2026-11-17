@@ -3,6 +3,8 @@ import { createServer } from 'node:net';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 process.env.PLAYWRIGHT_BROWSERS_PATH ||= resolve(root, 'tests/interop/node_modules/.cache/ms-playwright');
@@ -25,16 +27,25 @@ export async function fixture(mode, extra = [], { withBrowser = true } = {}) {
     await new Promise(resolve => reservation.close(resolve));
     const children = [];
     const logs = new Map();
+    const nativeClients = new Map();
     let browser;
+    function record(name, data) {
+        logs.set(name, ((logs.get(name) || '') + data).slice(-200000));
+    }
     function run(name, binary, args) {
-        const child = spawn(resolve(build, binary), args, { stdio: ['pipe', 'pipe', 'pipe'] });
+        const executable = process.platform === 'win32' && !binary.endsWith('.exe') ? `${binary}.exe` : binary;
+        const child = spawn(resolve(build, executable), args, { stdio: ['pipe', 'pipe', 'pipe'] });
         logs.set(name, '');
         child.done = new Promise(resolve => {
-            child.once('error', error => { logs.set(name, logs.get(name) + error); resolve({ code: -1 }); });
-            child.once('exit', (code, signal) => resolve({ code, signal }));
+            child.once('error', error => {
+                child.spawnFailure = error;
+                record(name, String(error));
+                resolve({ code: -1 });
+            });
+            child.once('close', (code, signal) => resolve({ code, signal }));
         });
-        for (const stream of [child.stdout, child.stderr])
-            stream.on('data', data => logs.set(name, (logs.get(name) + data).slice(-200000)));
+        child.stdout.on('data', data => record(name, data));
+        child.stderr.on('data', data => { record(name, data); record(`${name}:stderr`, data); });
         children.push(child);
         return child;
     }
@@ -42,7 +53,39 @@ export async function fixture(mode, extra = [], { withBrowser = true } = {}) {
     const http = `http://127.0.0.1:${port}`;
     const server = run('server', 'app/server/mrtc_server',
         ['--port', String(port), '--bind', '127.0.0.1', '--mode', mode,
-            '--web-root', resolve(root, process.env.MRTC_WEB_ROOT || 'web/dist'), ...extra]);
+            ...(withBrowser ? ['--web-root', resolve(root, process.env.MRTC_WEB_ROOT || 'app/web/dist')] : []),
+            ...extra]);
+    async function artifacts(error) {
+        const destination = resolve(process.env.MRTC_TEST_ARTIFACTS || resolve(root, 'build/interop-failures'),
+            `${Date.now()}-${mode}-${randomUUID().slice(0, 8)}`);
+        const snapshots = {};
+        for (const [name, client] of nativeClients) {
+            try { snapshots[name] = (await client.command('stats', {}, 1000)).stats; }
+            catch (error) {
+                snapshots[name] = { unavailable: String(error), detail: error.detail, last_known: client.lastSnapshot };
+            }
+        }
+        if (browser) for (const [index, page] of browser.contexts().flatMap(context => context.pages()).entries()) {
+            let timer;
+            try {
+                snapshots[`browser-${index}`] = await Promise.race([
+                    page.evaluate(() => window.mrtc?.stats()),
+                    new Promise((_, reject) => {
+                        timer = setTimeout(() => reject(Error('browser snapshot deadline')), 2000);
+                    }),
+                ]);
+            }
+            catch (error) { snapshots[`browser-${index}`] = { unavailable: String(error) }; }
+            finally { clearTimeout(timer); }
+        }
+        await mkdir(destination, { recursive: true });
+        await writeFile(resolve(destination, 'failure.json'), JSON.stringify({
+            mode, error: error.stack || String(error), detail: error.detail, snapshots,
+        }, null, 2));
+        for (const [name, text] of logs)
+            await writeFile(resolve(destination, `${name.replace(/[^a-zA-Z0-9._-]/g, '_')}.log`), text);
+        console.error(`Failure artifacts: ${destination}`);
+    }
     async function close() {
         if (browser) await browser.close();
         for (const child of children)
@@ -55,8 +98,12 @@ export async function fixture(mode, extra = [], { withBrowser = true } = {}) {
     }
     try {
         await until(async () => {
-            if (server.exitCode !== null) throw Error(`server exited: ${logs.get('server')}`);
-            try { return (await fetch(http)).ok; } catch { return false; }
+            if (server.spawnFailure || server.exitCode !== null)
+                throw Error(`server exited: ${logs.get('server')}`);
+            try {
+                const response = await fetch(http, { signal: AbortSignal.timeout(1000) });
+                return withBrowser ? response.ok : response.status > 0;
+            } catch { return false; }
         }, 'real server HTTP readiness');
         if (withBrowser) {
             const { chromium } = await import('playwright');
@@ -91,8 +138,9 @@ export async function fixture(mode, extra = [], { withBrowser = true } = {}) {
             await until(async () => (await page.evaluate(() => window.mrtc.stats())).id, `${name} UI join`);
             return page;
         }
-        return { url, http, run, page, logs, close, browser };
+        return { url, http, run, page, logs, close, browser, artifacts, record, nativeClients };
     } catch (error) {
+        await artifacts(error).catch(error => console.error(`Artifact write failed: ${error}`));
         await close();
         throw Error(`${error}\n${[...logs].map(([name, text]) => `${name}: ${text}`).join('\n')}`);
     }
@@ -109,8 +157,4 @@ export async function decoded(page, peers, epoch) {
 export async function chat(page, text) {
     await page.locator('#message').fill(text);
     await page.locator('#chat-form button').click();
-}
-export function probe(fixture, name, meeting, duration = 180) {
-    return fixture.run(name, 'app/sfu_probe', ['--server', fixture.url, '--meeting', meeting,
-        '--name', name, '--duration', String(duration), '--synthetic', '--chat']);
 }

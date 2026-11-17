@@ -1,0 +1,12 @@
+add_library(mrtc_app_common STATIC app_session.c)
+target_include_directories(mrtc_app_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(mrtc_app_common PUBLIC mrtc_conference)
+mrtc_set_warnings(mrtc_app_common)
+
+if(MRTC_BUILD_TESTS)
+    add_executable(test_app_session test_app_session.c)
+    target_include_directories(test_app_session PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+    target_link_libraries(test_app_session PRIVATE mrtc_app_common)
+    mrtc_set_warnings(test_app_session)
+    add_test(NAME test_app_session COMMAND test_app_session)
+endif()

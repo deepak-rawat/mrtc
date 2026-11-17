@@ -1,5 +1,15 @@
 import assert from 'node:assert/strict';
-import { fixture, until, stats, decoded, chat, probe } from './fixture.mjs';
+import { fixture, until, stats, decoded, chat } from './fixture.mjs';
+import { NativeClient } from './native-client.mjs';
+import { media } from './native-checks.mjs';
+
+async function nativeReply(native, page, peerId, text) {
+    const cursor = native.cursor;
+    await chat(page, text);
+    await native.expectMessage(peerId, text, cursor);
+    await native.sendMessage(`reply:${text}`, peerId);
+    await until(async () => (await stats(page)).messages.includes(`reply:${text}`), `native reply ${text}`);
+}
 
 async function selectedAudioOnce(page, peers) {
     const rendered = await page.locator('#remotes video').evaluateAll(videos => videos.map(video => ({
@@ -23,14 +33,15 @@ let f;
 try {
     f = await fixture('auto', ['--p2p-max', '2',
         '--downgrade-delay-ms', process.env.MRTC_DOWNGRADE_DELAY_MS || '250']);
-    probe(f, 'native', 'migration');
-    await until(() => /JOINED peer=/.test(f.logs.get('native')), 'native joins auto room');
+    const native = new NativeClient(f, 'native');
+    await native.join(f.url, 'migration', 'Native', { stun: '' });
     const first = await f.page('Browser Alice', 'migration');
     const initial = await stats(first);
     assert.equal(initial.mode, 'mesh');
     await until(async () => Object.keys((await stats(first)).sources).length === 1, 'native mesh source');
-    const nativeId = Object.keys((await stats(first)).sources)[0];
+    const nativeId = native.peerId;
     await decoded(first, [nativeId]);
+    await media([native], [{ peerId: initial.id }]);
     const nativeTile = await first.locator(`[data-peer-id="${nativeId}"]`).elementHandle();
     const second = await f.page('Browser Bob', 'migration');
     const secondId = (await stats(second)).id;
@@ -41,26 +52,33 @@ try {
     await decoded(second, [nativeId, firstId], sfuEpoch);
     await selectedAudioOnce(first, [nativeId, secondId]);
     assert(await nativeTile.evaluate(node => node === document.querySelector(`[data-peer-id="${node.dataset.peerId}"]`)));
+    const cursor = native.cursor;
     await chat(first, 'browser-datachannel');
     await until(async () => (await stats(second)).messages.includes('browser-datachannel'), 'new SFU SCTP association');
+    await native.expectMessage(firstId, 'browser-datachannel', cursor);
+    await native.sendMessage('native-datachannel');
     await until(async () => (await stats(first)).messages.includes('native-datachannel'), 'native SFU SCTP reply');
-    await until(() => /TOPOLOGY mode=sfu status=active/.test(f.logs.get('native')), 'native SFU commit');
+    await native.event('topology', event => event.mode === 'sfu' && event.status === 'active' && event.epoch === sfuEpoch);
+    await media([native], [{ peerId: firstId }, { peerId: secondId }]);
     await second.locator('#leave').click();
     const meshEpoch = await switchTo(first, 'mesh', sfuEpoch);
     await decoded(first, [nativeId], meshEpoch);
+    await media([native], [{ peerId: firstId }]);
     await selectedAudioOnce(first, [nativeId]);
     assert(await nativeTile.evaluate(node => node === document.querySelector(`[data-peer-id="${node.dataset.peerId}"]`)));
     await first.locator('#mic').click();
     await first.locator('#camera').click();
-    await chat(first, 'browser-datachannel');
-    await until(() => /TOPOLOGY mode=mesh status=active epoch=[2-9]/.test(f.logs.get('native')), 'native mesh recommit');
+    await nativeReply(native, first, firstId, 'mesh-recommit');
+    await native.event('topology', event => event.mode === 'mesh' && event.status === 'active' && event.epoch === meshEpoch);
     assert((await stats(first)).capture.every(track => track.state === 'live'));
     assert.deepEqual((await stats(first)).errors, []);
-    assert(!f.logs.get('native').includes('PROBE_ERROR'), 'Native migration must not hide negotiation errors');
+    await native.snapshot();
+    await native.quit();
     console.log('PASS actual UI + native automatic 2→3→2, per-source decode, stable tiles, single selected audio, SCTP migration and capture lifetime');
 } catch (error) {
     console.error(error);
-    if (f) for (const [name, text] of f.logs) console.error(`--- ${name} ---\n${text}`);
+    await f?.artifacts(error);
+    if (f) for (const [name, text] of f.logs) console.error(`--- ${name} (tail) ---\n${text.slice(-4000)}`);
     process.exitCode = 1;
 } finally { await f?.close(); }
 
@@ -68,12 +86,12 @@ try {
 let failure;
 try {
     failure = await fixture('auto', ['--p2p-max', '2', '--downgrade-delay-ms', '250']);
-    probe(failure, 'abort-native', 'abort');
-    await until(() => /JOINED peer=/.test(failure.logs.get('abort-native')), 'native abort survivor joins');
+    const native = new NativeClient(failure, 'abort-native');
+    await native.join(failure.url, 'abort', 'Abort survivor', { stun: '' });
     const first = await failure.page('Alice', 'abort');
     const firstId = (await stats(first)).id;
     await until(async () => Object.keys((await stats(first)).sources).length === 1, 'native abort source');
-    const nativeId = Object.keys((await stats(first)).sources)[0];
+    const nativeId = native.peerId;
     await decoded(first, [nativeId]);
     const before = await stats(first);
     const third = await failure.browser.contexts()[0].newPage();
@@ -108,8 +126,7 @@ try {
     await third.locator('#synthetic').check();
     await third.locator('#join').click();
     await until(async () => (await stats(first)).pendingEpoch, 'real pending graph');
-    await chat(first, 'browser-datachannel');
-    await until(async () => (await stats(first)).messages.includes('native-datachannel'), 'old graph carries native data during prepare');
+    await nativeReply(native, first, firstId, 'during-prepare');
     await until(async () => (await stats(first)).events.some(event => event.startsWith('topology_abort:')),
         'coordinator timeout abort', 30000);
     const after = await stats(first);
@@ -117,10 +134,11 @@ try {
     assert.equal(after.mode, 'mesh');
     assert(!after.pendingEpoch);
     assert(after.errors.some(error => error.startsWith('Switch aborted:')));
-    const received = after.messages.filter(text => text === 'native-datachannel').length;
-    await chat(first, 'browser-datachannel');
-    await until(async () => (await stats(first)).messages.filter(text =>
-        text === 'native-datachannel').length > received, 'native active graph survives abort');
+    assert.equal(after.errors.length, 1, 'only the deliberate timeout abort is reported');
+    const abortReason = after.errors[0].slice('Switch aborted: '.length);
+    assert.equal(abortReason, 'topology preparation timed out');
+    await native.event('topology', event => event.status === 'error' && event.reason === abortReason);
+    await nativeReply(native, first, firstId, 'after-abort');
     await until(async () => (await stats(first)).sources[nativeId].video > before.sources[nativeId].video + 2,
         'native source still decodes after abort');
     if (!replay || !replayPrepare || !replayCandidate || !client)
@@ -136,9 +154,14 @@ try {
     await until(async () => (await stats(third)).events.includes('discard:stale-prepare'), 'aborted epoch cannot resurrect');
     assert.equal((await stats(third)).connections.length, thirdBefore.connections.length);
     assert.equal((await stats(first)).id, firstId);
+    for (const page of [first, third])
+        assert((await stats(page)).errors.every(error => error === `Switch aborted: ${abortReason}`), 'no unrelated browser errors');
+    await native.snapshot();
+    await native.quit();
     console.log('PASS real coordinator native/browser timeout/abort, old-path media/data continuity and stale SDP/prepare isolation');
 } catch (error) {
     console.error(error);
-    if (failure) for (const [name, text] of failure.logs) console.error(`--- ${name} ---\n${text}`);
+    await failure?.artifacts(error);
+    if (failure) for (const [name, text] of failure.logs) console.error(`--- ${name} (tail) ---\n${text.slice(-4000)}`);
     process.exitCode = 1;
 } finally { await failure?.close(); }

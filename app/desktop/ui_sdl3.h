@@ -10,16 +10,33 @@
 #include <rtc/rtc_str_map.h>
 #include <stdbool.h>
 
-#define UI_MAX_TILES 16
+#define UI_MAX_TILES  16
+#define UI_CHAT_LINES 32
+
+typedef enum {
+    UI_ACTION_NONE,
+    UI_ACTION_JOIN,
+    UI_ACTION_MUTE,
+    UI_ACTION_CAMERA,
+    UI_ACTION_CHAT,
+    UI_ACTION_SEND,
+    UI_ACTION_LEAVE
+} ui_action_t;
+
+typedef struct {
+    SDL_FRect gallery, chat, controls[5], fields[3], sources[2], join;
+} ui_layout_t;
 
 typedef struct {
     char peer_id[64];
     char label[32];
+    char name[128];
     SDL_Texture *texture;
     int width, height;
     float audio_level; /* 0.0-1.0, updated from audio callback */
     bool active;
     bool remove_pending;
+    uint64_t audio_time;
 
     /* Protected by tiles_mutex, including upload on the main thread. */
     uint8_t *pending_yuv;
@@ -53,7 +70,27 @@ typedef struct {
     SDL_Texture *local_preview;
     int preview_w, preview_h;
     float local_audio_level; /* 0.0-1.0, for mic level bar */
+    uint64_t remote_video_uploads;
+    bool in_call, mic_muted, cam_muted, chat_open, use_camera, use_mic;
+    int focused_field;
+    char server[256], room[128], name[128], chat_input[256];
+    char chat_lines[UI_CHAT_LINES][512];
+    int chat_count;
+    char mode[16], status[256];
 } ui_sdl3_t;
+
+void ui_sdl3_layout(float width, float height, bool chat_open, ui_layout_t *out);
+SDL_FRect ui_sdl3_fit(SDL_FRect bounds, int width, int height);
+SDL_FRect ui_sdl3_tile_rect(SDL_FRect bounds, int count, int index);
+size_t ui_sdl3_wrap_line(const char *text, size_t columns);
+ui_action_t ui_sdl3_event(ui_sdl3_t *ui, const SDL_Event *event);
+void ui_sdl3_on_peer_joined(const char *peer_id, void *user);
+void ui_sdl3_set_peer_name(ui_sdl3_t *ui, const char *peer_id, const char *name);
+void ui_sdl3_on_message(const char *peer_id, const uint8_t *data, size_t len, void *user);
+void ui_sdl3_add_chat(ui_sdl3_t *ui, const char *name, const uint8_t *data, size_t len);
+int ui_sdl3_open_speaker(ui_sdl3_t *ui);
+void ui_sdl3_close_devices(ui_sdl3_t *ui);
+void ui_sdl3_set_status(ui_sdl3_t *ui, const char *message);
 
 /* Initialize SDL3 and create window */
 int ui_sdl3_init(ui_sdl3_t *ui, int win_w, int win_h);

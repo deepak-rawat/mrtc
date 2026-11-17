@@ -139,6 +139,41 @@ TEST(mesh_receive_only_offer_and_data_only_rejection) {
     }
 }
 
+TEST(data_only_answer_keeps_chat_and_rejects_remote_media) {
+    conference_config_t config = {.disable_receive_video = true, .disable_receive_audio = true};
+    conference_t *c = conference_create(&config);
+    ASSERT(c != NULL);
+    c->v2 = true;
+    conf_peer_t *peer = alloc_session(c, "bob", "m:1:alice:bob", 1, SIG_SESSION_MESH, false);
+    ASSERT(peer != NULL);
+    rtc_peer_connection_t *pc = create_pc_with_tracks(c, peer, false);
+    ASSERT(pc != NULL);
+    rtc_config_t remote_config = {0};
+    rtc_peer_connection_t *remote = rtc_peer_connection_create(&remote_config);
+    ASSERT(remote != NULL);
+    rtc_codec_t opus = {
+        .payload_type = 111, .mime_type = "audio/opus", .clock_rate = 48000, .channels = 2};
+    rtc_codec_t vp8 = {.payload_type = 96, .mime_type = "video/VP8", .clock_rate = 90000};
+    ASSERT(rtc_peer_connection_add_track(remote, RTC_KIND_AUDIO, &opus) != NULL);
+    ASSERT(rtc_peer_connection_add_track(remote, RTC_KIND_VIDEO, &vp8) != NULL);
+    ASSERT(rtc_peer_connection_create_data_channel(remote, "chat", NULL) != NULL);
+    rtc_desc_t offer, answer;
+    ASSERT_EQ(rtc_peer_connection_create_offer(remote, &offer), RTC_OK);
+    ASSERT_EQ(rtc_peer_connection_set_remote_desc(pc, &offer), RTC_OK);
+    ASSERT_EQ(configure_answer_senders(c, peer), RTC_OK);
+    ASSERT_EQ(rtc_peer_connection_create_answer(pc, &answer), RTC_OK);
+    rtc_sdp_t sdp = {0};
+    ASSERT_EQ(rtc_sdp_parse(&sdp, answer.sdp, answer.sdp_len), RTC_OK);
+    ASSERT_EQ(sdp.media_count, 3);
+    for (int i = 0; i < sdp.media_count; i++)
+        if (sdp.media[i].media_type != RTC_MEDIA_APPLICATION)
+            ASSERT_EQ(sdp.media[i].direction, 3);
+    rtc_sdp_close(&sdp);
+    rtc_peer_connection_close(remote);
+    rtc_peer_connection_destroy(remote);
+    conference_destroy(c);
+}
+
 TEST(mesh_answer_adopts_remote_mid_order_and_payload_types) {
     conference_config_t config = {0};
     conference_t *c = conference_create(&config);
@@ -560,6 +595,7 @@ int main(void) {
     RUN_TEST(sfu_no_source_offer_is_data_only);
     RUN_TEST(sfu_media_offer_accepts_conference_stun_settings);
     RUN_TEST(mesh_receive_only_offer_and_data_only_rejection);
+    RUN_TEST(data_only_answer_keeps_chat_and_rejects_remote_media);
     RUN_TEST(mesh_answer_adopts_remote_mid_order_and_payload_types);
     RUN_TEST(data_channel_send_and_callback_reply_race_peer_leave);
     RUN_TEST(versioned_data_channel_send_and_callback_reply_race_peer_leave);

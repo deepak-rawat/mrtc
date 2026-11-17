@@ -43,10 +43,11 @@ for (const mode of ['mesh', 'sfu', 'auto']) {
         console.log(`PASS browser ${mode}: real Join/chat/Leave UI, per-source decoded VP8/Opus and safe names`);
     } catch (error) {
         console.error(error);
+        await f?.artifacts(error);
         if (f) {
             for (const page of f.browser.contexts().flatMap(context => context.pages()))
                 console.error(JSON.stringify(await stats(page).catch(String)));
-            for (const [name, text] of f.logs) console.error(`--- ${name} ---\n${text}`);
+            for (const [name, text] of f.logs) console.error(`--- ${name} (tail) ---\n${text.slice(-4000)}`);
         }
         process.exitCode = 1;
     } finally { await f?.close(); }
@@ -90,11 +91,12 @@ try {
     console.log(`PASS configurable threshold ${maximum}: decoded ${maximum}→${maximum + 1}→${maximum} handoff`);
 } catch (error) {
     console.error(error);
+    await thresholdFixture?.artifacts(error);
     if (thresholdFixture) {
         for (const page of thresholdFixture.browser.contexts().flatMap(context => context.pages()))
             console.error(JSON.stringify(await stats(page).catch(String)));
         for (const [name, text] of thresholdFixture.logs)
-            console.error(`--- ${name} ---\n${text}`);
+            console.error(`--- ${name} (tail) ---\n${text.slice(-4000)}`);
     }
     process.exitCode = 1;
 } finally {

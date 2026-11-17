@@ -6,13 +6,13 @@ uses a changing canvas and a Web Audio oscillator; it never replaces failed
 camera/microphone permissions silently.
 
 ```sh
-cd web
+cd app/web
 npm ci
 npm run typecheck
 npm run build
 ```
 
-Serve `web/dist` with `build/app/server/mrtc_server --web-root web/dist`.
+Serve `app/web/dist` with `build/app/server/mrtc_server --web-root app/web/dist`.
 Open its HTTP URL on localhost. The default signaling endpoint is the same
 origin's `/ws` (WS for HTTP, WSS for HTTPS). For LAN/non-localhost use HTTPS
 and WSS: browser capture requires a secure context. An explicit Server URL

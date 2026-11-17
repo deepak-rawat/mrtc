@@ -14,6 +14,7 @@ endif()
 # Options
 option(MRTC_BUILD_TESTS "Build test executables" ON)
 option(MRTC_ENABLE_ASAN "Enable AddressSanitizer (Debug builds)" OFF)
+option(MRTC_BUILD_DESKTOP "Build the SDL desktop application and UI tests" ON)
 
 # Feature toggles
 option(MRTC_ENABLE_CLIENT_API "Build client/P2P peer connection API" ON)

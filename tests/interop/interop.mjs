@@ -1,32 +1,26 @@
 import assert from 'node:assert/strict';
-import { fixture, until, stats, decoded, chat, probe } from './fixture.mjs';
+import { fixture, until, stats, decoded, chat } from './fixture.mjs';
+import { NativeClient } from './native-client.mjs';
+import { media, exchange, active } from './native-checks.mjs';
 
 async function exerciseChat(f, prefix) {
-    const args = ['--server', f.url, '--meeting', prefix, '--stun', ''];
-    const a = f.run(`${prefix}-a`, 'app/chat/chat', args);
-    const b = f.run(`${prefix}-b`, 'app/chat/chat', args);
-    await until(() => f.logs.get(`${prefix}-a`).includes('[joined as') &&
-        f.logs.get(`${prefix}-b`).includes('[joined as'), 'native CLI clients joined');
-    await until(() => {
-        if (f.logs.get(`${prefix}-b`).includes(`${prefix}-check`)) return true;
-        a.stdin.write(`${prefix}-check\n`);
-        return false;
-    }, 'CLI chat delivery');
-    await until(() => {
-        if (f.logs.get(`${prefix}-a`).includes(`${prefix}-reply`)) return true;
-        b.stdin.write(`${prefix}-reply\n`);
-        return false;
-    }, 'CLI chat reply');
-    a.stdin.write('quit\n'); b.stdin.write('quit\n');
-    assert.equal((await a.done).code, 0);
-    assert.equal((await b.done).code, 0);
+    const a = new NativeClient(f, `${prefix}-a`);
+    const b = new NativeClient(f, `${prefix}-b`);
+    await a.join(f.url, prefix, 'CLI Alice', { stun: '' });
+    await b.join(f.url, prefix, 'CLI Bob', { stun: '' });
+    await active([a, b], prefix.startsWith('sfu') ? 'sfu' : 'mesh');
+    await media([a, b]);
+    await exchange(a, [b], `${prefix}-check`);
+    await exchange(b, [a], `${prefix}-reply`);
+    await a.quit();
+    await b.quit();
 }
 for (const mode of ['sfu', 'mesh']) {
     let f;
     try {
         f = await fixture(mode);
-        probe(f, 'native', 'interop');
-        await until(() => /(?:PROBE_JOINED|JOINED peer=)/.test(f.logs.get('native')), 'native join');
+        const native = new NativeClient(f, 'native');
+        await native.join(f.url, 'interop', 'Native', { stun: '' });
         const first = await f.page('Browser Alice', 'interop');
         const second = await f.page('Browser Bob', 'interop');
         const a = (await stats(first)).id;
@@ -34,13 +28,15 @@ for (const mode of ['sfu', 'mesh']) {
         await decoded(first, [b]);
         await decoded(second, [a]);
         await until(async () => Object.keys((await stats(first)).sources).length === 2, 'native source routing');
-        const nativeId = Object.keys((await stats(first)).sources).find(id => id !== b);
+        const nativeId = native.peerId;
         await decoded(first, [nativeId, b]);
-        await until(() => f.logs.get('native').includes('PROBE_MEDIA_OK'), 'native audio/video decode');
+        await media([native], [{ peerId: a }, { peerId: b }]);
+        const cursor = native.cursor;
         await chat(first, 'browser-datachannel');
         await until(async () => (await stats(second)).messages.includes('browser-datachannel'), 'browser SCTP delivery');
+        await native.expectMessage(a, 'browser-datachannel', cursor);
+        await native.sendMessage('native-datachannel');
         await until(async () => (await stats(first)).messages.includes('native-datachannel'), 'native SCTP delivery');
-        await until(() => f.logs.get('native').includes('PROBE_DATA_OK'), 'native receives browser SCTP');
         const tile = await second.locator(`[data-peer-id="${a}"]`).elementHandle();
         if (mode === 'sfu') {
             const sourceFrames = async () => (await stats(second)).sources[a].video;
@@ -67,15 +63,17 @@ for (const mode of ['sfu', 'mesh']) {
         await exerciseChat(f, `${mode}-chat`);
         assert([...f.logs.entries()].some(([name, text]) => name.startsWith('candidate:') &&
             text.includes('.local ')), 'Default-privacy synthetic browser must exercise mDNS host candidates');
-        assert(!f.logs.get('native').includes('PROBE_ERROR'), 'Native probe must not hide negotiation errors');
+        await native.snapshot();
         assert.deepEqual((await stats(first)).errors, []);
         assert.deepEqual((await stats(second)).errors, []);
+        await native.quit();
         console.log(`PASS ${mode}: default-privacy mDNS + Join-click autoplay, actual UI, bidirectional native/browser decoded media, SCTP, restart, leave/rejoin and CLI chat`);
     } catch (error) {
         console.error(error);
+        await f?.artifacts(error);
         if (f) for (const page of f.browser.contexts().flatMap(context => context.pages()))
             console.error(JSON.stringify(await stats(page).catch(String)));
-        if (f) for (const [name, text] of f.logs) console.error(`--- ${name} ---\n${text}`);
+        if (f) for (const [name, text] of f.logs) console.error(`--- ${name} (tail) ---\n${text.slice(-4000)}`);
         process.exitCode = 1;
     } finally { await f?.close(); }
 }

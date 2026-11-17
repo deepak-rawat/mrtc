@@ -18,10 +18,10 @@ The compatibility executable is built from the same entrypoint at
 
 ## Start
 
-From the repository root, after building C targets and `web/dist`:
+From the repository root, after building C targets and `app/web/dist`:
 
 ```sh
-./build/app/server/mrtc_server 8080 --web-root web/dist
+./build/app/server/mrtc_server 8080 --web-root app/web/dist
 ```
 
 Open `http://localhost:8080`. HTTP assets and `/ws` share the control endpoint;
