@@ -2,7 +2,7 @@
  * mrtc Video Conference — SDL3 Native Client
  *
  * Usage:
- *   conf_sdl --meeting <name> [--server ws://host:port] [--stun ip]
+ *   conf_sdl --meeting <name> [--server ws://host:port] [--stun server]
  *            [--camera] [--mic]
  *
  * By default, sends animated test pattern video and 440Hz sine tone audio.
@@ -30,7 +30,7 @@
 int main(int argc, char *argv[]) {
     const char *meeting = NULL;
     const char *server_url = "ws://127.0.0.1:8080";
-    const char *stun_ip = "stun.l.google.com";
+    const char *stun_ip = "stun:stun.l.google.com:19302";
     bool use_camera = false;
     bool use_mic = false;
 
@@ -49,12 +49,13 @@ int main(int argc, char *argv[]) {
     }
 
     if (!meeting) {
-        printf("Usage: %s --meeting <name> [--server <url>] [--stun <ip>]"
+        printf("Usage: %s --meeting <name> [--server <url>] [--stun <server>]"
                " [--camera] [--mic]\n\n",
                argv[0]);
         printf("  --meeting <name>   Meeting to join (required)\n");
         printf("  --server <url>     Signaling server (default: ws://127.0.0.1:8080)\n");
-        printf("  --stun <ip>        STUN server IP (default: stun.l.google.com)\n");
+        printf("  --stun <server>    Hostname/IP or stun: URL (default: "
+               "stun:stun.l.google.com:19302)\n");
         printf("  --camera           Use real webcam (default: test pattern)\n");
         printf("  --mic              Use real microphone (default: 440Hz test tone)\n");
         return 1;

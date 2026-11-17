@@ -162,6 +162,11 @@ Live negotiation supports track and direction changes; changing an established
 codec or payload type is rejected. Glare is explicit and can be handled through
 `rtc_peer_connection_rollback()`.
 
+The conference API and `conf_sdl --stun` accept a bare hostname/IP as well as a
+`stun:` URL. The app defaults to `stun:stun.l.google.com:19302`; use a URL to
+specify a port. For a localhost-only test, `--stun ""`
+disables external STUN discovery; it is not required for local SFU connectivity.
+
 ## Running
 
 Run these commands from the `build/` directory:
@@ -231,7 +236,8 @@ Unit TURN packet tests are not a substitute for these relay tests.
 
 ### Browser interoperability and conference churn
 
-The optional local harness uses Node.js 26 and pinned Playwright dependencies:
+The optional local harness uses Node.js 26 and pinned Playwright dependencies.
+After building the native binaries, run this from the repository root:
 
 ```bash
 cd app/browser_interop

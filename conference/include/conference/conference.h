@@ -55,7 +55,7 @@ typedef struct {
     int audio_sample_rate;   /* 48000 */
     int audio_channels;      /* 1 */
     int audio_bitrate_bps;   /* 32000 */
-    const char *stun_server; /* "stun.l.google.com" or NULL */
+    const char *stun_server; /* hostname/IP or stun: URL; NULL/empty disables STUN */
 
     conference_callbacks_t callbacks;
     void *user_data;

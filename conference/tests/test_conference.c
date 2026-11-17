@@ -87,6 +87,29 @@ TEST(sfu_no_source_offer_is_data_only) {
     conference_destroy(conference);
 }
 
+TEST(sfu_media_offer_accepts_conference_stun_settings) {
+    const char *servers[] = {"localhost", "127.0.0.1", "stun:127.0.0.1:9", ""};
+    for (size_t i = 0; i < sizeof(servers) / sizeof(servers[0]); i++) {
+        conference_config_t config = {.stun_server = servers[i]};
+        conference_t *conference = conference_create(&config);
+        ASSERT(conference != NULL);
+        conference->sfu_mode = true;
+        ASSERT_EQ(conference_add_video_source(conference, "camera", 160, 120, 30, 160), RTC_OK);
+        ASSERT_EQ(conference_add_audio_source(conference, "mic", 48000, 1, 32000), RTC_OK);
+        conf_peer_t *publisher = alloc_peer(conference, "sfu");
+        ASSERT(publisher != NULL);
+        rtc_peer_connection_t *pc = create_pc(conference, publisher);
+        ASSERT(pc != NULL);
+        ASSERT(rtc_peer_connection_create_data_channel(pc, "chat", NULL) != NULL);
+        rtc_desc_t offer;
+        ASSERT_EQ(rtc_peer_connection_create_offer(pc, &offer), RTC_OK);
+        ASSERT(strstr(offer.sdp, "m=video") != NULL);
+        ASSERT(strstr(offer.sdp, "m=audio") != NULL);
+        ASSERT(strstr(offer.sdp, "m=application") != NULL);
+        conference_destroy(conference);
+    }
+}
+
 typedef struct {
     conference_t *conference;
     _Atomic bool stop;
@@ -197,6 +220,7 @@ int main(void) {
     RUN_TEST(peer_slots_survive_holes_and_duplicate_ids);
     RUN_TEST(disconnect_removes_remote_participants);
     RUN_TEST(sfu_no_source_offer_is_data_only);
+    RUN_TEST(sfu_media_offer_accepts_conference_stun_settings);
     RUN_TEST(data_channel_send_and_callback_reply_race_peer_leave);
     rtc_client_cleanup();
     TEST_SUMMARY();

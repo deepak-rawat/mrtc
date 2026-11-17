@@ -344,10 +344,14 @@ static rtc_peer_connection_t *create_pc(conference_t *c, conf_peer_t *cp) {
         return cp->pc;
     rtc_config_t config;
     memset(&config, 0, sizeof(config));
-    if (c->cfg.stun_server) {
-        config.ice_servers[0].urls[0] = c->cfg.stun_server;
-        config.ice_servers[0].url_count = 1;
-        config.ice_server_count = 1;
+    if (c->cfg.stun_server && c->cfg.stun_server[0]) {
+        if (strchr(c->cfg.stun_server, ':')) {
+            config.ice_servers[0].urls[0] = c->cfg.stun_server;
+            config.ice_servers[0].url_count = 1;
+            config.ice_server_count = 1;
+        } else {
+            config.stun_server = c->cfg.stun_server;
+        }
     }
 
     rtc_peer_connection_t *pc = rtc_peer_connection_create(&config);
