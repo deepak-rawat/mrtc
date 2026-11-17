@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 
 /*
  * Safe write helper: snprintf into (*p, *remain), advance pointers on success.
@@ -211,6 +214,64 @@ static bool sdp_line_starts_n(const char *line, size_t line_len, const char *pre
     return line_len >= plen && strncmp(line, prefix, plen) == 0;
 }
 
+bool rtc_ice_candidate_is_mdns_hostname(const char *hostname) {
+    if (!hostname)
+        return false;
+    size_t len = strlen(hostname);
+    if (len && hostname[len - 1] == '.')
+        len--;
+    if (len <= 6 || len > 253)
+        return false;
+    const char *suffix = ".local";
+    for (size_t i = 0; i < 6; i++)
+        if (tolower((unsigned char)hostname[len - 6 + i]) != suffix[i])
+            return false;
+    size_t start = 0;
+    for (size_t i = 0; i <= len; i++) {
+        if (i == len || hostname[i] == '.') {
+            if (i == start || i - start > 63 || hostname[start] == '-' || hostname[i - 1] == '-')
+                return false;
+            start = i + 1;
+        } else {
+            unsigned char ch = (unsigned char)hostname[i];
+            if (ch >= 128 || (!isalnum(ch) && ch != '-'))
+                return false;
+        }
+    }
+    return true;
+}
+
+static int candidate_token(const char **cursor, char *out, size_t capacity) {
+    const char *p = *cursor;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (!*p || *p == '\r' || *p == '\n') {
+        *cursor = p;
+        return 0;
+    }
+    size_t len = 0;
+    while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') {
+        if ((unsigned char)*p < 33 || (unsigned char)*p > 126 || len + 1 >= capacity)
+            return -1;
+        out[len++] = *p++;
+    }
+    out[len] = '\0';
+    *cursor = p;
+    return 1;
+}
+
+static bool candidate_uint(const char *text, uint32_t maximum, uint32_t *out) {
+    if (text[0] < '0' || text[0] > '9')
+        return false;
+    char *end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (errno == ERANGE || !end || *end || value > maximum)
+        return false;
+    *out = (uint32_t)value;
+    return true;
+}
+
 int rtc_sdp_parse_candidate_line(const char *line, rtc_ice_candidate_t *out) {
     if (!line || !out)
         return RTC_ERR_INVALID;
@@ -222,25 +283,32 @@ int rtc_sdp_parse_candidate_line(const char *line, rtc_ice_candidate_t *out) {
         return RTC_ERR_SDP;
     p += 10;
 
-    rtc_ice_candidate_t c;
-    memset(&c, 0, sizeof(c));
-    char foundation[32] = {0}, transport[8] = {0}, type_str[8] = {0};
-    char ip[64] = {0};
-    int component = 0;
-    unsigned int priority = 0, port = 0;
-
-    int parsed = sscanf(p, "%31s %d %7s %u %63s %u typ %7s", foundation, &component, transport,
-                        &priority, ip, &port, type_str);
-    if (parsed < 7)
+    rtc_ice_candidate_t c = {0};
+    char component[12], priority[12], port_text[12], tag[4], type_str[8], address[256];
+    struct {
+        char *text;
+        size_t capacity;
+    } fields[] = {{c.foundation, sizeof(c.foundation)},
+                  {component, sizeof(component)},
+                  {c.protocol, sizeof(c.protocol)},
+                  {priority, sizeof(priority)},
+                  {address, sizeof(address)},
+                  {port_text, sizeof(port_text)},
+                  {tag, sizeof(tag)},
+                  {type_str, sizeof(type_str)}};
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
+        if (candidate_token(&p, fields[i].text, fields[i].capacity) != 1)
+            return RTC_ERR_SDP;
+    uint32_t component_value, port;
+    if (!candidate_uint(component, 256, &component_value) || !component_value ||
+        !candidate_uint(priority, INT32_MAX, &c.priority) || !c.priority ||
+        !candidate_uint(port_text, UINT16_MAX, &port) || !port || strcmp(tag, "typ"))
         return RTC_ERR_SDP;
-    if (strcmp(transport, "udp") != 0 && strcmp(transport, "UDP") != 0)
+    c.component = (int)component_value;
+    for (size_t i = 0; c.protocol[i]; i++)
+        c.protocol[i] = (char)tolower((unsigned char)c.protocol[i]);
+    if (strcmp(c.protocol, "udp") && strcmp(c.protocol, "tcp"))
         return RTC_ERR_SDP;
-    if (component <= 0 || port == 0 || port > 65535)
-        return RTC_ERR_SDP;
-
-    memcpy(c.foundation, foundation, sizeof(c.foundation));
-    c.component = component;
-    c.priority = priority;
 
     if (strcmp(type_str, "host") == 0)
         c.type = ICE_CANDIDATE_HOST;
@@ -248,27 +316,55 @@ int rtc_sdp_parse_candidate_line(const char *line, rtc_ice_candidate_t *out) {
         c.type = ICE_CANDIDATE_SRFLX;
     else if (strcmp(type_str, "relay") == 0)
         c.type = ICE_CANDIDATE_RELAY;
+    else if (strcmp(type_str, "prflx") == 0)
+        c.type = ICE_CANDIDATE_PRFLX;
     else
         return RTC_ERR_SDP;
 
-    int rc = rtc_addr_from_string(&c.addr, ip, (uint16_t)port);
-    if (rc != RTC_OK)
-        return rc;
-
-    const char *related = strstr(p, " raddr ");
-    if (related) {
-        char related_ip[64] = {0};
-        unsigned int related_port = 0;
-        if (sscanf(related, " raddr %63s rport %u", related_ip, &related_port) == 2) {
-            if (related_port == 0 || related_port > 65535)
+    if (rtc_addr_from_string(&c.addr, address, (uint16_t)port) != RTC_OK) {
+        if (c.type != ICE_CANDIDATE_HOST || !rtc_ice_candidate_is_mdns_hostname(address))
+            return RTC_ERR_SDP;
+        memcpy(c.hostname, address, strlen(address) + 1);
+        c.hostname_port = (uint16_t)port;
+    }
+    char key[64], value[256], related_ip[64] = {0};
+    uint32_t related_port = 0;
+    bool has_raddr = false, has_rport = false, has_tcp = false, has_ufrag = false;
+    int token;
+    while ((token = candidate_token(&p, key, sizeof(key))) == 1) {
+        if (candidate_token(&p, value, sizeof(value)) != 1)
+            return RTC_ERR_SDP;
+        if (strcmp(key, "raddr") == 0) {
+            if (has_raddr || strlen(value) >= sizeof(related_ip))
                 return RTC_ERR_SDP;
-            rc = rtc_addr_from_string(&c.related_addr, related_ip, (uint16_t)related_port);
-            if (rc != RTC_OK)
-                return rc;
-            c.has_related_addr = true;
+            memcpy(related_ip, value, strlen(value) + 1);
+            has_raddr = true;
+        } else if (strcmp(key, "rport") == 0) {
+            if (has_rport || !candidate_uint(value, UINT16_MAX, &related_port))
+                return RTC_ERR_SDP;
+            has_rport = true;
+        } else if (strcmp(key, "tcptype") == 0) {
+            if (has_tcp || strcmp(c.protocol, "tcp") ||
+                (strcmp(value, "active") && strcmp(value, "passive") && strcmp(value, "so")))
+                return RTC_ERR_SDP;
+            memcpy(c.tcp_type, value, strlen(value) + 1);
+            has_tcp = true;
+        } else if (strcmp(key, "ufrag") == 0) {
+            if (has_ufrag || strlen(value) >= sizeof(c.username_fragment))
+                return RTC_ERR_SDP;
+            memcpy(c.username_fragment, value, strlen(value) + 1);
+            has_ufrag = true;
         }
     }
-
+    if (token < 0 || (strcmp(c.protocol, "tcp") == 0 && !has_tcp) || has_raddr != has_rport)
+        return RTC_ERR_SDP;
+    if (has_raddr) {
+        if (rtc_addr_from_string(&c.related_addr, related_ip, (uint16_t)related_port) != RTC_OK)
+            return RTC_ERR_SDP;
+        if (!related_port && strcmp(related_ip, "0.0.0.0") && strcmp(related_ip, "::"))
+            return RTC_ERR_SDP;
+        c.has_related_addr = related_port != 0;
+    }
     *out = c;
     return RTC_OK;
 }
@@ -281,6 +377,9 @@ uint32_t rtc_ice_candidate_priority(rtc_ice_candidate_type_t type, int local_pre
             break;
         case ICE_CANDIDATE_SRFLX:
             type_pref = 100;
+            break;
+        case ICE_CANDIDATE_PRFLX:
+            type_pref = 110;
             break;
         case ICE_CANDIDATE_RELAY:
             type_pref = 0;
@@ -304,11 +403,19 @@ int rtc_ice_candidate_to_string(const rtc_ice_candidate_t *candidate, char *buf,
     if (!candidate || !buf || len == 0)
         return RTC_ERR_INVALID;
 
-    char ip[64];
+    char ip[256];
     uint16_t port = 0;
-    int rc = rtc_addr_to_string(&candidate->addr, ip, sizeof(ip), &port);
-    if (rc != RTC_OK)
-        return rc;
+    if (candidate->hostname[0]) {
+        if (candidate->type != ICE_CANDIDATE_HOST || !candidate->hostname_port ||
+            !rtc_ice_candidate_is_mdns_hostname(candidate->hostname))
+            return RTC_ERR_INVALID;
+        memcpy(ip, candidate->hostname, strlen(candidate->hostname) + 1);
+        port = candidate->hostname_port;
+    } else {
+        int rc = rtc_addr_to_string(&candidate->addr, ip, sizeof(ip), &port);
+        if (rc != RTC_OK)
+            return rc;
+    }
 
     const char *type_str;
     switch (candidate->type) {
@@ -321,25 +428,45 @@ int rtc_ice_candidate_to_string(const rtc_ice_candidate_t *candidate, char *buf,
         case ICE_CANDIDATE_RELAY:
             type_str = "relay";
             break;
+        case ICE_CANDIDATE_PRFLX:
+            type_str = "prflx";
+            break;
         default:
             return RTC_ERR_INVALID;
     }
 
-    int n = snprintf(buf, len, "candidate:%s %d udp %u %s %u typ %s", candidate->foundation,
-                     candidate->component, candidate->priority, ip, port, type_str);
+    const char *protocol = candidate->protocol[0] ? candidate->protocol : "udp";
+    if (strcmp(protocol, "udp") && strcmp(protocol, "tcp"))
+        return RTC_ERR_INVALID;
+    if (strcmp(protocol, "tcp") == 0 && strcmp(candidate->tcp_type, "active") &&
+        strcmp(candidate->tcp_type, "passive") && strcmp(candidate->tcp_type, "so"))
+        return RTC_ERR_INVALID;
+    int n = snprintf(buf, len, "candidate:%s %d %s %u %s %u typ %s", candidate->foundation,
+                     candidate->component, protocol, candidate->priority, ip, port, type_str);
     if (n < 0 || (size_t)n >= len)
         return RTC_ERR_NOMEM;
-
+    size_t used = (size_t)n;
+    if (strcmp(protocol, "tcp") == 0) {
+        n = snprintf(buf + used, len - used, " tcptype %s", candidate->tcp_type);
+        if (n < 0 || (size_t)n >= len - used)
+            return RTC_ERR_NOMEM;
+        used += (size_t)n;
+    }
     if (candidate->has_related_addr) {
         char related_ip[64];
         uint16_t related_port = 0;
-        rc = rtc_addr_to_string(&candidate->related_addr, related_ip, sizeof(related_ip),
-                                &related_port);
+        int rc = rtc_addr_to_string(&candidate->related_addr, related_ip, sizeof(related_ip),
+                                    &related_port);
         if (rc != RTC_OK)
             return rc;
-        size_t used = (size_t)n;
         int rn = snprintf(buf + used, len - used, " raddr %s rport %u", related_ip, related_port);
         if (rn < 0 || (size_t)rn >= len - used)
+            return RTC_ERR_NOMEM;
+        used += (size_t)rn;
+    }
+    if (candidate->username_fragment[0]) {
+        n = snprintf(buf + used, len - used, " ufrag %s", candidate->username_fragment);
+        if (n < 0 || (size_t)n >= len - used)
             return RTC_ERR_NOMEM;
     }
 
@@ -347,10 +474,10 @@ int rtc_ice_candidate_to_string(const rtc_ice_candidate_t *candidate, char *buf,
 }
 
 int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
+    if (!sdp || !text || len >= sizeof(sdp->raw))
+        return RTC_ERR_INVALID;
     /* Store raw text */
-    if (len >= sizeof(sdp->raw))
-        len = sizeof(sdp->raw) - 1;
-    memcpy(sdp->raw, text, len);
+    memmove(sdp->raw, text, len);
     sdp->raw[len] = '\0';
     sdp->raw_len = len;
 
@@ -363,8 +490,8 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
     }
     sdp->media_count = 0;
 
-    const char *p = text;
-    const char *end = text + len;
+    const char *p = sdp->raw;
+    const char *end = sdp->raw + len;
 
     /* Index of the current m= section being parsed (-1 = session level) */
     int current_media = -1;
@@ -582,8 +709,11 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
         /* Candidate */
         if (sdp_line_starts(line, "a=candidate:")) {
             rtc_ice_candidate_t c;
-            if (rtc_sdp_parse_candidate_line(line, &c) == RTC_OK)
-                rtc_vec_push(&sdp->candidates, &c);
+            int rc = rtc_sdp_parse_candidate_line(line, &c);
+            if (rc != RTC_OK)
+                return rc;
+            if (rtc_vec_push(&sdp->candidates, &c) != RTC_OK)
+                return RTC_ERR_NOMEM;
         }
 
         p = sdp_next_line(p, end);

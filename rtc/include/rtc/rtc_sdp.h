@@ -23,6 +23,7 @@ typedef enum {
     ICE_CANDIDATE_HOST,
     ICE_CANDIDATE_SRFLX,
     ICE_CANDIDATE_RELAY,
+    ICE_CANDIDATE_PRFLX,
 } rtc_ice_candidate_type_t;
 
 typedef struct {
@@ -33,6 +34,11 @@ typedef struct {
     int component;
     bool has_related_addr;
     char foundation[32];
+    char protocol[4]; /* empty means UDP for caller-initialized candidates */
+    char tcp_type[8];
+    char hostname[256]; /* unresolved mDNS host; addr remains unspecified */
+    uint16_t hostname_port;
+    char username_fragment[ICE_UFRAG_LEN];
 } rtc_ice_candidate_t;
 
 #define SDP_MAX_MEDIA      16
@@ -134,6 +140,7 @@ int rtc_sdp_add_candidate(rtc_sdp_t *sdp, const rtc_ice_candidate_t *c);
 size_t rtc_sdp_candidate_count(const rtc_sdp_t *sdp);
 const rtc_ice_candidate_t *rtc_sdp_get_candidate(const rtc_sdp_t *sdp, size_t idx);
 int rtc_sdp_parse_candidate_line(const char *line, rtc_ice_candidate_t *out);
+bool rtc_ice_candidate_is_mdns_hostname(const char *hostname);
 uint32_t rtc_ice_candidate_priority(rtc_ice_candidate_type_t type, int local_pref, int component);
 int rtc_ice_candidate_to_string(const rtc_ice_candidate_t *candidate, char *buf, size_t len);
 

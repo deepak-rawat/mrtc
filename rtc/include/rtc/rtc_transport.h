@@ -26,17 +26,19 @@ typedef enum {
     RTC_TRANSPORT_CANDIDATE_HOST,
     RTC_TRANSPORT_CANDIDATE_SRFLX,
     RTC_TRANSPORT_CANDIDATE_RELAY,
+    RTC_TRANSPORT_CANDIDATE_PRFLX,
 } rtc_transport_candidate_type_t;
 
 typedef struct {
     char foundation[32];
-    char address[64];
+    char address[256]; /* numeric address or unresolved mDNS host */
     char related_address[64];
     uint16_t port;
     uint16_t related_port;
     char protocol[8];
     rtc_transport_candidate_type_t type;
     bool has_related_address;
+    char username_fragment[RTC_ICE_UFRAG_MAX];
 } rtc_transport_candidate_t;
 
 typedef enum {
@@ -90,6 +92,8 @@ typedef struct {
     bool ice_controlling;
     bool consent_expired;
     bool ice_restarting;
+    uint32_t remote_candidates_deferred;
+    uint32_t remote_candidates_ineligible;
 } rtc_transport_stats_t;
 
 rtc_transport_t *rtc_transport_create(rtc_worker_t *worker, const rtc_transport_config_t *cfg);

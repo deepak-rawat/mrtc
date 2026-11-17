@@ -56,6 +56,8 @@ struct rtc_transport {
     rtc_addr_t remote_candidates[ICE_MAX_CANDIDATES];
     int remote_candidate_count;
     unsigned remote_candidate_index;
+    uint32_t remote_candidates_deferred;
+    uint32_t remote_candidates_ineligible;
     bool remote_ice_valid;
     bool remote_candidate_valid;
     uint8_t ice_txn_id[STUN_TXN_ID_SIZE];
@@ -762,10 +764,30 @@ int rtc_transport_set_remote_ice_parameters(rtc_transport_t *transport,
 
 static int tx_add_candidate_impl(rtc_transport_t *transport, void *arg) {
     const rtc_transport_candidate_t *candidate = (const rtc_transport_candidate_t *)arg;
-    rtc_addr_t address;
-    int rc = rtc_addr_from_string(&address, candidate->address, candidate->port);
-    if (rc != RTC_OK)
-        return rc;
+    bool mdns = rtc_ice_candidate_is_mdns_hostname(candidate->address);
+    rtc_addr_t address = {0};
+    if ((mdns && candidate->type != RTC_TRANSPORT_CANDIDATE_HOST) ||
+        (!mdns && rtc_addr_from_string(&address, candidate->address, candidate->port) != RTC_OK))
+        return RTC_ERR_INVALID;
+    if (candidate->username_fragment[0] && transport->remote_ice_valid &&
+        strcmp(candidate->username_fragment, transport->remote_ufrag)) {
+        RTC_LOG_DBG("ICE: ignoring candidate from an older ICE generation");
+        return RTC_OK;
+    }
+    if (strcmp(candidate->protocol, "tcp") == 0) {
+        if (transport->remote_candidates_ineligible != UINT32_MAX)
+            transport->remote_candidates_ineligible++;
+        RTC_LOG_INFO("ICE: TCP candidate is ineligible for this UDP transport");
+        return RTC_OK;
+    }
+    if (mdns) {
+        if (transport->remote_candidates_deferred != UINT32_MAX)
+            transport->remote_candidates_deferred++;
+        /* Do not leak .local names to unicast DNS or block the media worker.
+         * A validated incoming check supplies the peer-reflexive address. */
+        RTC_LOG_INFO("ICE: mDNS candidate deferred to authenticated peer-reflexive checks");
+        return RTC_OK;
+    }
     for (int i = 0; i < transport->remote_candidate_count; i++) {
         if (transport_same_addr(&address, &transport->remote_candidates[i]))
             return RTC_OK;
@@ -783,9 +805,13 @@ static int tx_add_candidate_impl(rtc_transport_t *transport, void *arg) {
 
 int rtc_transport_add_remote_candidate(rtc_transport_t *transport,
                                        const rtc_transport_candidate_t *candidate) {
-    if (!transport || !candidate || candidate->address[0] == '\0' || candidate->port == 0)
+    if (!transport || !candidate || candidate->address[0] == '\0' || candidate->port == 0 ||
+        !memchr(candidate->address, '\0', sizeof(candidate->address)) ||
+        !memchr(candidate->protocol, '\0', sizeof(candidate->protocol)) ||
+        !memchr(candidate->username_fragment, '\0', sizeof(candidate->username_fragment)) ||
+        (unsigned)candidate->type > RTC_TRANSPORT_CANDIDATE_PRFLX)
         return RTC_ERR_INVALID;
-    if (strcmp(candidate->protocol, "udp") != 0)
+    if (strcmp(candidate->protocol, "udp") && strcmp(candidate->protocol, "tcp"))
         return RTC_ERR_INVALID;
     return tx_op_invoke(transport, tx_add_candidate_impl, (void *)candidate);
 }
@@ -796,11 +822,23 @@ int rtc_transport_candidate_from_ice(rtc_transport_candidate_t *out,
         return RTC_ERR_INVALID;
     memset(out, 0, sizeof(*out));
 
-    char ip[64];
+    if (!memchr(in->hostname, '\0', sizeof(in->hostname)) ||
+        !memchr(in->protocol, '\0', sizeof(in->protocol)) ||
+        !memchr(in->username_fragment, '\0', sizeof(in->username_fragment)))
+        return RTC_ERR_INVALID;
+    char ip[256];
     uint16_t port = 0;
-    int rc = rtc_addr_to_string(&in->addr, ip, sizeof(ip), &port);
-    if (rc != RTC_OK)
-        return rc;
+    if (in->hostname[0]) {
+        if (in->type != ICE_CANDIDATE_HOST || !in->hostname_port ||
+            !rtc_ice_candidate_is_mdns_hostname(in->hostname))
+            return RTC_ERR_INVALID;
+        memcpy(ip, in->hostname, strlen(in->hostname) + 1);
+        port = in->hostname_port;
+    } else {
+        int rc = rtc_addr_to_string(&in->addr, ip, sizeof(ip), &port);
+        if (rc != RTC_OK)
+            return rc;
+    }
 
     size_t flen = strlen(in->foundation);
     if (flen >= sizeof(out->foundation))
@@ -812,18 +850,27 @@ int rtc_transport_candidate_from_ice(rtc_transport_candidate_t *out,
         ilen = sizeof(out->address) - 1;
     memcpy(out->address, ip, ilen);
     out->address[ilen] = '\0';
-    memcpy(out->protocol, "udp", sizeof("udp"));
+    const char *protocol = in->protocol[0] ? in->protocol : "udp";
+    if (strcmp(protocol, "udp") && strcmp(protocol, "tcp"))
+        return RTC_ERR_INVALID;
+    memcpy(out->protocol, protocol, strlen(protocol) + 1);
+    memcpy(out->username_fragment, in->username_fragment, strlen(in->username_fragment) + 1);
     out->port = port;
     out->type = RTC_TRANSPORT_CANDIDATE_HOST;
     if (in->type == ICE_CANDIDATE_SRFLX)
         out->type = RTC_TRANSPORT_CANDIDATE_SRFLX;
     else if (in->type == ICE_CANDIDATE_RELAY)
         out->type = RTC_TRANSPORT_CANDIDATE_RELAY;
+    else if (in->type == ICE_CANDIDATE_PRFLX)
+        out->type = RTC_TRANSPORT_CANDIDATE_PRFLX;
+    else if (in->type != ICE_CANDIDATE_HOST)
+        return RTC_ERR_INVALID;
 
     if (in->has_related_addr) {
         char related_ip[64];
         uint16_t related_port = 0;
-        rc = rtc_addr_to_string(&in->related_addr, related_ip, sizeof(related_ip), &related_port);
+        int rc =
+            rtc_addr_to_string(&in->related_addr, related_ip, sizeof(related_ip), &related_port);
         if (rc != RTC_OK)
             return rc;
         size_t rlen = strlen(related_ip);
@@ -1006,6 +1053,8 @@ static int tx_get_stats_impl(rtc_transport_t *transport, void *arg) {
     out->ice_controlling = transport->controlling;
     out->consent_expired = transport->consent_expired;
     out->ice_restarting = transport->ice_restarting;
+    out->remote_candidates_deferred = transport->remote_candidates_deferred;
+    out->remote_candidates_ineligible = transport->remote_candidates_ineligible;
     return RTC_OK;
 }
 

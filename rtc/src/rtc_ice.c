@@ -243,6 +243,13 @@ int rtc_ice_set_remote_credentials(rtc_ice_agent_t *agent, const char *ufrag, co
 }
 
 int rtc_ice_add_remote_candidate(rtc_ice_agent_t *agent, const rtc_ice_candidate_t *cand) {
+    if (!agent || !cand)
+        return RTC_ERR_INVALID;
+    if (cand->hostname[0] || (cand->protocol[0] && strcmp(cand->protocol, "udp"))) {
+        RTC_LOG_WARN("Standalone ICE requires numeric UDP candidates; use the runtime transport "
+                     "for deferred browser candidates");
+        return RTC_ERR_INVALID;
+    }
     if (agent->remote_candidate_count >= ICE_MAX_CANDIDATES)
         return RTC_ERR_NOMEM;
     agent->remote_candidates[agent->remote_candidate_count++] = *cand;

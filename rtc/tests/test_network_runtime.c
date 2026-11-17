@@ -148,6 +148,60 @@ static bool wait_dtls(endpoint_t *endpoint, rtc_transport_dtls_state_t state) {
     return false;
 }
 
+TEST(runtime_mdns_candidates_wait_for_authenticated_peer_reflexive_path) {
+    endpoint_t a, b;
+    ASSERT(endpoint_create(&a, RTC_ICE_MODE_FULL, 30000));
+    ASSERT(endpoint_create(&b, RTC_ICE_MODE_FULL, 30000));
+    rtc_ice_parameters_t ai, bi;
+    ASSERT_EQ(rtc_transport_get_ice_parameters(a.transport, &ai), RTC_OK);
+    ASSERT_EQ(rtc_transport_get_ice_parameters(b.transport, &bi), RTC_OK);
+    ASSERT_EQ(rtc_transport_set_remote_ice_parameters(a.transport, &bi), RTC_OK);
+    ASSERT_EQ(rtc_transport_set_remote_ice_parameters(b.transport, &ai), RTC_OK);
+    ASSERT_EQ(rtc_transport_set_ice_controlling(a.transport, true), RTC_OK);
+    ASSERT_EQ(rtc_transport_set_ice_controlling(b.transport, false), RTC_OK);
+    ASSERT(exchange_dtls(&a, &b, false));
+    rtc_transport_candidate_t numeric;
+    ASSERT(endpoint_candidate(&a, &numeric));
+    ASSERT_EQ(rtc_transport_add_remote_candidate(b.transport, &numeric), RTC_OK);
+    rtc_ice_candidate_t obfuscated;
+    ASSERT_EQ(rtc_sdp_parse_candidate_line("candidate:mdns 1 udp 2122260223 browser.local 50000 "
+                                           "typ host",
+                                           &obfuscated),
+              RTC_OK);
+    rtc_transport_candidate_t converted;
+    ASSERT_EQ(rtc_transport_candidate_from_ice(&converted, &obfuscated), RTC_OK);
+    ASSERT_EQ(rtc_transport_add_remote_candidate(a.transport, &converted), RTC_OK);
+    ASSERT_EQ(rtc_sdp_parse_candidate_line("candidate:tcp 1 tcp 1518280447 127.0.0.1 9 typ host "
+                                           "tcptype active",
+                                           &obfuscated),
+              RTC_OK);
+    ASSERT_EQ(rtc_transport_candidate_from_ice(&converted, &obfuscated), RTC_OK);
+    ASSERT_EQ(rtc_transport_add_remote_candidate(a.transport, &converted), RTC_OK);
+    rtc_transport_stats_t stats;
+    ASSERT_EQ(rtc_transport_get_stats(a.transport, &stats), RTC_OK);
+    ASSERT_EQ(stats.remote_candidates_deferred, 1);
+    ASSERT_EQ(stats.remote_candidates_ineligible, 1);
+    ASSERT(!stats.selected_tuple_valid && !stats.srtp_ready);
+    ASSERT_EQ(rtc_transport_start_ice(b.transport), RTC_OK);
+    ASSERT(wait_selected(&a, &b));
+    ASSERT_EQ(rtc_transport_start_dtls(a.transport), RTC_OK);
+    ASSERT(wait_dtls(&a, RTC_TRANSPORT_DTLS_CONNECTED));
+    ASSERT(wait_dtls(&b, RTC_TRANSPORT_DTLS_CONNECTED));
+    rtc_transport_on_rtp(b.transport, received_rtp, &b);
+    rtc_rtp_packet_t packet;
+    ASSERT_EQ(rtc_rtp_build(&packet, 96, 7, 90000, 0x11223344, true, (const uint8_t *)"rtp!", 4),
+              RTC_OK);
+    size_t wire_len = packet.buf_len;
+    ASSERT_EQ(rtc_transport_send_rtp(a.transport, packet.buf, &wire_len, sizeof(packet.buf)),
+              RTC_OK);
+    uint64_t deadline = rtc_time_ms() + 1000;
+    while (!atomic_load(&b.rtp_count) && rtc_time_ms() < deadline)
+        SLEEP_MS(10);
+    ASSERT_EQ(atomic_load(&b.rtp_count), 1);
+    endpoint_close(&a);
+    endpoint_close(&b);
+}
+
 TEST(runtime_roles_restart_and_consent) {
     endpoint_t a, b;
     ASSERT(endpoint_create(&a, RTC_ICE_MODE_FULL, 1200));
@@ -407,6 +461,7 @@ int main(int argc, char **argv) {
         }
         RUN_TEST(runtime_relay_only_coturn);
     } else {
+        RUN_TEST(runtime_mdns_candidates_wait_for_authenticated_peer_reflexive_path);
         RUN_TEST(runtime_roles_restart_and_consent);
         RUN_TEST(runtime_fingerprint_mismatch);
         RUN_TEST(runtime_checked_wire_retransmit);

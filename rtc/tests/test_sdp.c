@@ -356,6 +356,81 @@ TEST(sdp_candidate_helpers) {
     printf("    candidate helpers: priority + srflx raddr/rport OK\n");
 }
 
+TEST(browser_candidates_preserve_mdns_and_tcp_metadata) {
+    const char *name = "12345678-1234-1234-1234-123456789abc.local";
+    char line[256];
+    snprintf(line, sizeof(line),
+             "candidate:mdns 1 UDP 2122260223 %s 50000 typ host generation 0 "
+             "ufrag browser",
+             name);
+    rtc_ice_candidate_t candidate;
+    ASSERT_EQ(rtc_sdp_parse_candidate_line(line, &candidate), RTC_OK);
+    ASSERT_STR_EQ(candidate.hostname, name);
+    ASSERT_STR_EQ(candidate.protocol, "udp");
+    ASSERT_STR_EQ(candidate.username_fragment, "browser");
+    ASSERT_EQ(candidate.hostname_port, 50000);
+    char encoded[256];
+    ASSERT_EQ(rtc_ice_candidate_to_string(&candidate, encoded, sizeof(encoded)), RTC_OK);
+    rtc_ice_candidate_t roundtrip;
+    ASSERT_EQ(rtc_sdp_parse_candidate_line(encoded, &roundtrip), RTC_OK);
+    ASSERT_STR_EQ(roundtrip.hostname, name);
+    ASSERT_STR_EQ(roundtrip.username_fragment, "browser");
+    ASSERT_EQ(rtc_sdp_parse_candidate_line("candidate:tcp 1 TCP 1518280447 127.0.0.1 9 typ host "
+                                           "tcptype active",
+                                           &candidate),
+              RTC_OK);
+    ASSERT_STR_EQ(candidate.protocol, "tcp");
+    ASSERT_STR_EQ(candidate.tcp_type, "active");
+    ASSERT_EQ(rtc_ice_candidate_to_string(&candidate, encoded, sizeof(encoded)), RTC_OK);
+    ASSERT(strstr(encoded, "tcptype active") != NULL);
+    ASSERT_EQ(rtc_sdp_parse_candidate_line("candidate:prflx 1 udp 1862270975 127.0.0.1 50000 typ "
+                                           "prflx",
+                                           &candidate),
+              RTC_OK);
+    ASSERT_EQ(candidate.type, ICE_CANDIDATE_PRFLX);
+}
+
+TEST(browser_candidate_rejection_is_not_blanket_filtering) {
+    const char *invalid[] = {
+        "candidate:x 1 udp 2122260223 bad..local 50000 typ host",
+        "candidate:x 1 udp 2122260223 -bad.local 50000 typ host",
+        "candidate:x 1 udp 2122260223 bad-.local 50000 typ host",
+        "candidate:x 1 udp 2122260223 example.com 50000 typ host",
+        "candidate:x 1 udp 2122260223 valid.local 50000 typ srflx",
+        "candidate:x 1 tcp 1518280447 127.0.0.1 9 typ host",
+        "candidate:x 1 tcp 1518280447 127.0.0.1 9 typ host tcptype fake",
+        "candidate:x 1 udp 2122260223 127.0.0.1 50000 typ host tcptype active",
+        "candidate:x 1 quic 2122260223 127.0.0.1 50000 typ host",
+        "candidate:x 257 udp 2122260223 127.0.0.1 50000 typ host",
+        "candidate:x 1 udp 4294967296 127.0.0.1 50000 typ host",
+        "candidate:x 1 udp -1 127.0.0.1 50000 typ host",
+        "candidate:x 1 udp 2122260223 127.0.0.1 50000junk typ host",
+        "candidate:x 1 udp 2122260223 127.0.0.1 0 typ host",
+        "candidate:x 1 udp 2122260223 127.0.0.1 50000 typ host ufrag",
+    };
+    rtc_ice_candidate_t candidate;
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
+        ASSERT(rtc_sdp_parse_candidate_line(invalid[i], &candidate) != RTC_OK);
+}
+
+TEST(embedded_candidates_are_retained_or_rejected_explicitly) {
+    const char *text = "v=0\r\n"
+                       "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
+                       "a=candidate:mdns 1 udp 2122260223 camera.local 50000 typ host";
+    size_t len = strlen(text);
+    char *bytes = malloc(len);
+    ASSERT(bytes != NULL);
+    memcpy(bytes, text, len);
+    rtc_sdp_t sdp = {0};
+    ASSERT_EQ(rtc_sdp_parse(&sdp, bytes, len), RTC_OK);
+    ASSERT_EQ(rtc_sdp_candidate_count(&sdp), 1);
+    ASSERT_STR_EQ(rtc_sdp_get_candidate(&sdp, 0)->hostname, "camera.local");
+    free(bytes);
+    const char *bad = "v=0\r\na=candidate:malformed\r\n";
+    ASSERT(rtc_sdp_parse(&sdp, bad, strlen(bad)) != RTC_OK);
+    rtc_sdp_close(&sdp);
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  SDP Component Tests\n");
@@ -371,6 +446,9 @@ int main(void) {
     RUN_TEST(sdp_many_candidates);
     RUN_TEST(sdp_extmap_roundtrip);
     RUN_TEST(sdp_candidate_helpers);
+    RUN_TEST(browser_candidates_preserve_mdns_and_tcp_metadata);
+    RUN_TEST(browser_candidate_rejection_is_not_blanket_filtering);
+    RUN_TEST(embedded_candidates_are_retained_or_rejected_explicitly);
 
     rtc_cleanup();
     TEST_SUMMARY();
