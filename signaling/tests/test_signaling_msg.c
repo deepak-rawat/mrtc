@@ -194,6 +194,150 @@ TEST(json_rejects_truncated_negotiation) {
     free(sdp);
 }
 
+TEST(versioned_join_and_topology_roundtrip) {
+    sig_msg_t message = {.type = SIG_MSG_JOIN,
+                         .version = SIG_PROTOCOL_VERSION,
+                         .can_mesh = true,
+                         .can_sfu = true,
+                         .can_switch = true};
+    strcpy(message.meeting, "room");
+    strcpy(message.display_name, "Alice");
+    char *json = sig_msg_build(&message);
+    ASSERT(json != NULL);
+    sig_msg_t parsed;
+    ASSERT_EQ(sig_msg_parse(&parsed, json, strlen(json)), 0);
+    ASSERT_EQ(parsed.version, SIG_PROTOCOL_VERSION);
+    ASSERT(parsed.can_mesh && parsed.can_sfu && parsed.can_switch);
+    ASSERT_STR_EQ(parsed.display_name, "Alice");
+    free(json);
+
+    message.epoch = 7;
+    strcpy(message.mode, "sfu");
+    strcpy(message.reason, "network path failed");
+    message.peer_count = 1;
+    strcpy(message.peers[0], "bob");
+    strcpy(message.peer_names[0], "Bob");
+    const sig_msg_type_t types[] = {SIG_MSG_TOPOLOGY_PREPARE, SIG_MSG_TOPOLOGY_READY,
+                                    SIG_MSG_TOPOLOGY_COMMIT,  SIG_MSG_TOPOLOGY_ACK,
+                                    SIG_MSG_TOPOLOGY_ABORT,   SIG_MSG_TOPOLOGY_REQUEST};
+    for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+        message.type = types[i];
+        json = sig_msg_build(&message);
+        ASSERT(json != NULL);
+        ASSERT_EQ(sig_msg_parse(&parsed, json, strlen(json)), 0);
+        ASSERT_EQ(parsed.type, types[i]);
+        ASSERT_EQ(parsed.epoch, 7);
+        ASSERT_STR_EQ(parsed.mode, "sfu");
+        ASSERT_STR_EQ(parsed.peers[0], "bob");
+        ASSERT_STR_EQ(parsed.peer_names[0], "Bob");
+        ASSERT_STR_EQ(parsed.reason, message.reason);
+        free(json);
+    }
+}
+
+TEST(versioned_negotiation_preserves_session_and_eoc) {
+    sig_msg_t message = {.type = SIG_MSG_OFFER, .version = SIG_PROTOCOL_VERSION, .epoch = 9};
+    ASSERT_EQ(sig_session_id(message.session_id, SIG_SESSION_MESH, 9, "bob", "alice"), RTC_OK);
+    strcpy(message.to, "alice");
+    strcpy(message.sdp, "v=0\r\n");
+    char *json = sig_msg_build(&message);
+    ASSERT(json != NULL);
+    sig_msg_t parsed;
+    ASSERT_EQ(sig_msg_parse(&parsed, json, strlen(json)), 0);
+    ASSERT_STR_EQ(parsed.session_id, "m:9:alice:bob");
+    ASSERT_STR_EQ(parsed.sdp, message.sdp);
+    free(json);
+    message.type = SIG_MSG_CANDIDATE;
+    message.sdp[0] = '\0';
+    json = sig_msg_build(&message);
+    ASSERT(json != NULL);
+    ASSERT(strstr(json, "\"candidate\":\"\"") != NULL);
+    ASSERT_EQ(sig_msg_parse(&parsed, json, strlen(json)), 0);
+    ASSERT_EQ(parsed.epoch, 9);
+    ASSERT_STR_EQ(parsed.session_id, message.session_id);
+    ASSERT_EQ(parsed.candidate[0], '\0');
+    free(json);
+}
+
+TEST(versioned_messages_reject_ambiguous_or_unbounded_fields) {
+    const char *invalid[] = {
+        "{\"type\":\"topology_commit\",\"version\":2,\"epoch\":1.5,\"mode\":\"sfu\"}",
+        "{\"type\":\"topology_commit\",\"version\":2,\"epoch\":4294967296,\"mode\":\"sfu\"}",
+        "{\"type\":\"topology_commit\",\"version\":2,\"epoch\":0,\"mode\":\"sfu\"}",
+        "{\"type\":\"topology_commit\",\"version\":3,\"epoch\":1,\"mode\":\"sfu\"}",
+        "{\"type\":\"topology_commit\",\"version\":2,\"epoch\":1,\"epoch\":2,\"mode\":\"sfu\"}",
+        "{\"type\":\"topology_abort\",\"version\":2,\"epoch\":1,\"mode\":\"sfu\"}",
+        "{\"type\":\"join\",\"version\":2,\"meeting\":\"room\",\"capabilities\":{\"mesh\":1}}",
+        "{\"type\":\"candidate\",\"version\":2,\"epoch\":1,\"session_id\":\"p:1:alice\",\"to\":"
+        "\"sfu\"}",
+        "{\"type\":\"offer\",\"version\":2,\"epoch\":1,\"to\":\"sfu\",\"sdp\":\"v=0\"}",
+        "{\"type\":\"joined\",\"peers\":[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\"]}",
+        "{\"type\":\"joined\",\"peers\":[\"bob\",\"bob\"]}",
+        "{\"type\":\"leave\"} trailing",
+    };
+    sig_msg_t message;
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
+        ASSERT_EQ(sig_msg_parse(&message, invalid[i], strlen(invalid[i])), -1);
+    memset(&message, 0, sizeof(message));
+    message.type = SIG_MSG_OFFER;
+    memset(message.sdp, 'a', sizeof(message.sdp));
+    ASSERT(sig_msg_build(&message) == NULL);
+}
+
+TEST(session_identity_is_role_and_epoch_scoped) {
+    char first[SIG_MAX_SESSION_ID], second[SIG_MAX_SESSION_ID];
+    ASSERT_EQ(sig_session_id(first, SIG_SESSION_MESH, 3, "alice", "bob"), RTC_OK);
+    ASSERT_EQ(sig_session_id(second, SIG_SESSION_MESH, 3, "bob", "alice"), RTC_OK);
+    ASSERT_STR_EQ(first, second);
+    ASSERT_EQ(sig_session_id(first, SIG_SESSION_PUBLISH, 3, "alice", NULL), RTC_OK);
+    ASSERT_STR_EQ(first, "p:3:alice");
+    ASSERT_EQ(sig_session_id(first, SIG_SESSION_SUBSCRIBE, 4, "bob", "alice"), RTC_OK);
+    ASSERT_STR_EQ(first, "s:4:bob:alice");
+    ASSERT(sig_session_id(first, SIG_SESSION_MESH, 0, "alice", "bob") != RTC_OK);
+    ASSERT(sig_session_id(first, SIG_SESSION_MESH, 3, "alice", "alice") != RTC_OK);
+    ASSERT(sig_session_id(first, SIG_SESSION_MESH, 3, "alice:other", "bob") != RTC_OK);
+}
+
+TEST(conference_envelope_preserves_binary_payload_and_message_id) {
+    uint8_t wire[128];
+    const uint8_t payload[] = {0, 0xff, 'x'};
+    size_t wire_len = 0;
+    uint64_t id = UINT64_C(0x0123456789abcdef);
+    ASSERT_EQ(sig_dc_write(wire, sizeof(wire), &wire_len, "alice", id, payload, sizeof(payload)),
+              RTC_OK);
+    ASSERT_EQ(wire[20], 0x01);
+    ASSERT_EQ(wire[27], 0xef);
+    char peer[SIG_MAX_PEER_ID];
+    uint64_t decoded_id;
+    const uint8_t *decoded;
+    size_t decoded_len;
+    ASSERT_EQ(sig_dc_read(wire, wire_len, peer, &decoded_id, &decoded, &decoded_len), RTC_OK);
+    ASSERT_STR_EQ(peer, "alice");
+    ASSERT(decoded_id == id);
+    ASSERT_EQ(decoded_len, sizeof(payload));
+    ASSERT_MEM_EQ(decoded, payload, sizeof(payload));
+    ASSERT(sig_dc_read(wire, SIG_DC_HEADER_SIZE, peer, &decoded_id, &decoded, &decoded_len) !=
+           RTC_OK);
+    ASSERT_EQ(sig_dc_write(wire, sizeof(wire), &wire_len, "*", 1, NULL, 0), RTC_OK);
+    ASSERT_EQ(sig_dc_read(wire, wire_len, peer, &decoded_id, &decoded, &decoded_len), RTC_OK);
+    ASSERT_STR_EQ(peer, "*");
+    ASSERT_EQ(decoded_len, 0);
+    memset(wire + SIG_DC_HEADER_SIZE, 0, 8);
+    ASSERT(sig_dc_read(wire, wire_len, peer, &decoded_id, &decoded, &decoded_len) != RTC_OK);
+    ASSERT_EQ(sig_dc_write(wire, 4, &wire_len, "alice", 1, payload, sizeof(payload)),
+              RTC_ERR_NOMEM);
+    memset(wire, 0, sizeof(wire));
+    memcpy(wire, "MRTC", 4);
+    memcpy(wire + 4, "bob", 3);
+    memcpy(wire + SIG_DC_HEADER_SIZE, payload, sizeof(payload));
+    ASSERT_EQ(sig_dc_read(wire, SIG_DC_HEADER_SIZE + sizeof(payload), peer, &decoded_id, &decoded,
+                          &decoded_len),
+              RTC_OK);
+    ASSERT_STR_EQ(peer, "bob");
+    ASSERT_EQ(decoded_id, 0);
+    ASSERT_MEM_EQ(decoded, payload, sizeof(payload));
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  Signaling Message Tests\n");
@@ -214,6 +358,11 @@ int main(void) {
     RUN_TEST(json_roundtrip_all_types);
     RUN_TEST(json_sfu_mode_and_end_of_candidates);
     RUN_TEST(json_rejects_truncated_negotiation);
+    RUN_TEST(versioned_join_and_topology_roundtrip);
+    RUN_TEST(versioned_negotiation_preserves_session_and_eoc);
+    RUN_TEST(versioned_messages_reject_ambiguous_or_unbounded_fields);
+    RUN_TEST(session_identity_is_role_and_epoch_scoped);
+    RUN_TEST(conference_envelope_preserves_binary_payload_and_message_id);
 
     TEST_SUMMARY();
     return _test_fail_count > 0 ? 1 : 0;

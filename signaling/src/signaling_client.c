@@ -57,10 +57,27 @@ static char *dequeue_msg(signaling_client_t *sc) {
     return msg;
 }
 
+static void notify_error(signaling_client_t *sc, const char *message) {
+    RTC_LOG_ERR("Signaling: %s", message);
+    if (sc->cfg.on_error) {
+        sc->cfg.on_error(message, sc->cfg.user_data);
+    } else if (sc->cfg.on_event) {
+        sig_msg_t event = {.type = SIG_MSG_ERROR, .version = sc->cfg.protocol_version};
+        snprintf(event.error_msg, sizeof(event.error_msg), "%s", message);
+        sc->cfg.on_event(&event, sc->cfg.user_data);
+    }
+}
+
 static void dispatch_message(signaling_client_t *sc, const char *data, size_t len) {
     sig_msg_t msg;
-    if (sig_msg_parse(&msg, data, len) != 0)
+    if (sig_msg_parse(&msg, data, len) != 0) {
+        notify_error(sc, "invalid signaling message");
         return;
+    }
+    if (sc->cfg.on_event) {
+        sc->cfg.on_event(&msg, sc->cfg.user_data);
+        return;
+    }
 
     switch (msg.type) {
         case SIG_MSG_JOINED:
@@ -97,6 +114,14 @@ static void dispatch_message(signaling_client_t *sc, const char *data, size_t le
             if (sc->cfg.on_error)
                 sc->cfg.on_error(msg.error_msg, sc->cfg.user_data);
             break;
+        case SIG_MSG_TOPOLOGY_PREPARE:
+        case SIG_MSG_TOPOLOGY_READY:
+        case SIG_MSG_TOPOLOGY_COMMIT:
+        case SIG_MSG_TOPOLOGY_ACK:
+        case SIG_MSG_TOPOLOGY_ABORT:
+        case SIG_MSG_TOPOLOGY_REQUEST:
+            notify_error(sc, "topology events require the versioned event callback");
+            break;
         default:
             break;
     }
@@ -115,9 +140,25 @@ static int callback_client(struct lws *wsi, enum lws_callback_reasons reason, vo
             sc->wsi = wsi;
             /* Auto-join the meeting */
             if (sc->cfg.meeting) {
-                char *join = sig_msg_build_join(sc->cfg.meeting);
-                if (join)
-                    enqueue_msg(sc, join);
+                char *join;
+                if (sc->cfg.protocol_version == SIG_PROTOCOL_VERSION) {
+                    sig_msg_t message = {.type = SIG_MSG_JOIN,
+                                         .version = SIG_PROTOCOL_VERSION,
+                                         .can_mesh = sc->cfg.can_mesh,
+                                         .can_sfu = sc->cfg.can_sfu,
+                                         .can_switch = sc->cfg.can_switch};
+                    snprintf(message.meeting, sizeof(message.meeting), "%s", sc->cfg.meeting);
+                    if (sc->cfg.display_name)
+                        snprintf(message.display_name, sizeof(message.display_name), "%s",
+                                 sc->cfg.display_name);
+                    join = sig_msg_build(&message);
+                } else {
+                    join = sig_msg_build_join(sc->cfg.meeting);
+                }
+                if (!join || enqueue_msg(sc, join) != RTC_OK) {
+                    notify_error(sc, "could not queue meeting join");
+                    return -1;
+                }
             }
             lws_callback_on_writable(wsi);
             break;
@@ -167,10 +208,9 @@ static int callback_client(struct lws *wsi, enum lws_callback_reasons reason, vo
         }
 
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-            fprintf(stderr, "[signaling-client] connection error: %s\n",
-                    in ? (const char *)in : "unknown");
             sc->connected = false;
             sc->wsi = NULL;
+            notify_error(sc, in ? (const char *)in : "connection failed");
             break;
 
         case LWS_CALLBACK_CLIENT_CLOSED:
@@ -264,6 +304,12 @@ static void *client_thread_fn(void *arg) {
 signaling_client_t *signaling_create(const signaling_config_t *cfg) {
     if (!cfg || !cfg->server_url)
         return NULL;
+    if ((cfg->meeting && (!cfg->meeting[0] || strlen(cfg->meeting) >= SIG_MAX_MEETING)) ||
+        (cfg->display_name && strlen(cfg->display_name) >= SIG_MAX_DISPLAY_NAME) ||
+        cfg->protocol_version > SIG_PROTOCOL_VERSION) {
+        RTC_LOG_ERR("Invalid signaling configuration");
+        return NULL;
+    }
 
     signaling_client_t *sc = calloc(1, sizeof(signaling_client_t));
     if (!sc)
@@ -274,22 +320,31 @@ signaling_client_t *signaling_create(const signaling_config_t *cfg) {
      * past return. Callbacks/user_data remain caller-owned by API contract. */
     sc->cfg.server_url = strdup(cfg->server_url);
     sc->cfg.meeting = cfg->meeting ? strdup(cfg->meeting) : NULL;
-    if (!sc->cfg.server_url || (cfg->meeting && !sc->cfg.meeting)) {
-        free((void *)sc->cfg.server_url);
-        free((void *)sc->cfg.meeting);
-        free(sc);
-        return NULL;
-    }
+    sc->cfg.display_name = cfg->display_name ? strdup(cfg->display_name) : NULL;
+    if (!sc->cfg.server_url || (cfg->meeting && !sc->cfg.meeting) ||
+        (cfg->display_name && !sc->cfg.display_name))
+        goto fail;
     if (parse_url(sc, sc->cfg.server_url) != 0) {
-        free((void *)sc->cfg.server_url);
-        free((void *)sc->cfg.meeting);
-        free(sc);
-        return NULL;
+        RTC_LOG_ERR("Invalid signaling server URL");
+        goto fail;
     }
-    rtc_mutex_init(&sc->queue_mutex);
-    rtc_vec_init(&sc->queue, sizeof(char *));
+    if (rtc_mutex_init(&sc->queue_mutex) != RTC_OK) {
+        RTC_LOG_ERR("Could not initialize signaling queue mutex");
+        goto fail;
+    }
+    if (rtc_vec_init(&sc->queue, sizeof(char *)) != RTC_OK) {
+        RTC_LOG_ERR("Could not initialize signaling queue");
+        rtc_mutex_destroy(&sc->queue_mutex);
+        goto fail;
+    }
 
     return sc;
+fail:
+    free((void *)sc->cfg.server_url);
+    free((void *)sc->cfg.meeting);
+    free((void *)sc->cfg.display_name);
+    free(sc);
+    return NULL;
 }
 
 rtc_err_t signaling_connect(signaling_client_t *sc) {
@@ -345,6 +400,17 @@ rtc_err_t signaling_send_candidate(signaling_client_t *sc, const char *to, const
     return enqueue_msg(sc, msg);
 }
 
+rtc_err_t signaling_send_message(signaling_client_t *sc, const sig_msg_t *message) {
+    if (!sc || !message || !sc->connected)
+        return RTC_ERR_INVALID;
+    char *json = sig_msg_build(message);
+    if (!json) {
+        RTC_LOG_ERR("Could not build versioned signaling message");
+        return RTC_ERR_INVALID;
+    }
+    return enqueue_msg(sc, json);
+}
+
 rtc_err_t signaling_leave(signaling_client_t *sc) {
     if (!sc || !sc->connected)
         return RTC_ERR_INVALID;
@@ -396,5 +462,6 @@ void signaling_destroy(signaling_client_t *sc) {
 
     free((void *)sc->cfg.server_url);
     free((void *)sc->cfg.meeting);
+    free((void *)sc->cfg.display_name);
     free(sc);
 }

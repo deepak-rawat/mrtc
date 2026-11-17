@@ -8,6 +8,7 @@
 #define SIGNALING_CLIENT_H
 
 #include <rtc/rtc_common.h>
+#include "signaling_msg.h"
 
 /* Callbacks fired on the lws service thread */
 typedef void (*sig_on_joined_fn)(const char *my_id, const char **peer_ids, int peer_count,
@@ -33,6 +34,14 @@ typedef struct {
     void *user_data;
     void (*on_mode)(const char *mode, void *user);
     void (*on_disconnected)(void *user);
+    unsigned protocol_version; /* zero retains the legacy join shape */
+    const char *display_name;
+    bool can_mesh;
+    bool can_sfu;
+    bool can_switch;
+    /* Receives parsed events instead of legacy callbacks. Message is borrowed
+     * only for the callback duration; copy it before asynchronous use. */
+    void (*on_event)(const sig_msg_t *message, void *user);
 } signaling_config_t;
 
 typedef struct signaling_client signaling_client_t;
@@ -57,6 +66,7 @@ rtc_err_t signaling_send_answer(signaling_client_t *sc, const char *to, const ch
 
 /* Send an ICE candidate to a specific peer. Thread-safe. */
 rtc_err_t signaling_send_candidate(signaling_client_t *sc, const char *to, const char *candidate);
+rtc_err_t signaling_send_message(signaling_client_t *sc, const sig_msg_t *message);
 
 /* Leave the current meeting. Thread-safe. */
 rtc_err_t signaling_leave(signaling_client_t *sc);
