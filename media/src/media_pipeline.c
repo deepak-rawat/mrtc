@@ -668,7 +668,7 @@ static void recv_audio_on_stream(media_pipeline_t *p, media_recv_stream_t *s, co
 
 int media_pipeline_recv_rtp(media_pipeline_t *p, media_recv_stream_t *stream, const uint8_t *data,
                             int len, uint16_t seq, uint32_t timestamp, bool marker) {
-    if (!p || !stream || !data || len <= 0)
+    if (!p || !stream || len < 0 || (!data && len) || (!len && !stream->is_video))
         return RTC_ERR_INVALID;
 
     media_recv_stream_t *s = stream;

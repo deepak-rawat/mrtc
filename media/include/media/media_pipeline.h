@@ -117,6 +117,7 @@ void media_pipeline_remove_peer(media_pipeline_t *p, const char *peer_id);
  * Feed an incoming RTP payload to a recv stream (direct, no SSRC lookup).
  * For video: depacketize → decode → render
  * For audio: jitter buffer → decode → render
+ * A zero-length video payload records a received padding-only RTP packet.
  */
 int media_pipeline_recv_rtp(media_pipeline_t *p, media_recv_stream_t *stream, const uint8_t *data,
                             int len, uint16_t seq, uint32_t timestamp, bool marker);

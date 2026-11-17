@@ -317,6 +317,32 @@ TEST(vp8_reorder_loss_wrap_and_metadata) {
                                &key) != RTC_OK);
 }
 
+TEST(vp8_padding_preserves_sequence_continuity_without_creating_frames) {
+    rtc_vp8_depacketizer_t d;
+    rtc_vp8_depacketizer_init(&d);
+    uint8_t start[] = {0x10, 2, 3}, end[] = {0, 4};
+    const uint8_t *out;
+    size_t len;
+    bool key;
+    ASSERT_EQ(rtc_vp8_depacketize(&d, start, sizeof(start), 65533, 3000, false, &out, &len, &key),
+              RTC_ERR_GENERIC);
+    ASSERT_EQ(rtc_vp8_depacketize(&d, NULL, 0, 65534, 3000, true, &out, &len, &key),
+              RTC_ERR_GENERIC);
+    ASSERT_EQ(rtc_vp8_depacketize(&d, end, sizeof(end), 65535, 3000, true, &out, &len, &key),
+              RTC_OK);
+    uint8_t expected[] = {2, 3, 4};
+    ASSERT_EQ(len, sizeof(expected));
+    ASSERT_MEM_EQ(out, expected, sizeof(expected));
+    ASSERT_EQ(rtc_vp8_depacketize(&d, NULL, 0, 0, 3000, false, &out, &len, &key), RTC_ERR_GENERIC);
+    ASSERT_EQ(rtc_vp8_depacketize(&d, NULL, 0, 1, 6000, false, &out, &len, &key), RTC_ERR_GENERIC);
+    ASSERT_EQ(rtc_vp8_depacketize(&d, start, sizeof(start), 2, 6000, true, &out, &len, &key),
+              RTC_OK);
+    ASSERT_EQ(d.dropped_frames, 0);
+    ASSERT_EQ(rtc_vp8_depacketize(&d, start, sizeof(start), 4, 9000, true, &out, &len, &key),
+              RTC_OK);
+    ASSERT_EQ(d.dropped_frames, 1);
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  VP8 RTP Packetization Tests\n");
@@ -333,6 +359,7 @@ int main(void) {
     RUN_TEST(vp8_multiple_frames);
     RUN_TEST(vp8_depacketize_long_picid);
     RUN_TEST(vp8_reorder_loss_wrap_and_metadata);
+    RUN_TEST(vp8_padding_preserves_sequence_continuity_without_creating_frames);
 
     TEST_SUMMARY();
 }

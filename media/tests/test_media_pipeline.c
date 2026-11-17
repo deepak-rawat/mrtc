@@ -416,6 +416,47 @@ TEST(pipeline_loss_reorder_keyframe_recovery) {
     media_pipeline_destroy(p);
 }
 
+TEST(pipeline_padding_does_not_stall_delta_frames) {
+    media_renderer_t renderer = {.on_video_frame = mock_on_video};
+    media_pipeline_t *p = media_pipeline_create(&(media_pipeline_config_t){.renderer = &renderer});
+    ASSERT(p != NULL);
+    media_recv_stream_t *stream =
+        media_pipeline_add_recv_stream(p, "browser", "camera", 123, true, "VP8");
+    ASSERT(stream != NULL);
+    int requests = 0;
+    ASSERT_EQ(media_pipeline_set_recv_feedback(p, stream, recovery_requested, &requests), RTC_OK);
+    video_encoder_t encoder;
+    ASSERT_EQ(video_encoder_create(&encoder, "VP8", 160, 120, 300, 15), RTC_OK);
+    video_frame_t input;
+    ASSERT_EQ(video_frame_alloc(&input, 160, 120), RTC_OK);
+    int before = g_video_frame_count;
+    uint16_t seq = 65530;
+    for (int i = 0; i < 4; i++) {
+        fill_test_frame(&input, i);
+        video_packet_t packet;
+        ASSERT_EQ(video_encode(&encoder, &input, &packet), RTC_OK);
+        ASSERT_EQ(packet.is_keyframe, i == 0);
+        rtc_vp8_payload_t payloads[16];
+        int count;
+        ASSERT_EQ(rtc_vp8_packetize(packet.data, (size_t)packet.len, packet.is_keyframe, payloads,
+                                    16, &count),
+                  RTC_OK);
+        uint32_t timestamp = (uint32_t)(i + 1) * 6000;
+        for (int j = 0; j < count; j++)
+            ASSERT_EQ(media_pipeline_recv_rtp(p, stream, payloads[j].data, (int)payloads[j].len,
+                                              seq++, timestamp, payloads[j].marker),
+                      RTC_OK);
+        for (int j = 0; j < 5; j++)
+            ASSERT_EQ(media_pipeline_recv_rtp(p, stream, NULL, 0, seq++, timestamp, false), RTC_OK);
+    }
+    ASSERT_EQ(g_video_frame_count - before, 4);
+    ASSERT_EQ(requests, 0);
+    ASSERT_EQ(media_pipeline_get_recv_stats(p, 0)->depack_frames_dropped, 0);
+    video_frame_free(&input);
+    video_encoder_destroy(&encoder);
+    media_pipeline_destroy(p);
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  Media Pipeline Tests\n");
@@ -435,6 +476,7 @@ int main(void) {
     RUN_TEST(pipeline_remove_send_peer);
     RUN_TEST(pipeline_slot_churn_and_capacity);
     RUN_TEST(pipeline_loss_reorder_keyframe_recovery);
+    RUN_TEST(pipeline_padding_does_not_stall_delta_frames);
 
     rtc_client_cleanup();
     TEST_SUMMARY();

@@ -110,6 +110,9 @@ RFC 7741 RTP payload format for VP8:
 - `rtc_vp8_packetize()` produces VP8 descriptor + data payloads, without RTP
   headers. Each peer's sender adds its own RTP header and SRTP protection.
 - `rtc_vp8_depacketize()` assembles payloads into a VP8 bitstream for decoding.
+- RTP padding is validated/removed before codec dispatch. Padding-only video
+  packets still consume sequence numbers; the collector records that continuity
+  without treating bandwidth probes as VP8 fragments or lost reference frames.
 
 VP8 payload descriptor (1 byte):
 ```

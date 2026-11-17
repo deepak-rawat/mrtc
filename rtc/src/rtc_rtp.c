@@ -118,6 +118,12 @@ int rtc_rtp_parse(rtc_rtp_packet_t *pkt, const uint8_t *data, size_t len) {
 
     pkt->payload = data + hdr_len;
     pkt->payload_len = len - hdr_len;
+    if (pkt->header.padding) {
+        uint8_t padding = data[len - 1];
+        if (!padding || padding > pkt->payload_len)
+            return RTC_ERR_INVALID;
+        pkt->payload_len -= padding;
+    }
 
     /* Copy into internal buffer */
     if (len <= sizeof(pkt->buf)) {

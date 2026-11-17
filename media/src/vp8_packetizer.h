@@ -92,7 +92,8 @@ int rtc_vp8_depacketizer_init(rtc_vp8_depacketizer_t *d);
  * Feed a VP8 RTP payload to the depacketizer.
  *
  * Input:
- *   payload, len: VP8 RTP payload (descriptor + VP8 data)
+ *   payload, len: VP8 RTP payload (descriptor + VP8 data); zero length reports
+ *     a received padding-only RTP packet so it is not mistaken for loss
  *   seq: RTP sequence number (duplicates/reordering/wrap handled within frame)
  *   timestamp: RTP timestamp (only one bounded frame is retained)
  *   marker: RTP marker bit (true = last payload of frame)

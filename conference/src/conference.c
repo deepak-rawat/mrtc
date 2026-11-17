@@ -390,7 +390,7 @@ static void request_video_keyframe(void *user) {
 static void on_recv_video_rtp(const uint8_t *payload, size_t len, uint16_t seq, uint32_t timestamp,
                               uint32_t ssrc, bool marker, void *user) {
     conf_peer_t *cp = (conf_peer_t *)user;
-    if (!cp->active || !cp->receive_pipeline || !payload || len == 0)
+    if (!cp->active || !cp->receive_pipeline || (!payload && len) || (!len && !cp->recv_video))
         return;
     /* Lazily register recv stream on first packet, then cache the handle */
     if (!cp->recv_video) {

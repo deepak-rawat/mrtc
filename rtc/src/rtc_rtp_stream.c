@@ -531,7 +531,7 @@ void rtc_rtp_recv_stream_on_packet(rtc_rtp_recv_stream_t *stream, const rtc_rtp_
     if (stream->missing[seq % 64].used && stream->missing[seq % 64].seq == seq)
         stream->missing[seq % 64].used = false;
     stream->last_packet_ms = now;
-    if (stream->clock_rate == 90000) {
+    if (stream->clock_rate == 90000 && pkt->payload_len) {
         if (!stream->frame_timestamp_valid ||
             (int32_t)(pkt->header.timestamp - stream->frame_timestamp) > 0) {
             stream->frame_timestamp_valid = true;

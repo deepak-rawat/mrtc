@@ -100,6 +100,24 @@ TEST(rtp_parse) {
            parsed.header.ssrc, parsed.header.marker, parsed.payload_len);
 }
 
+TEST(rtp_padding_is_validated_and_excluded_from_payload) {
+    uint8_t payload[] = {0x10, 0x02, 0x00, 0x02};
+    rtc_rtp_packet_t built, parsed;
+    ASSERT_EQ(rtc_rtp_build(&built, 96, 42, 3000, 123, true, payload, sizeof(payload)), RTC_OK);
+    built.buf[0] |= 0x20;
+    ASSERT_EQ(rtc_rtp_parse(&parsed, built.buf, built.buf_len), RTC_OK);
+    ASSERT_EQ(parsed.payload_len, 2);
+    ASSERT_MEM_EQ(parsed.payload, payload, 2);
+    built.buf[built.buf_len - 1] = 4;
+    ASSERT_EQ(rtc_rtp_parse(&parsed, built.buf, built.buf_len), RTC_OK);
+    ASSERT_EQ(parsed.payload_len, 0);
+    built.buf[built.buf_len - 1] = 0;
+    ASSERT_EQ(rtc_rtp_parse(&parsed, built.buf, built.buf_len), RTC_ERR_INVALID);
+    built.buf[built.buf_len - 1] = 5;
+    ASSERT_EQ(rtc_rtp_parse(&parsed, built.buf, built.buf_len), RTC_ERR_INVALID);
+    ASSERT_EQ(rtc_rtp_parse(&parsed, built.buf, RTP_HEADER_SIZE), RTC_ERR_INVALID);
+}
+
 TEST(rtp_roundtrip) {
     uint8_t payload[200];
     memset(payload, 0xAB, sizeof(payload));
@@ -230,6 +248,7 @@ int main(void) {
 
     RUN_TEST(rtp_build_basic);
     RUN_TEST(rtp_parse);
+    RUN_TEST(rtp_padding_is_validated_and_excluded_from_payload);
     RUN_TEST(rtp_roundtrip);
     RUN_TEST(rtp_session_tracking);
     RUN_TEST(rtp_parse_too_short);

@@ -60,22 +60,29 @@ int rtc_vp8_depacketizer_init(rtc_vp8_depacketizer_t *d) {
 int rtc_vp8_depacketize(rtc_vp8_depacketizer_t *d, const uint8_t *payload, size_t len, uint16_t seq,
                         uint32_t timestamp, bool marker, const uint8_t **frame_out,
                         size_t *frame_len, bool *is_keyframe) {
-    if (!d || !payload || !frame_out || !frame_len || !is_keyframe)
+    if (!d || (!payload && len) || !frame_out || !frame_len || !is_keyframe)
         return RTC_ERR_INVALID;
     *frame_out = NULL;
     *frame_len = 0;
     *is_keyframe = false;
 
-    if (len < VP8_PD_SIZE)
-        return RTC_ERR_INVALID;
+    /* Padding consumes sequence numbers, not VP8 frame boundaries. */
+    if (!len) {
+        if (!d->collecting || timestamp != d->frame_timestamp) {
+            if (d->completed && seq == (uint16_t)(d->last_end_seq + 1))
+                d->last_end_seq = seq;
+            return RTC_ERR_GENERIC;
+        }
+        marker = false;
+    }
 
     /* Parse VP8 payload descriptor */
-    uint8_t pd = payload[0];
+    uint8_t pd = len ? payload[0] : 0;
     bool s_bit = (pd & 0x10) != 0 && (pd & 0x0f) == 0;
     bool x_bit = (pd & 0x80) != 0; /* Extension present */
 
     /* Skip extension bytes if present (simplified: just skip 1 byte) */
-    size_t pd_len = VP8_PD_SIZE;
+    size_t pd_len = len ? VP8_PD_SIZE : 0;
     if (x_bit) {
         if (len < 2)
             return RTC_ERR_INVALID;
@@ -97,10 +104,10 @@ int rtc_vp8_depacketize(rtc_vp8_depacketizer_t *d, const uint8_t *payload, size_
             return RTC_ERR_INVALID;
     }
 
-    const uint8_t *vp8_data = payload + pd_len;
+    const uint8_t *vp8_data = len ? payload + pd_len : NULL;
     size_t vp8_len = len - pd_len;
 
-    if (vp8_len == 0 || vp8_len > VP8_MAX_FRAG_SIZE)
+    if ((len && !vp8_len) || vp8_len > VP8_MAX_FRAG_SIZE)
         return RTC_ERR_INVALID;
     if (d->initialized && timestamp != d->frame_timestamp &&
         (int32_t)(timestamp - d->frame_timestamp) < 0)
@@ -120,7 +127,7 @@ int rtc_vp8_depacketize(rtc_vp8_depacketizer_t *d, const uint8_t *payload, size_
     size_t slot = seq % VP8_MAX_FRAME_PACKETS;
     if (d->packets[slot].used) {
         if (d->packets[slot].seq == seq && d->packets[slot].len == vp8_len &&
-            memcmp(d->packets[slot].data, vp8_data, vp8_len) == 0)
+            (!vp8_len || memcmp(d->packets[slot].data, vp8_data, vp8_len) == 0))
             return RTC_ERR_GENERIC;
         goto corrupt;
     }
@@ -139,7 +146,8 @@ int rtc_vp8_depacketize(rtc_vp8_depacketizer_t *d, const uint8_t *payload, size_
     d->packets[slot].used = true;
     d->packets[slot].seq = seq;
     d->packets[slot].len = (uint16_t)vp8_len;
-    memcpy(d->packets[slot].data, vp8_data, vp8_len);
+    if (vp8_len)
+        memcpy(d->packets[slot].data, vp8_data, vp8_len);
     if (d->got_start && d->got_end) {
         unsigned count = (uint16_t)(d->end_seq - d->start_seq) + 1u;
         if (count > VP8_MAX_FRAME_PACKETS)
