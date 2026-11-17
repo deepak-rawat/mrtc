@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>mrtc conference</title></head>
+<body>
+<main>
+  <h1>mrtc conference</h1>
+  <form id="join-form">
+    <label>Name <input id="name" value="Guest" required></label>
+    <label>Room <input id="room" value="demo" required></label>
+    <label>Server URL <input id="server" placeholder="same origin /ws"></label>
+    <label><input id="synthetic" type="checkbox"> Explicit synthetic camera and microphone</label>
+    <button id="join" type="submit">Join</button>
+  </form>
+  <section aria-label="Call controls">
+    <button id="leave" disabled>Leave</button>
+    <button id="mic" disabled aria-pressed="true">Microphone on</button>
+    <button id="camera" disabled aria-pressed="true">Camera on</button>
+    <button id="restart" disabled>Restart ICE</button>
+    <p id="status" role="status">Not connected</p>
+    <p id="error" role="alert"></p>
+  </section>
+  <section class="gallery">
+    <figure><video id="local" autoplay muted playsinline></video><figcaption>You</figcaption></figure>
+    <div id="remotes"></div>
+  </section>
+  <section aria-label="Chat"><ol id="messages" aria-live="polite"></ol>
+    <form id="chat-form"><label>Message <input id="message" maxlength="4096"></label><button id="send" disabled>Send</button></form>
+  </section>
+</main>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>
