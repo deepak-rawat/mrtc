@@ -91,6 +91,10 @@ not be multiplexed over an indistinguishable five-tuple.
 
 ### 6. Treat production readiness as a separate project
 
+The first constrained production profile and ordered acceptance criteria are
+defined in [PRODUCTION.md](PRODUCTION.md). Existing defaults stay compatible;
+the first production target is opt-in fixed SFU.
+
 Authentication/authorization, secure signaling deployment, quotas, abuse
 prevention, key lifecycle, operational tooling and independent security review
 are not implied by an educational SFU or passing local interoperability tests.
