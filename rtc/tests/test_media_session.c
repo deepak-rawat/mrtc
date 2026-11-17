@@ -261,6 +261,16 @@ TEST(resolve_routes_same_pt_by_mid) {
     ASSERT_EQ(rtc_rtp_parse(&parsed, pkt.buf, pkt.buf_len), RTC_OK);
     ASSERT(rtc_media_session_resolve(&session, &parsed) == r0);
 
+    rtc_rtp_ext_make_string(&exts[0], 4, "unknown");
+    ASSERT_EQ(rtc_rtp_build_with_ext(&pkt, 96, 3, 0, 0xAAAA0002, false, exts, 1, payload, 1),
+              RTC_OK);
+    ASSERT_EQ(rtc_rtp_parse(&parsed, pkt.buf, pkt.buf_len), RTC_OK);
+    ASSERT(rtc_media_session_resolve(&session, &parsed) == NULL);
+    ASSERT_EQ(rtc_rtp_recv_stream_ssrc(r0), 0xAAAA0000u);
+    ASSERT_EQ(rtc_rtp_build(&pkt, 96, 4, 0, 0xAAAA0002, false, payload, 1), RTC_OK);
+    ASSERT_EQ(rtc_rtp_parse(&parsed, pkt.buf, pkt.buf_len), RTC_OK);
+    ASSERT(rtc_media_session_resolve(&session, &parsed) == NULL);
+
     rtc_media_session_close(&session);
     rtc_rtp_recv_stream_destroy(r0);
     rtc_rtp_recv_stream_destroy(r1);

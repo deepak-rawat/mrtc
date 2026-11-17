@@ -64,7 +64,8 @@ void rtc_media_session_bind_receiver(rtc_media_session_t *s, rtc_rtp_recv_stream
 /* Set the negotiated MID header-extension id (RFC 8843/8852). When set, the
  * resolver routes an unbound SSRC to the receive stream whose MID matches the
  * packet's MID extension before falling back to payload-type matching — this
- * disambiguates bundled m-sections that share a payload type. 0 disables it. */
+ * disambiguates bundled m-sections that share a payload type. An unknown MID
+ * or ambiguous payload-type-only match is rejected. 0 disables MID routing. */
 void rtc_media_session_set_mid_ext_id(rtc_media_session_t *s, uint8_t ext_id);
 
 /* Resolve which receive stream an inbound RTP packet belongs to: by MID header

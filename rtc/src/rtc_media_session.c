@@ -43,18 +43,23 @@ rtc_rtp_recv_stream_t *rtc_media_session_resolve(rtc_media_session_t *s,
                     return rs;
                 }
             }
+            return NULL;
         }
     }
 
     /* 2. Payload-type match (peers that omit a=ssrc and MID). */
+    rtc_rtp_recv_stream_t *match = NULL;
     for (size_t i = 0; i < n; i++) {
         rtc_rtp_recv_stream_t *rs = session_recv_at(s, i);
         if (rs && rtc_rtp_recv_stream_can_receive(rs, pkt->header.payload_type)) {
-            rtc_rtp_recv_stream_set_ssrc(rs, pkt->header.ssrc);
-            return rs;
+            if (match)
+                return NULL;
+            match = rs;
         }
     }
-    return NULL;
+    if (match)
+        rtc_rtp_recv_stream_set_ssrc(match, pkt->header.ssrc);
+    return match;
 }
 
 /* First packet for an unbound SSRC: hand the transport demux the resolved
@@ -156,9 +161,10 @@ static void report_intercept_rtcp(rtc_interceptor_t *it, uint8_t pt, uint8_t fmt
                                   const uint8_t *buf, size_t len) {
     (void)fmt;
     rtc_media_session_t *s = si_session(it);
-    if (pt == RTCP_PT_SR)
+    if (pt == RTCP_PT_SR) {
         session_handle_sr(s, buf, len);
-    else if (pt == RTCP_PT_RR)
+        session_handle_rr(s, buf, len);
+    } else if (pt == RTCP_PT_RR)
         session_handle_rr(s, buf, len);
 }
 
