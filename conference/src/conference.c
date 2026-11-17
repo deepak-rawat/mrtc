@@ -64,6 +64,7 @@ typedef struct {
 
 typedef struct {
     char id[SIG_MAX_PEER_ID];
+    char name[SIG_MAX_DISPLAY_NAME];
     conference_source_stats_t stats;
     uint64_t recent_ids[64];
     unsigned recent_next;
@@ -433,6 +434,9 @@ static void on_remote_track(rtc_rtp_receiver_t *receiver, void *user) {
      * Recv streams are lazily registered on first RTP packet
      * (when the real SSRC is known from the RTP header). */
     rtc_kind_t kind = rtc_rtp_receiver_kind(receiver);
+    if ((kind == RTC_KIND_VIDEO && cp->conf->cfg.disable_receive_video) ||
+        (kind == RTC_KIND_AUDIO && cp->conf->cfg.disable_receive_audio))
+        return;
     if (kind == RTC_KIND_VIDEO) {
         cp->video_receiver = receiver;
         rtc_rtp_receiver_on_frame(receiver, on_recv_video_rtp, cp);
@@ -553,8 +557,6 @@ static rtc_peer_connection_t *create_pc_with_tracks(conference_t *c, conf_peer_t
     vp8.payload_type = 96;
     strcpy(vp8.mime_type, "video/VP8");
     vp8.clock_rate = 90000;
-    if (local_tracks && send_video)
-        cp->video_sender = rtc_peer_connection_add_track(pc, RTC_KIND_VIDEO, &vp8);
 
     /* Add audio track (Opus) */
     rtc_codec_t opus;
@@ -563,8 +565,34 @@ static rtc_peer_connection_t *create_pc_with_tracks(conference_t *c, conf_peer_t
     strcpy(opus.mime_type, "audio/opus");
     opus.clock_rate = 48000;
     opus.channels = 2;
-    if (local_tracks && send_audio)
-        cp->audio_sender = rtc_peer_connection_add_track(pc, RTC_KIND_AUDIO, &opus);
+    if (local_tracks) {
+        bool receive_video = !cp->sfu && !c->cfg.disable_receive_video;
+        bool receive_audio = !cp->sfu && !c->cfg.disable_receive_audio;
+        const rtc_codec_t *codecs[] = {&vp8, &opus};
+        const bool sending[] = {send_video, send_audio};
+        const bool receiving[] = {receive_video, receive_audio};
+        for (int i = 0; i < 2; i++) {
+            if (!sending[i] && !receiving[i])
+                continue;
+            rtc_rtp_transceiver_init_t init = {
+                .direction = sending[i] ? (receiving[i] ? RTC_DIR_SENDRECV : RTC_DIR_SENDONLY)
+                                        : RTC_DIR_RECVONLY};
+            rtc_rtp_transceiver_t *transceiver = rtc_peer_connection_add_transceiver(
+                pc, i == 0 ? RTC_KIND_VIDEO : RTC_KIND_AUDIO, codecs[i], &init);
+            if (!transceiver) {
+                rtc_peer_connection_close(pc);
+                rtc_peer_connection_destroy(pc);
+                cp->video_sender = cp->audio_sender = NULL;
+                return NULL;
+            }
+            if (sending[i]) {
+                if (i == 0)
+                    cp->video_sender = rtc_rtp_transceiver_sender(transceiver);
+                else
+                    cp->audio_sender = rtc_rtp_transceiver_sender(transceiver);
+            }
+        }
+    }
 
     cp->pc = pc;
     return pc;
@@ -575,8 +603,6 @@ static rtc_peer_connection_t *create_pc(conference_t *c, conf_peer_t *cp) {
 }
 
 static int configure_answer_senders(conference_t *c, conf_peer_t *cp) {
-    if (cp->sfu)
-        return RTC_OK;
     rtc_rtp_transceiver_t *transceivers[RTC_MAX_TRANSCEIVERS];
     int count = RTC_MAX_TRANSCEIVERS;
     if (rtc_peer_connection_get_transceivers(cp->pc, transceivers, &count) != RTC_OK)
@@ -589,9 +615,12 @@ static int configure_answer_senders(conference_t *c, conf_peer_t *cp) {
             return RTC_ERR_SDP;
         bool send = false;
         for (int j = 0; j < CONF_MAX_SOURCES; j++)
-            send |= c->sources[j].active && c->sources[j].is_video == video;
+            send |= (!cp->sfu || cp->role == SIG_SESSION_PUBLISH) && c->sources[j].active &&
+                    c->sources[j].is_video == video;
+        bool receive = !(video ? c->cfg.disable_receive_video : c->cfg.disable_receive_audio);
         rtc_rtp_transceiver_set_direction(transceivers[i],
-                                          send ? RTC_DIR_SENDRECV : RTC_DIR_RECVONLY);
+                                          send ? (receive ? RTC_DIR_SENDRECV : RTC_DIR_SENDONLY)
+                                               : (receive ? RTC_DIR_RECVONLY : RTC_DIR_INACTIVE));
         if (send) {
             if (video)
                 cp->video_sender = sender;
@@ -868,12 +897,14 @@ static void abort_pending(conference_t *c, const char *reason) {
     topology_status(c, "error", c->active_epoch, c->sfu_mode, reason);
 }
 
-static bool participant_add(conference_t *c, const char *id) {
+static bool participant_add_named(conference_t *c, const char *id, const char *name) {
     if (!id[0] || strcmp(id, c->my_id) == 0)
         return false;
     rtc_mutex_lock(&c->send_mutex);
     for (int i = 0; i < c->participant_count; i++)
         if (strcmp(c->participants[i].id, id) == 0) {
+            if (name && name[0])
+                snprintf(c->participants[i].name, sizeof(c->participants[i].name), "%s", name);
             rtc_mutex_unlock(&c->send_mutex);
             return false;
         }
@@ -885,6 +916,7 @@ static bool participant_add(conference_t *c, const char *id) {
     conf_participant_t *participant = &c->participants[c->participant_count++];
     memset(participant, 0, sizeof(*participant));
     snprintf(participant->id, sizeof(participant->id), "%s", id);
+    snprintf(participant->name, sizeof(participant->name), "%s", name && name[0] ? name : id);
     rtc_mutex_unlock(&c->send_mutex);
     if (c->cfg.callbacks.on_peer_joined)
         c->cfg.callbacks.on_peer_joined(id, c->cfg.user_data);
@@ -1003,7 +1035,7 @@ static void sig_on_event(const sig_msg_t *message, void *user) {
         if (c->cfg.callbacks.on_joined)
             c->cfg.callbacks.on_joined(c->my_id, c->cfg.user_data);
         for (int i = 0; i < message->peer_count; i++)
-            participant_add(c, message->peers[i]);
+            participant_add_named(c, message->peers[i], message->peer_names[i]);
         topology_status(c, "active", c->active_epoch, c->sfu_mode, "");
         if (build_graph(c, c->active_epoch, c->sfu_mode) != RTC_OK)
             report_error(c, "initial topology negotiation failed");
@@ -1016,7 +1048,7 @@ static void sig_on_event(const sig_msg_t *message, void *user) {
     if (message->type == SIG_MSG_PEER_JOINED) {
         if (c->pending_epoch)
             abort_pending(c, "membership changed");
-        if (participant_add(c, message->peer_id) && !c->sfu_mode &&
+        if (participant_add_named(c, message->peer_id, message->display_name) && !c->sfu_mode &&
             build_mesh_session(c, message->peer_id, c->active_epoch) != RTC_OK)
             report_error(c, "mesh participant negotiation failed");
         return;
@@ -1050,7 +1082,7 @@ static void sig_on_event(const sig_msg_t *message, void *user) {
         if (message->peer_count < 0 || message->peer_count >= SIG_MAX_PEERS)
             return;
         for (int i = 0; i < message->peer_count; i++)
-            participant_add(c, message->peers[i]);
+            participant_add_named(c, message->peers[i], message->peer_names[i]);
         if (c->pending_epoch)
             abort_pending(c, "topology superseded");
         rtc_mutex_lock(&c->send_mutex);
@@ -1492,6 +1524,25 @@ int conference_get_peer_count(conference_t *c) {
             n++;
     rtc_mutex_unlock(&c->send_mutex);
     return n;
+}
+
+int conference_get_peer_name(conference_t *c, const char *peer_id, char *out, size_t size) {
+    if (!c || !peer_id || !out || !size)
+        return RTC_ERR_INVALID;
+    int rc = RTC_ERR_INVALID;
+    rtc_mutex_lock(&c->send_mutex);
+    for (int i = 0; i < c->participant_count; i++) {
+        if (strcmp(c->participants[i].id, peer_id) != 0)
+            continue;
+        const char *name = c->participants[i].name;
+        if (strlen(name) < size) {
+            memcpy(out, name, strlen(name) + 1);
+            rc = RTC_OK;
+        }
+        break;
+    }
+    rtc_mutex_unlock(&c->send_mutex);
+    return rc;
 }
 
 int conference_get_source_stats(conference_t *c, const char *peer_id,

@@ -63,6 +63,8 @@ typedef struct {
     conference_callbacks_t callbacks;
     void *user_data;
     const char *display_name;
+    bool disable_receive_video; /* Reject incoming video; default receives. */
+    bool disable_receive_audio; /* Reject incoming audio; default receives. */
 } conference_config_t;
 
 typedef struct conference conference_t;
@@ -86,7 +88,8 @@ void conference_leave(conference_t *c);
 void conference_destroy(conference_t *c);
 
 /* Add sources before joining. With no sources, SFU publishing is SCTP-only;
- * remote media subscriptions remain available. */
+ * mesh offers receive-only tracks. Incoming media remains enabled unless
+ * explicitly disabled in the config. */
 
 /*
  * Add a video source (e.g. "camera", "screen").
@@ -116,6 +119,10 @@ int conference_send_message(conference_t *c, const char *peer_id, const uint8_t 
 int conference_broadcast_message(conference_t *c, const uint8_t *data, size_t len);
 
 int conference_get_peer_count(conference_t *c);
+
+/* Copy a remote participant's display name; falls back to its ID when unnamed.
+ * Returns RTC_ERR_INVALID for an unknown peer or insufficient output space. */
+int conference_get_peer_name(conference_t *c, const char *peer_id, char *out, size_t size);
 
 typedef struct {
     uint64_t video_frames;

@@ -110,6 +110,35 @@ TEST(sfu_media_offer_accepts_conference_stun_settings) {
     }
 }
 
+TEST(mesh_receive_only_offer_and_data_only_rejection) {
+    for (int data_only = 0; data_only < 2; data_only++) {
+        conference_config_t config = {.disable_receive_video = data_only,
+                                      .disable_receive_audio = data_only};
+        conference_t *c = conference_create(&config);
+        ASSERT(c != NULL);
+        c->v2 = true;
+        conf_peer_t *peer = alloc_session(c, "bob", "m:1:alice:bob", 1, SIG_SESSION_MESH, false);
+        ASSERT(peer != NULL);
+        rtc_peer_connection_t *pc = create_pc(c, peer);
+        ASSERT(pc != NULL);
+        ASSERT(rtc_peer_connection_create_data_channel(pc, "chat", NULL) != NULL);
+        rtc_desc_t offer;
+        ASSERT_EQ(rtc_peer_connection_create_offer(pc, &offer), RTC_OK);
+        rtc_sdp_t sdp = {0};
+        ASSERT_EQ(rtc_sdp_parse(&sdp, offer.sdp, offer.sdp_len), RTC_OK);
+        ASSERT_EQ(sdp.media_count, data_only ? 1 : 3);
+        if (!data_only) {
+            ASSERT(strstr(offer.sdp, "m=video") != NULL);
+            ASSERT(strstr(offer.sdp, "m=audio") != NULL);
+            for (int i = 0; i < sdp.media_count; i++)
+                if (sdp.media[i].media_type != RTC_MEDIA_APPLICATION)
+                    ASSERT_EQ(sdp.media[i].direction, 2);
+        }
+        rtc_sdp_close(&sdp);
+        conference_destroy(c);
+    }
+}
+
 TEST(mesh_answer_adopts_remote_mid_order_and_payload_types) {
     conference_config_t config = {0};
     conference_t *c = conference_create(&config);
@@ -120,7 +149,7 @@ TEST(mesh_answer_adopts_remote_mid_order_and_payload_types) {
     c->active_epoch = 1;
     c->highest_epoch = 1;
     snprintf(c->my_id, sizeof(c->my_id), "alice");
-    participant_add(c, "bob");
+    participant_add_named(c, "bob", NULL);
     conf_peer_t *peer = alloc_session(c, "bob", "m:1:alice:bob", 1, SIG_SESSION_MESH, false);
     ASSERT(peer != NULL);
     rtc_config_t remote_config = {0};
@@ -263,7 +292,7 @@ static void run_send_leave_race(bool versioned) {
     if (versioned) {
         conference->v2 = true;
         snprintf(conference->my_id, sizeof(conference->my_id), "alice");
-        participant_add(conference, "bob");
+        participant_add_named(conference, "bob", NULL);
     }
     for (int generation = 0; generation < 16; generation++) {
         conf_peer_t *peer = alloc_peer(conference, "bob");
@@ -377,7 +406,7 @@ static conference_t *migration_conference(migration_counts_t *counts) {
     c->active_epoch = 1;
     c->highest_epoch = 1;
     snprintf(c->my_id, sizeof(c->my_id), "alice");
-    participant_add(c, "bob");
+    participant_add_named(c, "bob", NULL);
     return c;
 }
 
@@ -385,6 +414,14 @@ TEST(staged_graph_commit_preserves_participants_sources_and_selects_media_once) 
     migration_counts_t counts = {0};
     conference_t *c = migration_conference(&counts);
     ASSERT(c != NULL);
+    sig_msg_t named = {.type = SIG_MSG_PEER_JOINED, .version = 2, .epoch = 1};
+    snprintf(named.peer_id, sizeof(named.peer_id), "bob");
+    snprintf(named.display_name, sizeof(named.display_name), "Bob <Camera>");
+    sig_on_event(&named, c);
+    char name[SIG_MAX_DISPLAY_NAME];
+    ASSERT_EQ(conference_get_peer_name(c, "bob", name, sizeof(name)), RTC_OK);
+    ASSERT_STR_EQ(name, "Bob <Camera>");
+    ASSERT_EQ(conference_get_peer_name(c, "bob", name, 2), RTC_ERR_INVALID);
     ASSERT_EQ(conference_add_audio_source(c, "mic", 48000, 1, 32000), RTC_OK);
     media_send_stream_t *encoder = c->sources[0].stream;
     conf_peer_t *old = alloc_session(c, "bob", "m:1:alice:bob", 1, SIG_SESSION_MESH, false);
@@ -419,6 +456,8 @@ TEST(staged_graph_commit_preserves_participants_sources_and_selects_media_once) 
     ASSERT_EQ(counts.departures, 0);
     ASSERT_EQ(counts.connected, 1);
     ASSERT_EQ(conference_get_peer_count(c), 1);
+    ASSERT_EQ(conference_get_peer_name(c, "bob", name, sizeof(name)), RTC_OK);
+    ASSERT_STR_EQ(name, "Bob <Camera>");
     ASSERT(c->sources[0].stream == encoder);
     conference_source_stats_t stats;
     ASSERT_EQ(conference_get_source_stats(c, "bob", &stats), RTC_OK);
@@ -520,6 +559,7 @@ int main(void) {
     RUN_TEST(disconnect_removes_remote_participants);
     RUN_TEST(sfu_no_source_offer_is_data_only);
     RUN_TEST(sfu_media_offer_accepts_conference_stun_settings);
+    RUN_TEST(mesh_receive_only_offer_and_data_only_rejection);
     RUN_TEST(mesh_answer_adopts_remote_mid_order_and_payload_types);
     RUN_TEST(data_channel_send_and_callback_reply_race_peer_leave);
     RUN_TEST(versioned_data_channel_send_and_callback_reply_race_peer_leave);
