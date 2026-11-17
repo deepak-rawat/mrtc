@@ -27,25 +27,35 @@ typedef struct {
 
 static volatile sig_atomic_t stopped;
 
+static void print_source(probe_t *probe, const char *peer, bool video) {
+    conference_source_stats_t stats;
+    if (conference_get_source_stats(probe->conference, peer, &stats) == RTC_OK &&
+        (video ? stats.video_frames % 10 == 0 : stats.audio_frames % 50 == 0)) {
+        printf("SOURCE peer=%s video=%llu audio=%llu\n", peer,
+               (unsigned long long)stats.video_frames, (unsigned long long)stats.audio_frames);
+        fflush(stdout);
+    }
+}
+
 static void stop_probe(int signal_number) {
     (void)signal_number;
     stopped = 1;
 }
 
 static void on_video(const char *peer, const char *label, const video_frame_t *frame, void *user) {
-    (void)peer;
     (void)label;
     (void)frame;
     probe_t *probe = user;
     atomic_fetch_add(&probe->video, 1);
+    print_source(probe, peer, true);
 }
 
 static void on_audio(const char *peer, const char *label, const audio_frame_t *frame, void *user) {
-    (void)peer;
     (void)label;
     (void)frame;
     probe_t *probe = user;
     atomic_fetch_add(&probe->audio, 1);
+    print_source(probe, peer, false);
 }
 
 static void on_message(const char *peer, const uint8_t *data, size_t len, void *user) {
@@ -64,6 +74,15 @@ static void on_message(const char *peer, const uint8_t *data, size_t len, void *
 static void on_joined(const char *peer, void *user) {
     (void)user;
     printf("PROBE_JOINED %s\n", peer);
+    printf("JOINED peer=%s\n", peer);
+    fflush(stdout);
+}
+
+static void on_topology(const char *mode, const char *status, uint32_t epoch, const char *reason,
+                        void *user) {
+    (void)user;
+    printf("TOPOLOGY mode=%s status=%s epoch=%u reason=%s\n", mode, status, epoch,
+           reason ? reason : "");
     fflush(stdout);
 }
 
@@ -74,10 +93,46 @@ static void on_error(const char *message, void *user) {
 }
 
 int main(int argc, char **argv) {
-    const char *url = argc > 1 ? argv[1] : "ws://127.0.0.1:8080";
-    const char *room = argc > 2 ? argv[2] : "interop";
-    unsigned duration = argc > 3 ? (unsigned)atoi(argv[3]) : 45;
-    unsigned cycles = argc > 4 ? (unsigned)atoi(argv[4]) : 1;
+    const char *url = "ws://127.0.0.1:8080";
+    const char *room = "interop";
+    const char *name = "native";
+    const char *stun = NULL;
+    unsigned duration = 45, cycles = 1;
+    bool synthetic = true, muted = false;
+    if (argc > 1 && argv[1][0] != '-') {
+        url = argv[1];
+        if (argc > 2)
+            room = argv[2];
+        if (argc > 3)
+            duration = (unsigned)atoi(argv[3]);
+        if (argc > 4)
+            cycles = (unsigned)atoi(argv[4]);
+    } else {
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--server") == 0 && i + 1 < argc)
+                url = argv[++i];
+            else if (strcmp(argv[i], "--meeting") == 0 && i + 1 < argc)
+                room = argv[++i];
+            else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc)
+                name = argv[++i];
+            else if (strcmp(argv[i], "--stun") == 0 && i + 1 < argc)
+                stun = argv[++i];
+            else if (strcmp(argv[i], "--duration") == 0 && i + 1 < argc)
+                duration = (unsigned)atoi(argv[++i]);
+            else if (strcmp(argv[i], "--cycles") == 0 && i + 1 < argc)
+                cycles = (unsigned)atoi(argv[++i]);
+            else if (strcmp(argv[i], "--synthetic") == 0)
+                synthetic = true;
+            else if (strcmp(argv[i], "--data-only") == 0)
+                synthetic = false;
+            else if (strcmp(argv[i], "--muted") == 0)
+                muted = true;
+            else if (strcmp(argv[i], "--chat") != 0) {
+                fprintf(stderr, "Unknown probe option: %s\n", argv[i]);
+                return 1;
+            }
+        }
+    }
     if (!duration || !cycles)
         return 1;
     signal(SIGTERM, stop_probe);
@@ -90,8 +145,11 @@ int main(int argc, char **argv) {
                       .on_remote_audio = on_audio,
                       .on_message = on_message,
                       .on_joined = on_joined,
+                      .on_topology = on_topology,
                       .on_error = on_error},
         .user_data = &probe,
+        .display_name = name,
+        .stun_server = stun,
     };
     conference_t *conference = conference_create(&config);
     if (!conference)
@@ -99,11 +157,16 @@ int main(int argc, char **argv) {
     probe.conference = conference;
     test_pattern_t pattern;
     test_tone_t tone;
-    if (test_pattern_init(&pattern, 160, 120) != RTC_OK ||
-        test_tone_init(&tone, 48000, 1, 440) != RTC_OK ||
-        conference_add_video_source(conference, "camera", 160, 120, 10, 160) != RTC_OK ||
-        conference_add_audio_source(conference, "mic", 48000, 1, 32000) != RTC_OK)
+    if (synthetic &&
+        (test_pattern_init(&pattern, 160, 120) != RTC_OK ||
+         test_tone_init(&tone, 48000, 1, 440) != RTC_OK ||
+         conference_add_video_source(conference, "camera", 160, 120, 10, 160) != RTC_OK ||
+         conference_add_audio_source(conference, "mic", 48000, 1, 32000) != RTC_OK))
         return 1;
+    if (muted) {
+        conference_mute_source(conference, "camera", true);
+        conference_mute_source(conference, "mic", true);
+    }
     signaling_config_t signaling_config;
     conference_get_signaling_callbacks(conference, &signaling_config, url, room);
     bool media_ok = false, data_ok = false;
@@ -126,12 +189,12 @@ int main(int argc, char **argv) {
         uint64_t last_video = 0, last_audio = 0;
         while (!stopped && rtc_time_ms() < deadline) {
             uint64_t now = rtc_time_ms();
-            if (now - last_video >= 100) {
+            if (synthetic && now - last_video >= 100) {
                 last_video = now;
                 test_pattern_next_frame(&pattern);
                 conference_push_video(conference, "camera", test_pattern_get_frame(&pattern));
             }
-            if (now - last_audio >= 20) {
+            if (synthetic && now - last_audio >= 20) {
                 last_audio = now;
                 audio_frame_t audio;
                 test_tone_next_frame(&tone, &audio);
@@ -167,8 +230,10 @@ int main(int argc, char **argv) {
         completed++;
     }
     conference_destroy(conference);
-    test_pattern_close(&pattern);
-    test_tone_close(&tone);
+    if (synthetic) {
+        test_pattern_close(&pattern);
+        test_tone_close(&tone);
+    }
     rtc_client_cleanup();
     printf("PROBE_DONE video=%u audio=%u errors=%u\n", atomic_load(&probe.video),
            atomic_load(&probe.audio), atomic_load(&probe.errors));

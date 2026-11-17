@@ -44,6 +44,10 @@ typedef struct {
     int tile_count;
     rtc_str_map_t tile_index; /* "peer_id:label" → ui_tile_t * (owned keys) */
     rtc_mutex_t tiles_mutex;
+    char pending_status[256];
+    bool status_dirty;
+    int16_t pending_audio[48000];
+    size_t pending_audio_count;
 
     /* Local preview */
     SDL_Texture *local_preview;
@@ -84,6 +88,9 @@ void ui_sdl3_render(ui_sdl3_t *ui);
 /* Remove a peer's tiles */
 void ui_sdl3_remove_peer(ui_sdl3_t *ui, const char *peer_id);
 void ui_sdl3_on_peer_left(const char *peer_id, void *user);
+void ui_sdl3_on_topology(const char *mode, const char *status, uint32_t epoch, const char *reason,
+                         void *user);
+void ui_sdl3_on_error(const char *message, void *user);
 
 /* Cleanup */
 void ui_sdl3_close(ui_sdl3_t *ui);

@@ -69,10 +69,43 @@ TEST(peer_left_before_first_render) {
     SDL_Quit();
 }
 
+static void *topology_thread(void *user) {
+    ui_sdl3_on_topology("sfu", "switching", 2, "", user);
+    int16_t samples[960] = {0};
+    audio_frame_t audio = {
+        .samples = samples, .sample_count = 960, .sample_rate = 48000, .channels = 1};
+    ui_sdl3_on_audio_samples("alice", "mic", &audio, user);
+    return NULL;
+}
+
+TEST(topology_and_audio_callbacks_are_deferred_to_main_render) {
+    ui_sdl3_t ui;
+    ASSERT_EQ(ui_sdl3_init(&ui, 320, 240), 0);
+    char title[256];
+    snprintf(title, sizeof(title), "%s", SDL_GetWindowTitle(ui.window));
+    rtc_thread_t thread;
+    ASSERT_EQ(rtc_thread_create(&thread, topology_thread, &ui), RTC_OK);
+    ASSERT_EQ(rtc_thread_join(&thread), RTC_OK);
+    ASSERT_STR_EQ(SDL_GetWindowTitle(ui.window), title);
+    ASSERT(ui.status_dirty);
+    ASSERT_EQ(ui.pending_audio_count, 960);
+    ui_sdl3_render(&ui);
+    ASSERT(strstr(SDL_GetWindowTitle(ui.window), "Switching to SFU") != NULL);
+    ASSERT(!ui.status_dirty);
+    ASSERT_EQ(ui.pending_audio_count, 0);
+    ui_sdl3_on_error("test failure", &ui);
+    ASSERT(strstr(SDL_GetWindowTitle(ui.window), "test failure") == NULL);
+    ui_sdl3_render(&ui);
+    ASSERT(strstr(SDL_GetWindowTitle(ui.window), "Error: test failure") != NULL);
+    ui_sdl3_close(&ui);
+    SDL_Quit();
+}
+
 int main(void) {
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
     SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
     RUN_TEST(peer_left_removes_all_tiles);
     RUN_TEST(peer_left_before_first_render);
+    RUN_TEST(topology_and_audio_callbacks_are_deferred_to_main_render);
     TEST_SUMMARY();
 }

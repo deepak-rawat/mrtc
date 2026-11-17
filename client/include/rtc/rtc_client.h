@@ -7,7 +7,7 @@
 
 #include <rtc/rtc.h>
 #include "rtc_track.h"
-#include "rtc_data_channel.h"
+#include <rtc/rtc_data_channel.h>
 #include "rtc_peer.h"
 #include "rtc_stats.h"
 

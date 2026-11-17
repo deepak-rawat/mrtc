@@ -28,8 +28,9 @@ Session IDs are deterministic:
 | SFU publishing | `p:<epoch>:<publisher-id>` |
 | SFU subscription | `s:<epoch>:<subscriber-id>:<publisher-id>` |
 
-For version 2 mesh pairs, the lexically smaller participant makes the initial
-offer. Shared C helpers and protocol tests define the same session naming used
+For version 2 mesh pairs, the smaller participant in ASCII byte order makes the
+initial offer (`strcmp` in C, `<` for these ASCII IDs in JavaScript, not a
+locale-sensitive comparison). Shared C helpers and protocol tests define the same session naming used
 by the web client. SDP/candidate messages carry both `epoch` and `session_id`;
 stale generations are discarded explicitly without affecting active sessions.
 Ordinary ICE restart keeps the session ID; candidate username fragments still
@@ -76,6 +77,8 @@ they must not free state still referenced by callbacks.
 
 Transport readiness alone is not proof of decoded media. Tests check actual
 per-source media after handoff. New audio is not played twice during prepare.
+Intentionally muted, inactive and absent tracks must not cause an impossible
+readiness wait. Flowing tracks require usable pending media before handoff.
 Participant/gallery identities and capture sources survive a topology change.
 Closing an old PeerConnection must not stop a capture track reused by another.
 

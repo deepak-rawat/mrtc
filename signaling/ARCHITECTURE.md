@@ -1,8 +1,19 @@
 # Signaling Library (libmrtc_signaling) + Server
 
-WebSocket-based meeting coordination and SDP/ICE exchange. The server defaults
-to SFU mode and loopback binding; `--mesh` selects the legacy signaling-only
-mode. The SFU uses the existing RTC runtime and routing libraries.
+WebSocket signaling and SDP/ICE exchange. The reusable `mrtc_signaling` library
+contains only message helpers and the WebSocket client. The unified server lives
+in `app/server/`; its SFU media engine is the independent `mrtc_sfu` library in
+`sfu/`, linked to routing, the RTC runtime, and shared `mrtc_sctp`, not the client
+facade. See [PROTOCOL.md](PROTOCOL.md) for the versioned wire contract.
+
+The server defaults to automatic per-room topology selection and loopback
+binding. Start `build/app/server/mrtc_server --web-root web/dist` after building
+frontend assets; libwebsockets HTTP mounts serve them without a Node runtime.
+`build/signaling/signaling_server` is built from the same entrypoint for
+compatibility. Both accept the existing positional port and `--mesh` alias.
+Other options are `--port`, `--listen-ip` (`--bind`), `--announced-ip`,
+`--media-port`, `--mode mesh|sfu|auto`, `--p2p-max` (default 2), and
+`--downgrade-delay-ms` (default 15000).
 
 ## Architecture
 
@@ -20,6 +31,11 @@ mode. The SFU uses the existing RTC runtime and routing libraries.
 
 ## Protocol (JSON over WebSocket)
 
+The base fields below also describe legacy fixed-mode messages. Normal native
+and web conference clients use version 2, adding epoch/session identity and
+capabilities. See the [complete contract](PROTOCOL.md) rather than omitting
+those fields when implementing an AUTO-capable client.
+
 | Direction | Type | Fields |
 |-----------|------|--------|
 | C→S | `join` | meeting |
@@ -32,6 +48,8 @@ mode. The SFU uses the existing RTC runtime and routing libraries.
 | C→S | `candidate` | to, candidate |
 | S→C | (relayed) | from (replaces to), sdp/candidate |
 | S→C | `error` | message |
+| S→C | `topology_prepare`, `topology_commit`, `topology_abort` | version, epoch, concrete mode, roster/reason |
+| C→S | `topology_ready`, `topology_ack`, `topology_request` | version, epoch, concrete mode, reason where required |
 
 Example: `{"type":"offer","to":"peer_abc123","sdp":"v=0\r\no=..."}`
 
@@ -115,9 +133,12 @@ signaling_connect(sc);
 
 Bind conference signaling before connecting: a local WebSocket server can
 return `joined` before `signaling_connect()` returns to the application.
-`on_mode` selects SFU or mesh behavior before `on_joined` is dispatched.
+The versioned `on_event` callback receives the whole parsed message, including
+epoch/session identity, instead of legacy per-type dispatch. Its message is
+borrowed only during the callback. With no `on_event`, legacy `on_mode` runs
+before legacy `on_joined`. The conference helper installs its own v2 controller.
 
-### Default SFU flow
+### Fixed SFU flow (`--mode sfu`)
 
 1. Client joins and learns `mode="sfu"`.
 2. Client creates one publishing connection to `"sfu"` for media and SCTP chat.
@@ -132,6 +153,31 @@ The shared publisher listener and separate subscription listeners avoid
 colliding DTLS associations when a native client shares its local UDP socket.
 This intentionally uses more UDP ports than a single bundled connection per
 participant, in exchange for simpler session ownership.
+Overlapping publisher generations for the same participant also receive
+separate listeners to prevent DTLS tuple aliasing.
+
+### Automatic room control
+
+The WebSocket/control thread owns room membership, concrete active/desired
+topology, monotonic epoch assignment and prepare/commit acknowledgement state.
+Rooms start in mesh and prepare SFU above the P2P threshold. Returning below the
+threshold starts a hold-down before preparing mesh. A genuine P2P failure
+request pins the room to SFU to avoid repeated failed downgrades.
+
+The active graph continues during prepare. All admitted participants must
+report ready before commit; all must acknowledge before old SFU sessions retire.
+Preparation failure/timeout aborts only the pending epoch and blocks automatic
+retry until membership changes or a first P2P failure requests fallback.
+Joins/departures during prepare abort and rebuild with a fresh epoch and roster.
+Joins during commit enter the already-selected current epoch; departures remove
+their acknowledgement obligation. Missing commit acknowledgements close those
+connections rather than rolling back peers that already retired old sessions.
+Both phases have 10-second deadlines.
+
+Auto rooms require version 2 and mesh/SFU/topology-switch capabilities. Legacy
+version 1 clients are admitted only with explicitly forced mesh or SFU policy.
+Fixed rooms reject mixed protocol versions explicitly rather than forwarding
+versionless sessions into a version 2 graph.
 
 ### Legacy mesh message flow
 
@@ -193,21 +239,28 @@ participants even when the WebSocket closes without an explicit leave message.
 | `signaling_send_offer(to, sdp)` | Yes | Queue offer for sending |
 | `signaling_send_answer(to, sdp)` | Yes | Queue answer for sending |
 | `signaling_send_candidate(to, cand)` | Yes | Queue ICE candidate |
+| `signaling_send_message(message)` | Yes | Queue a complete versioned session/topology message |
 | `signaling_leave()` | Yes | Queue leave message |
 | `signaling_disconnect()` | — | Stop service and drain callbacks |
 | `signaling_destroy()` | — | Stop thread, cleanup |
 
-### Signaling Server (`server/`)
+Use the complete-message API for protocol v2. Legacy offer/answer/candidate
+helpers cannot supply epoch/session ownership and are not AUTO-room helpers.
+
+### Unified Server (`../app/server/`) and SFU (`../sfu/`)
 
 The libwebsockets thread owns connection/meeting events. SFU transport and media
-graph operations are marshalled onto an RTC worker; worker-originated messages
-are queued for writable callbacks on the WebSocket thread.
+graph operations use copied ID/epoch commands marshalled through the existing
+transport worker invocation queue. Worker events contain copied IDs and payloads;
+a bounded control-event queue resolves them to current participants on the
+WebSocket thread. No WebSocket peer pointers reach the media engine.
 
 | File | Responsibility |
 |------|---------------|
 | `signaling_server.c` | lws event loop, WebSocket protocol handler |
 | `meeting.c/h` | Meeting/peer management, message routing |
-| `sfu.c/h` | Runtime transports, publishers/subscribers, SCTP chat and feedback |
+| `sfu/src/rtc_sfu.c` | Runtime transports, publishers/subscribers, SCTP and feedback |
+| `sfu/include/rtc/rtc_sfu.h` | Copied commands/events and independent engine lifecycle |
 
 **Connection lifecycle:**
 ```
@@ -221,11 +274,16 @@ LWS_CALLBACK_CLOSED      → remove peer, notify others in meeting
 
 **Peer ID:** Server assigns a random alphanumeric identifier whose capacity is
 defined by `SIG_MAX_PEER_ID`. It identifies participants in signaling and in
-conference messages.
+conference messages and stays stable across topology changes. A later successful
+join on a reused WebSocket receives a new call identity, preventing delayed
+sessions from the previous room/call from matching a fresh epoch.
 
-**Data channels:** SCTP/DCEP is standard. The conference's optional `MRTC`
+**Data channels:** SCTP/DCEP is standard and implemented in `mrtc_sctp` under
+`rtc/`, shared by clients and the SFU. The conference's legacy `MRTC`
 address/source envelope is application payload inside SCTP, not a replacement
-for SCTP or DCEP. Native conference APIs add/remove it automatically.
+for SCTP or DCEP. Version 2 uses `MRC2` envelopes with sender message IDs.
+Envelope validation, destination routing and trusted sender replacement belong
+to `app/server`, not the RTP engine; the sender message ID is preserved.
 
 **Limits:** Eight peers per meeting, bounded outgoing queues, no authentication.
 Default binding is `127.0.0.1`; remote-device testing requires explicit
@@ -236,7 +294,9 @@ Default binding is `127.0.0.1`; remote-device testing requires explicit
 - **libwebsockets** — WebSocket protocol
 - **cJSON** — JSON parsing
 - **libmrtc_common** — types, logging, threading
-- SFU server: **libmrtc_client**, **libmrtc_routing**, and **usrsctp**
+- SFU server: **libmrtc_sfu**, **libmrtc_routing**, **libmrtc_sctp**, and **usrsctp**
+- Client-disabled server: configure with `-DMRTC_ENABLE_CLIENT_API=OFF`;
+  routing stays enabled for SFU/auto. Without routing, force mesh explicitly.
 
 ## Tests
 
@@ -244,5 +304,9 @@ Default binding is `127.0.0.1`; remote-device testing requires explicit
 |------|----------|
 | `test_signaling_msg` | JSON message build/parse round-trip |
 | `test_signaling` | Meeting creation, peer join/leave, message routing |
+| `test_topology` | Independent rooms, prepare/ready/commit/ack, delayed downgrade, forced/legacy policy, failures and stale ownership |
+| `test_sfu_session` | Actual audio/video, renegotiation, TWCC, SCTP, ICE restart, distinct overlapping epochs and retirement |
+| `test_signaling_server_args` | Invalid, missing and conflicting CLI configuration |
+| `test_server_runtime` | Real HTTP mounts/WebSockets: independent rooms, joins during both phases, downgrade, abort, stale ownership and same-ID mesh restart (optional Node 22+ test runner only) |
 | Local browser harness | Actual media decoding, standard SCTP messages and publisher lifecycle through the SFU |
 | Native churn harness | 120 real conference generations with media/data per generation |

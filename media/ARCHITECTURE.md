@@ -17,6 +17,12 @@ Recv Side (per remote SSRC, direct dispatch via handle):
   rtc_rtp_receiver callback → Pipeline recv handle → Depacketize → Decode → App
 ```
 
+The conference controller keeps one send pipeline for the call and a separate
+receive pipeline per transport session. During topology migration, old and new
+sessions therefore cannot mix decoder/reordering state; only the active graph
+delivers decoded frames to the application. Capture and send encoders survive
+the handoff.
+
 ## Usage Example
 
 ```c

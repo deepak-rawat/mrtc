@@ -6,7 +6,7 @@
  * and delivers SCTP messages over DTLS (RFC 8831), with DCEP (RFC 8832).
  *
  * The wire format and the manager that owns channels are internal to
- * the library (see client/src/rtc_data_channel_internal.h).
+ * the library (see rtc/src/rtc_data_channel_internal.h).
  */
 #ifndef RTC_DATA_CHANNEL_H
 #define RTC_DATA_CHANNEL_H

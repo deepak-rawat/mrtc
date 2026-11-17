@@ -253,7 +253,7 @@ void ui_sdl3_on_audio_samples(const char *peer_id, const char *label, const audi
                               void *user) {
     ui_sdl3_t *ui = (ui_sdl3_t *)user;
     (void)label;
-    if (!ui || !audio || !audio->samples)
+    if (!ui || !audio || !audio->samples || audio->sample_count <= 0 || audio->channels <= 0)
         return;
 
     /* Compute RMS audio level */
@@ -270,12 +270,36 @@ void ui_sdl3_on_audio_samples(const char *peer_id, const char *label, const audi
         tile = find_tile(ui, peer_id, "screen");
     if (tile && !tile->remove_pending)
         tile->audio_level = level;
+    size_t samples = (size_t)audio->sample_count * audio->channels;
+    size_t capacity = sizeof(ui->pending_audio) / sizeof(ui->pending_audio[0]);
+    if (samples <= capacity - ui->pending_audio_count) {
+        memcpy(ui->pending_audio + ui->pending_audio_count, audio->samples,
+               samples * sizeof(int16_t));
+        ui->pending_audio_count += samples;
+    }
     rtc_mutex_unlock(&ui->tiles_mutex);
+}
 
-    /* Play through speaker */
-    if (ui->speaker_stream)
-        SDL_PutAudioStreamData(ui->speaker_stream, audio->samples,
-                               audio->sample_count * audio->channels * (int)sizeof(int16_t));
+void ui_sdl3_on_topology(const char *mode, const char *status, uint32_t epoch, const char *reason,
+                         void *user) {
+    ui_sdl3_t *ui = user;
+    rtc_mutex_lock(&ui->tiles_mutex);
+    snprintf(ui->pending_status, sizeof(ui->pending_status), "mrtc — %s%s (epoch %u)%s%s",
+             strcmp(status, "switching") == 0 ? "Switching to "
+             : strcmp(status, "error") == 0   ? "Error — "
+                                              : "",
+             strcmp(mode, "sfu") == 0 ? "SFU" : "P2P", epoch, reason && reason[0] ? " — " : "",
+             reason ? reason : "");
+    ui->status_dirty = true;
+    rtc_mutex_unlock(&ui->tiles_mutex);
+}
+
+void ui_sdl3_on_error(const char *message, void *user) {
+    ui_sdl3_t *ui = user;
+    rtc_mutex_lock(&ui->tiles_mutex);
+    snprintf(ui->pending_status, sizeof(ui->pending_status), "mrtc — Error: %s", message);
+    ui->status_dirty = true;
+    rtc_mutex_unlock(&ui->tiles_mutex);
 }
 
 void ui_sdl3_render(ui_sdl3_t *ui) {
@@ -283,6 +307,16 @@ void ui_sdl3_render(ui_sdl3_t *ui) {
     SDL_RenderClear(ui->renderer);
 
     rtc_mutex_lock(&ui->tiles_mutex);
+    if (ui->status_dirty) {
+        SDL_SetWindowTitle(ui->window, ui->pending_status);
+        ui->status_dirty = false;
+    }
+    if (ui->pending_audio_count) {
+        if (ui->speaker_stream)
+            SDL_PutAudioStreamData(ui->speaker_stream, ui->pending_audio,
+                                   (int)(ui->pending_audio_count * sizeof(int16_t)));
+        ui->pending_audio_count = 0;
+    }
     /* Process pending frames from transport thread → SDL textures (main thread) */
     for (int i = 0; i < ui->tile_count; i++) {
         ui_tile_t *t = &ui->tiles[i];

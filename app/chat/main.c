@@ -40,6 +40,14 @@ static void on_error(const char *message, void *user) {
     fprintf(stderr, "  [error] %s\n", message);
 }
 
+static void on_topology(const char *mode, const char *status, uint32_t epoch, const char *reason,
+                        void *user) {
+    (void)user;
+    printf("  [%s %s epoch=%u%s%s]\n", strcmp(mode, "sfu") == 0 ? "SFU" : "P2P", status, epoch,
+           reason && reason[0] ? ": " : "", reason ? reason : "");
+    fflush(stdout);
+}
+
 static bool stdin_has_data(void) {
 #ifdef _WIN32
     return _kbhit() != 0;
@@ -53,13 +61,15 @@ static bool stdin_has_data(void) {
 }
 
 static void usage(const char *program) {
-    fprintf(stderr, "Usage: %s --meeting <name> [--server <url>] [--stun <ip>]\n", program);
+    fprintf(stderr, "Usage: %s --meeting <name> [--server <url>] [--stun <ip>] [--name <name>]\n",
+            program);
 }
 
 int main(int argc, char **argv) {
     const char *meeting = NULL;
     const char *server = "ws://127.0.0.1:8080";
     const char *stun = "stun.l.google.com";
+    const char *display_name = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--meeting") == 0 && i + 1 < argc)
             meeting = argv[++i];
@@ -67,6 +77,8 @@ int main(int argc, char **argv) {
             server = argv[++i];
         else if (strcmp(argv[i], "--stun") == 0 && i + 1 < argc)
             stun = argv[++i];
+        else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc)
+            display_name = argv[++i];
         else {
             usage(argv[0]);
             return 1;
@@ -87,10 +99,12 @@ int main(int argc, char **argv) {
     }
     conference_config_t config = {
         .stun_server = stun[0] ? stun : NULL,
+        .display_name = display_name,
         .callbacks = {.on_joined = on_joined,
                       .on_peer_joined = on_peer_joined,
                       .on_peer_left = on_peer_left,
                       .on_message = on_message,
+                      .on_topology = on_topology,
                       .on_error = on_error},
     };
     conference_t *conference = conference_create(&config);

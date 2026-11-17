@@ -1,5 +1,7 @@
-#include "../server/sfu.c"
+#include "../src/rtc_sfu.c"
 #include "../../client/src/rtc_peer_internal.h"
+#include <rtc/rtc_client.h>
+#include <signaling/signaling_msg.h>
 #include <rtc/rtc_rtcp.h>
 #include "test_harness.h"
 #include <stdatomic.h>
@@ -14,7 +16,8 @@
 
 typedef struct endpoint {
     rtc_peer_connection_t *pc;
-    meeting_peer_t *peer;
+    char id[RTC_SFU_ID_SIZE];
+    uint32_t epoch;
     _Atomic unsigned packets;
     _Atomic unsigned audio_packets;
     _Atomic unsigned messages;
@@ -24,8 +27,8 @@ typedef struct endpoint {
 } endpoint_t;
 
 typedef struct {
-    meeting_manager_t manager;
-    signaling_sfu_t *sfu;
+    rtc_sfu_t *sfu;
+    endpoint_t *endpoints[2];
     rtc_mutex_t mutex;
     struct {
         endpoint_t *endpoint;
@@ -36,17 +39,70 @@ typedef struct {
     bool failed;
 } fixture_t;
 
-static void send_message(meeting_peer_t *peer, const char *json, void *user) {
+static int subscription_id(char out[RTC_SFU_SESSION_SIZE], uint32_t epoch, const char *subscriber,
+                           const char *publisher) {
+    return sig_session_id(out, SIG_SESSION_SUBSCRIBE, epoch, subscriber, publisher);
+}
+
+static void send_message(const rtc_sfu_event_t *event, void *user) {
     fixture_t *fixture = user;
+    if (event->type == RTC_SFU_DATA) {
+        rtc_sfu_send_data(fixture->sfu, event->room, event->owner, event->epoch, event->data,
+                          event->data_len);
+        return;
+    }
+    endpoint_t *endpoint = NULL;
+    for (unsigned i = 0; i < 2; i++)
+        if (fixture->endpoints[i] && !strcmp(fixture->endpoints[i]->id, event->owner) &&
+            fixture->endpoints[i]->epoch == event->epoch)
+            endpoint = fixture->endpoints[i];
+    if (!endpoint)
+        return;
+    sig_msg_t message = {.version = 2, .epoch = event->epoch};
+    message.type = event->type == RTC_SFU_OFFER       ? SIG_MSG_OFFER
+                   : event->type == RTC_SFU_ANSWER    ? SIG_MSG_ANSWER
+                   : event->type == RTC_SFU_CANDIDATE ? SIG_MSG_CANDIDATE
+                                                      : SIG_MSG_ERROR;
+    snprintf(message.from, sizeof(message.from), "%s", event->remote);
+    snprintf(message.session_id, sizeof(message.session_id), "%s", event->session_id);
+    if (message.type == SIG_MSG_CANDIDATE)
+        snprintf(message.candidate, sizeof(message.candidate), "%.*s",
+                 (int)sizeof(message.candidate) - 1, event->text);
+    else if (message.type == SIG_MSG_ERROR)
+        snprintf(message.error_msg, sizeof(message.error_msg), "%.*s",
+                 (int)sizeof(message.error_msg) - 1, event->text);
+    else
+        snprintf(message.sdp, sizeof(message.sdp), "%s", event->text);
+    char *json = sig_msg_build(&message);
     rtc_mutex_lock(&fixture->mutex);
     if (fixture->count == 128) {
         fixture->failed = true;
     } else {
         unsigned slot = (fixture->head + fixture->count++) % 128;
-        fixture->queue[slot].endpoint = peer->ws_handle;
-        fixture->queue[slot].json = strdup(json);
+        fixture->queue[slot].endpoint = endpoint;
+        fixture->queue[slot].json = json;
+        json = NULL;
     }
     rtc_mutex_unlock(&fixture->mutex);
+    free(json);
+}
+
+static int handle(fixture_t *fixture, endpoint_t *endpoint, const sig_msg_t *message) {
+    rtc_sfu_command_t command = {
+        .version = 2, .epoch = endpoint->epoch, .room = "live", .peer_count = 2};
+    command.type = message->type == SIG_MSG_OFFER    ? RTC_SFU_OFFER
+                   : message->type == SIG_MSG_ANSWER ? RTC_SFU_ANSWER
+                                                     : RTC_SFU_CANDIDATE;
+    snprintf(command.owner, sizeof(command.owner), "%s", endpoint->id);
+    snprintf(command.remote, sizeof(command.remote), "%s", message->to);
+    sig_session_id(command.session_id,
+                   !strcmp(message->to, "sfu") ? SIG_SESSION_PUBLISH : SIG_SESSION_SUBSCRIBE,
+                   endpoint->epoch, endpoint->id, message->to);
+    snprintf(command.text, sizeof(command.text), "%s",
+             message->type == SIG_MSG_CANDIDATE ? message->candidate : message->sdp);
+    for (unsigned i = 0; i < 2; i++)
+        snprintf(command.peers[i], sizeof(command.peers[i]), "%s", fixture->endpoints[i]->id);
+    return rtc_sfu_handle(fixture->sfu, &command);
 }
 
 static void received_packet(const uint8_t *data, size_t len, uint16_t seq, uint32_t timestamp,
@@ -134,7 +190,7 @@ static bool pump(fixture_t *fixture) {
                 sig_msg_t response = {.type = SIG_MSG_ANSWER};
                 snprintf(response.to, sizeof(response.to), "%s", message.from);
                 snprintf(response.sdp, sizeof(response.sdp), "%s", answer.sdp);
-                if (signaling_sfu_handle(fixture->sfu, endpoint->peer, &response) != RTC_OK)
+                if (handle(fixture, endpoint, &response) != RTC_OK)
                     return false;
             }
         } else if (message.type == SIG_MSG_CANDIDATE) {
@@ -172,7 +228,7 @@ static bool offer(fixture_t *fixture, endpoint_t *publisher) {
         return false;
     sig_msg_t message = {.type = SIG_MSG_OFFER, .to = "sfu"};
     snprintf(message.sdp, sizeof(message.sdp), "%s", description.sdp);
-    return signaling_sfu_handle(fixture->sfu, publisher->peer, &message) == RTC_OK && pump(fixture);
+    return handle(fixture, publisher, &message) == RTC_OK && pump(fixture);
 }
 
 static bool wait_count(fixture_t *fixture, _Atomic unsigned *count, unsigned target) {
@@ -190,17 +246,17 @@ static bool wait_count(fixture_t *fixture, _Atomic unsigned *count, unsigned tar
 TEST(sfu_live_tracks_restart_sctp_and_publisher_feedback) {
     fixture_t fixture = {0};
     ASSERT_EQ(rtc_mutex_init(&fixture.mutex), RTC_OK);
-    meeting_manager_init(&fixture.manager, send_message, &fixture);
-    fixture.sfu = signaling_sfu_create(&fixture.manager, "127.0.0.1", "127.0.0.1", 0);
+    fixture.sfu = rtc_sfu_create(&(rtc_sfu_config_t){.listen_ip = "127.0.0.1",
+                                                     .subscription_id = subscription_id,
+                                                     .on_event = send_message,
+                                                     .user = &fixture});
     ASSERT(fixture.sfu != NULL);
-    endpoint_t publisher = {.pc = rtc_peer_connection_create(NULL)};
-    endpoint_t subscriber = {.pc = rtc_peer_connection_create(NULL)};
+    endpoint_t publisher = {.pc = rtc_peer_connection_create(NULL), .id = "publisher", .epoch = 1};
+    endpoint_t subscriber = {
+        .pc = rtc_peer_connection_create(NULL), .id = "subscriber", .epoch = 1};
+    fixture.endpoints[0] = &publisher;
+    fixture.endpoints[1] = &subscriber;
     ASSERT(publisher.pc && subscriber.pc);
-    publisher.peer = meeting_peer_create(&publisher);
-    subscriber.peer = meeting_peer_create(&subscriber);
-    ASSERT(publisher.peer && subscriber.peer);
-    ASSERT_EQ(meeting_join(&fixture.manager, publisher.peer, "live"), RTC_OK);
-    ASSERT_EQ(meeting_join(&fixture.manager, subscriber.peer, "live"), RTC_OK);
     rtc_peer_connection_on_track(subscriber.pc, received_track, &subscriber);
     rtc_peer_connection_on_bitrate_estimate(publisher.pc, bitrate_estimate, &publisher);
     rtc_codec_t vp8 = {.payload_type = 96, .mime_type = "video/VP8", .clock_rate = 90000};
@@ -245,8 +301,8 @@ TEST(sfu_live_tracks_restart_sctp_and_publisher_feedback) {
 #endif
     ASSERT_EQ(rtc_data_channel_send_text(channel, "before"), RTC_OK);
     ASSERT(wait_count(&fixture, &publisher.messages, 1));
-    sfu_session_t *session = find_session(fixture.sfu, publisher.peer, "sfu");
-    sfu_session_t *subscription = find_session(fixture.sfu, subscriber.peer, publisher.peer->id);
+    sfu_session_t *session = find_session(fixture.sfu, "live", publisher.id, "sfu", 1);
+    sfu_session_t *subscription = find_session(fixture.sfu, "live", subscriber.id, publisher.id, 1);
     ASSERT(session && subscription);
     rtc_transport_t *transport = session->transport;
     rtc_transport_t *downstream = subscription->transport;
@@ -310,13 +366,13 @@ TEST(sfu_live_tracks_restart_sctp_and_publisher_feedback) {
     ASSERT_EQ(rtc_sdp_generate(&invalid_sdp), RTC_OK);
     sig_msg_t message = {.type = SIG_MSG_OFFER, .to = "sfu"};
     snprintf(message.sdp, sizeof(message.sdp), "%s", invalid_sdp.raw);
-    ASSERT_EQ(signaling_sfu_handle(fixture.sfu, publisher.peer, &message), RTC_ERR_SDP);
+    ASSERT_EQ(handle(&fixture, &publisher, &message), RTC_ERR_SDP);
     ASSERT_EQ(session->remote.media[0].payload_type, 96);
     invalid_sdp.media[0].payload_type = 96;
     snprintf(invalid_sdp.media[0].codec_name, sizeof(invalid_sdp.media[0].codec_name), "H264");
     ASSERT_EQ(rtc_sdp_generate(&invalid_sdp), RTC_OK);
     snprintf(message.sdp, sizeof(message.sdp), "%s", invalid_sdp.raw);
-    ASSERT_EQ(signaling_sfu_handle(fixture.sfu, publisher.peer, &message), RTC_ERR_SDP);
+    ASSERT_EQ(handle(&fixture, &publisher, &message), RTC_ERR_SDP);
     ASSERT_STR_EQ(session->remote.media[0].codec_name, "VP8");
     ASSERT(session->transport == transport && session->sctp == association);
     ASSERT_EQ(rtc_data_channel_send_text(channel, "after rejection"), RTC_OK);
@@ -330,34 +386,89 @@ TEST(sfu_live_tracks_restart_sctp_and_publisher_feedback) {
                                     "active generation 1"};
     for (size_t i = 0; i < sizeof(tcp_candidates) / sizeof(tcp_candidates[0]); i++) {
         snprintf(candidate.candidate, sizeof(candidate.candidate), "%s", tcp_candidates[i]);
-        ASSERT_EQ(signaling_sfu_handle(fixture.sfu, publisher.peer, &candidate), RTC_OK);
+        ASSERT_EQ(handle(&fixture, &publisher, &candidate), RTC_OK);
     }
     snprintf(candidate.candidate, sizeof(candidate.candidate),
              "candidate:1 1 tcp 1518214911 127.0.0.1 9 typ host");
-    ASSERT_EQ(signaling_sfu_handle(fixture.sfu, publisher.peer, &candidate), RTC_ERR_SDP);
+    ASSERT_EQ(handle(&fixture, &publisher, &candidate), RTC_ERR_SDP);
     snprintf(candidate.candidate, sizeof(candidate.candidate),
              "candidate:1 1 quic 1518214911 127.0.0.1 9 typ host");
-    ASSERT_EQ(signaling_sfu_handle(fixture.sfu, publisher.peer, &candidate), RTC_ERR_SDP);
+    ASSERT_EQ(handle(&fixture, &publisher, &candidate), RTC_ERR_SDP);
     ASSERT_EQ(rtc_data_channel_send_text(channel, "after candidate filtering"), RTC_OK);
     ASSERT(wait_count(&fixture, &publisher.messages, 4));
 
-    signaling_sfu_leave(fixture.sfu, subscriber.peer);
-    signaling_sfu_leave(fixture.sfu, publisher.peer);
+    rtc_sfu_leave(fixture.sfu, "live", subscriber.id, 0);
+    rtc_sfu_leave(fixture.sfu, "live", publisher.id, 0);
     rtc_peer_connection_close(publisher.pc);
     rtc_peer_connection_close(subscriber.pc);
     rtc_peer_connection_destroy(publisher.pc);
     rtc_peer_connection_destroy(subscriber.pc);
-    signaling_sfu_destroy(fixture.sfu);
-    meeting_peer_destroy(&fixture.manager, subscriber.peer);
-    meeting_peer_destroy(&fixture.manager, publisher.peer);
+    rtc_sfu_destroy(fixture.sfu);
     ASSERT(pump(&fixture));
-    meeting_manager_close(&fixture.manager);
+    rtc_mutex_destroy(&fixture.mutex);
+}
+
+TEST(overlapping_epochs_keep_distinct_sctp_associations) {
+    fixture_t fixture = {0};
+    ASSERT_EQ(rtc_mutex_init(&fixture.mutex), RTC_OK);
+    fixture.sfu = rtc_sfu_create(&(rtc_sfu_config_t){.listen_ip = "127.0.0.1",
+                                                     .subscription_id = subscription_id,
+                                                     .on_event = send_message,
+                                                     .user = &fixture});
+    ASSERT(fixture.sfu != NULL);
+    endpoint_t active = {.pc = rtc_peer_connection_create(NULL), .id = "alice", .epoch = 1};
+    endpoint_t pending = {.pc = rtc_peer_connection_create(NULL), .id = "alice", .epoch = 2};
+    fixture.endpoints[0] = &active;
+    fixture.endpoints[1] = &pending;
+    ASSERT(active.pc && pending.pc);
+    rtc_data_channel_t *old_channel =
+        rtc_peer_connection_create_data_channel(active.pc, "chat", NULL);
+    rtc_data_channel_t *new_channel =
+        rtc_peer_connection_create_data_channel(pending.pc, "chat", NULL);
+    ASSERT(old_channel && new_channel);
+    rtc_data_channel_on_message(old_channel, received_message, &active);
+    rtc_data_channel_on_message(new_channel, received_message, &pending);
+    ASSERT(offer(&fixture, &active));
+    ASSERT(offer(&fixture, &pending));
+    uint64_t deadline = rtc_time_ms() + 3000;
+    while (rtc_time_ms() < deadline && (rtc_data_channel_state(old_channel) != RTC_DC_OPEN ||
+                                        rtc_data_channel_state(new_channel) != RTC_DC_OPEN)) {
+        ASSERT(pump(&fixture));
+        SLEEP_MS(5);
+    }
+    ASSERT_EQ(rtc_data_channel_state(old_channel), RTC_DC_OPEN);
+    ASSERT_EQ(rtc_data_channel_state(new_channel), RTC_DC_OPEN);
+    sfu_session_t *old_session = find_session(fixture.sfu, "live", "alice", "sfu", 1);
+    sfu_session_t *new_session_ptr = find_session(fixture.sfu, "live", "alice", "sfu", 2);
+    ASSERT(old_session && new_session_ptr);
+    ASSERT(old_session->transport != new_session_ptr->transport);
+    ASSERT(old_session->sctp != new_session_ptr->sctp);
+    ASSERT_STR_EQ(old_session->session_id, "p:1:alice");
+    ASSERT_STR_EQ(new_session_ptr->session_id, "p:2:alice");
+    ASSERT_EQ(rtc_data_channel_send_text(old_channel, "old"), RTC_OK);
+    ASSERT_EQ(rtc_data_channel_send_text(new_channel, "new"), RTC_OK);
+    ASSERT(wait_count(&fixture, &active.messages, 1));
+    ASSERT(wait_count(&fixture, &pending.messages, 1));
+    rtc_sfu_leave(fixture.sfu, "live", "alice", 1);
+    ASSERT(find_session(fixture.sfu, "live", "alice", "sfu", 1) == NULL);
+    ASSERT(find_session(fixture.sfu, "live", "alice", "sfu", 2) == new_session_ptr);
+    ASSERT_EQ(rtc_data_channel_send_text(new_channel, "after retirement"), RTC_OK);
+    ASSERT(wait_count(&fixture, &pending.messages, 2));
+    rtc_sfu_close(fixture.sfu);
+    rtc_peer_connection_close(active.pc);
+    rtc_peer_connection_close(pending.pc);
+    rtc_peer_connection_destroy(active.pc);
+    rtc_peer_connection_destroy(pending.pc);
+    rtc_sfu_destroy(fixture.sfu);
+    ASSERT(pump(&fixture));
     rtc_mutex_destroy(&fixture.mutex);
 }
 
 int main(void) {
     rtc_client_init();
     RUN_TEST(sfu_live_tracks_restart_sctp_and_publisher_feedback);
+    RUN_TEST(overlapping_epochs_keep_distinct_sctp_associations);
     rtc_client_cleanup();
     TEST_SUMMARY();
+    return _test_fail_count ? 1 : 0;
 }

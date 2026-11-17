@@ -4,7 +4,7 @@ WebRTC-style peer-connection API mirroring the W3C `RTCPeerConnection`
 interface. Built on top of the runtime transport core in `libmrtc`.
 
 `libmrtc_client` is built when `MRTC_ENABLE_CLIENT_API=ON` (default).
-It links `libmrtc` publicly, so consumers only need to link
+It links the shared `libmrtc_sctp` backend and `libmrtc`, so consumers only need to link
 `mrtc_client` — the runtime headers and library are pulled in
 transitively.
 
@@ -75,16 +75,17 @@ rtc_client_cleanup();
 
 ## Public Headers
 
-All client headers install under `include/rtc/` alongside the runtime
-headers. On disk they live in `client/include/rtc/`.
+Client headers install under `include/rtc/` alongside runtime/shared SCTP
+headers. Peer/track/stats/facade headers live in `client/include/rtc/`;
+shared data-channel/SCTP headers now live in `rtc/include/rtc/`.
 
 - `rtc_peer.h` — `RTCPeerConnection` (lifecycle, SDP, ICE callbacks, stats)
 - `rtc_track.h` — `RTCRtpSender` / `Receiver` / `Transceiver`
 - `rtc_data_channel.h` — `RTCDataChannel`
 - `rtc_stats.h` — `getStats()` snapshot reporting (W3C webrtc-stats subset)
 - `rtc_client.h` — umbrella include (pulls in `rtc.h` + the four above)
-- `rtc_sctp.h` — SCTP endpoint helpers for applications using runtime transports
-  directly, including the signaling/SFU server
+- `rtc_sctp.h` — shared endpoint helpers for runtime/SFU consumers, implemented
+  by `mrtc_sctp` rather than the native facade
 
 ## Module Details
 
@@ -163,7 +164,14 @@ receiver are thin handles over the core `rtc_rtp_send_stream` /
 - **`rtc_rtp_transceiver_t`** — pairs sender + receiver with direction
   (`sendrecv`, `sendonly`, `recvonly`, `inactive`) and MID (m= line index).
 
-### Data Channels (`rtc_data_channel.h/c`)
+### Data Channels (`rtc/include/rtc/rtc_data_channel.h`, `rtc/src/rtc_data_channel.c`)
+
+The SCTP/DCEP backend, public data channel API, and internal manager now live in
+the shared `mrtc_sctp` target under `rtc/`. The client facade links this target;
+the SFU uses the same implementation without linking the client. Transport-only
+applications initialize/clean up the stack with `rtc_sctp_init()` /
+`rtc_sctp_cleanup()`; client applications retain `rtc_client_init()` /
+`rtc_client_cleanup()`.
 
 Text/binary messages use standard SCTP over DTLS through **usrsctp >= 0.9.5**.
 DCEP OPEN/ACK establishes in-band channels; negotiated channels use an explicit

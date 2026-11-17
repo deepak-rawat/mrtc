@@ -1,18 +1,8 @@
 # client/ - WebRTC-style peer connection facade (libmrtc_client)
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(USRSCTP REQUIRED usrsctp>=0.9.5)
-find_path(USRSCTP_HEADER_DIR usrsctp.h
-    HINTS ${USRSCTP_INCLUDE_DIRS} ${USRSCTP_PREFIX}/include
-    PATH_SUFFIXES usrsctp)
-if(NOT USRSCTP_HEADER_DIR)
-    message(FATAL_ERROR "usrsctp.h not found; install the usrsctp development package")
-endif()
-
 add_library(mrtc_client STATIC
     src/rtc_client_runtime.c
     src/rtc_track.c
-    src/rtc_data_channel.c
     src/rtc_peer.c
 )
 target_include_directories(mrtc_client
@@ -20,10 +10,9 @@ target_include_directories(mrtc_client
     PRIVATE
         src
         include/rtc
-        ${USRSCTP_HEADER_DIR}
+        ${PROJECT_SOURCE_DIR}/rtc/src
 )
-target_link_libraries(mrtc_client PUBLIC mrtc PRIVATE ${USRSCTP_LINK_LIBRARIES})
-target_compile_options(mrtc_client PRIVATE ${USRSCTP_CFLAGS_OTHER})
+target_link_libraries(mrtc_client PUBLIC mrtc mrtc_sctp)
 mrtc_set_warnings(mrtc_client)
 
 if(MRTC_BUILD_TESTS)
@@ -34,6 +23,7 @@ if(MRTC_BUILD_TESTS)
             ${PROJECT_SOURCE_DIR}/tests
             ${CMAKE_CURRENT_SOURCE_DIR}/src               # client internals
             ${CMAKE_CURRENT_SOURCE_DIR}/include/rtc
+            ${PROJECT_SOURCE_DIR}/rtc/src
         )
         target_link_libraries(${test_name} PRIVATE mrtc_client)
         add_test(NAME ${test_name} COMMAND ${test_name})

@@ -1,7 +1,7 @@
 # Video Conference Application (conf_sdl)
 
-SDL3 video conferencing application using the default SFU server, or explicit
-legacy mesh mode selected by the server.
+SDL3 video conferencing application using server-authorized P2P/SFU topology.
+The unified server defaults to AUTO; fixed modes remain available.
 
 ## Architecture
 
@@ -36,6 +36,10 @@ all of that peer's tiles for removal; the next render removes their index
 entries, frees pending frames, and destroys textures on the SDL main thread.
 Inactive slots are reused when participants join later.
 
+Topology and error callbacks queue pending status under the UI mutex.
+`ui_sdl3_render()` applies the title/status on the main thread. A control or
+media callback never directly calls SDL window APIs.
+
 ### Conference Manager (`conference.h/c`)
 
 Orchestrates signaling, peer connections, and media pipelines.
@@ -46,10 +50,12 @@ shared pipeline; UI tiles are keyed by participant and source label.
 
 **Signaling flow:**
 1. Connect to signaling server → `on_joined(my_id, peer_list)`
-2. The conference selects SFU or mesh behavior from the server's mode event
-3. In SFU mode, publish to `"sfu"` and answer subscription offers for remote peers
-4. Forward asynchronous ICE candidates and end-of-candidates in both directions
-5. On connection readiness, send local frames and render decoded subscriptions
+2. The conference uses the joined event's concrete mode/epoch
+3. Negotiate epoch-scoped mesh pairs or SFU publishing/subscriptions
+4. Forward candidates/end-of-candidates with the corresponding session identity
+5. Prepare replacement graphs while the active graph continues; commit only
+   the selected generation for audio/video callbacks
+6. Preserve capture/encoders and participant tiles while retiring old sessions
 
 **Media flow:**
 ```
@@ -85,6 +91,10 @@ When no camera or mic is available, generates:
 | M | Toggle microphone / test tone |
 | V | Toggle camera / test pattern |
 | Q | Quit |
+
+`--name` sets a display name. Mode/switching/errors are visible in the window
+title. The default STUN URL includes Google's port 19302; hostname/IP and empty
+STUN overrides are supported by the conference adapter.
 
 ## Dependencies
 

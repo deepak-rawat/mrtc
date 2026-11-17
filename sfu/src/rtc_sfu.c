@@ -1,11 +1,10 @@
-#include "sfu.h"
+#include <rtc/rtc_sfu.h>
 
 #include <rtc/rtc.h>
 #include <rtc/rtc_consumer.h>
 #include <rtc/rtc_listener.h>
 #include <rtc/rtc_router.h>
 #include <rtc/rtc_sdp.h>
-#include <rtc/rtc_client.h>
 #include <rtc/rtc_sctp.h>
 #include <rtc/rtc_rtp_ext.h>
 #include <stdio.h>
@@ -14,8 +13,12 @@
 
 typedef struct sfu_session {
     struct sfu_session *next;
-    meeting_peer_t *owner;
-    meeting_peer_t *publisher;
+    char owner[RTC_SFU_ID_SIZE];
+    char publisher[RTC_SFU_ID_SIZE];
+    char room[RTC_SFU_ROOM_SIZE];
+    char session_id[RTC_SFU_SESSION_SIZE];
+    uint32_t epoch;
+    unsigned version;
     rtc_transport_t *transport;
     rtc_listener_t *listener;
     rtc_producer_t *producers[SDP_MAX_MEDIA];
@@ -27,7 +30,7 @@ typedef struct sfu_session {
     bool refresh_pending;
     uint8_t twcc_id;
     bool publishing;
-    struct signaling_sfu *sfu;
+    struct rtc_sfu *sfu;
     rtc_sctp_t *sctp;
     rtc_data_channel_t *channel;
     rtc_worker_timer_t timer;
@@ -36,8 +39,10 @@ typedef struct sfu_session {
     uint64_t last_stats_ms;
 } sfu_session_t;
 
-struct signaling_sfu {
-    meeting_manager_t *manager;
+struct rtc_sfu {
+    rtc_sfu_on_event_fn on_event;
+    rtc_sfu_session_id_fn subscription_id;
+    void *user;
     rtc_worker_t *worker;
     rtc_listener_t *listener;
     rtc_router_t *router;
@@ -46,6 +51,7 @@ struct signaling_sfu {
     char listen_ip[64];
     char announced_ip[64];
     bool trace;
+    bool closed;
 };
 
 static int send_sctp(const uint8_t *data, size_t len, void *user) {
@@ -60,30 +66,14 @@ static void on_sctp_data(const uint8_t *data, size_t len, void *user) {
 
 static void on_chat(const uint8_t *data, size_t len, void *user) {
     sfu_session_t *sender = user;
-    bool addressed = len >= SIG_DC_HEADER_SIZE && memcmp(data, "MRTC", 4) == 0;
-    char destination[SIG_MAX_PEER_ID] = {0};
-    uint8_t *message = NULL;
-    if (addressed) {
-        memcpy(destination, data + 4, sizeof(destination) - 1);
-        message = malloc(len);
-        if (!message) {
-            RTC_LOG_ERR("SFU datachannel allocation failed");
-            return;
-        }
-        memcpy(message, data, len);
-        memset(message + 4, 0, SIG_MAX_PEER_ID);
-        memcpy(message + 4, sender->owner->id, strlen(sender->owner->id));
-    }
-    for (sfu_session_t *s = sender->sfu->sessions; s; s = s->next) {
-        if (s->publishing && s->channel && s->owner->meeting_idx == sender->owner->meeting_idx &&
-            (!addressed || (s != sender && (strcmp(destination, "*") == 0 ||
-                                            strcmp(destination, s->owner->id) == 0)))) {
-            int rc = rtc_data_channel_send(s->channel, message ? message : data, len);
-            if (rc != RTC_OK)
-                RTC_LOG_WARN("SFU datachannel backpressure: %d", rc);
-        }
-    }
-    free(message);
+    if (len > sizeof(((rtc_sfu_event_t *)0)->data))
+        return;
+    rtc_sfu_event_t event = {
+        .type = RTC_SFU_DATA, .epoch = sender->epoch, .version = sender->version, .data_len = len};
+    snprintf(event.owner, sizeof(event.owner), "%s", sender->owner);
+    snprintf(event.room, sizeof(event.room), "%s", sender->room);
+    memcpy(event.data, data, len);
+    sender->sfu->on_event(&event, sender->sfu->user);
 }
 
 static void on_channel(rtc_data_channel_t *channel, void *user) {
@@ -103,12 +93,12 @@ static void session_tick(void *user) {
                 rtc_consumer_stats_t consumer;
                 if (session->producers[i] &&
                     rtc_producer_get_stats(session->producers[i], &producer) == RTC_OK)
-                    RTC_LOG_INFO("SFU producer owner=%s kind=%d packets=%llu", session->owner->id,
+                    RTC_LOG_INFO("SFU producer owner=%s kind=%d packets=%llu", session->owner,
                                  producer.kind, (unsigned long long)producer.packets_received);
                 if (session->consumers[i] &&
                     rtc_consumer_get_stats(session->consumers[i], &consumer) == RTC_OK)
                     RTC_LOG_INFO("SFU consumer owner=%s kind=%d packets=%llu dropped=%llu",
-                                 session->owner->id, consumer.kind,
+                                 session->owner, consumer.kind,
                                  (unsigned long long)consumer.packets_sent,
                                  (unsigned long long)consumer.packets_dropped);
             }
@@ -116,8 +106,8 @@ static void session_tick(void *user) {
         if (stats.selected_tuple_valid && stats.dtls_state == RTC_TRANSPORT_DTLS_NEW)
             rtc_transport_start_dtls(session->transport);
         if (stats.srtp_ready && !session->media_ready) {
-            RTC_LOG_INFO("SFU media ready owner=%s publisher=%s publishing=%d", session->owner->id,
-                         session->publisher->id, session->publishing);
+            RTC_LOG_INFO("SFU media ready owner=%s publisher=%s publishing=%d", session->owner,
+                         session->publisher, session->publishing);
             session->media_ready = true;
             for (int i = 0; i < SDP_MAX_MEDIA; i++)
                 if (session->consumers[i] && !session->offer_pending &&
@@ -143,28 +133,32 @@ static void session_tick(void *user) {
         rtc_worker_add_timer(session->sfu->worker, rtc_time_ms() + 10, session_tick, session);
 }
 
-static void send_owned(signaling_sfu_t *sfu, meeting_peer_t *peer, char *message) {
-    if (!message)
-        return;
-    sfu->manager->send_fn(peer, message, sfu->manager->send_user);
-    free(message);
+static void emit(sfu_session_t *session, rtc_sfu_event_type_t type, const char *text) {
+    rtc_sfu_event_t event = {.type = type, .epoch = session->epoch, .version = session->version};
+    snprintf(event.owner, sizeof(event.owner), "%s", session->owner);
+    snprintf(event.room, sizeof(event.room), "%s", session->room);
+    snprintf(event.remote, sizeof(event.remote), "%s",
+             session->publishing ? "sfu" : session->publisher);
+    snprintf(event.session_id, sizeof(event.session_id), "%s", session->session_id);
+    snprintf(event.text, sizeof(event.text), "%s", text);
+    session->sfu->on_event(&event, session->sfu->user);
 }
 
-static void send_candidates(signaling_sfu_t *sfu, sfu_session_t *session) {
-    const char *from = session->publishing ? "sfu" : session->publisher->id;
+static void send_candidates(sfu_session_t *session) {
     for (size_t i = 0; i < rtc_sdp_candidate_count(&session->description); i++) {
         char candidate[256];
         if (rtc_ice_candidate_to_string(rtc_sdp_get_candidate(&session->description, i), candidate,
                                         sizeof(candidate)) == RTC_OK)
-            send_owned(sfu, session->owner, sig_msg_build_relay_candidate(from, candidate));
+            emit(session, RTC_SFU_CANDIDATE, candidate);
     }
-    send_owned(sfu, session->owner, sig_msg_build_relay_candidate(from, ""));
+    emit(session, RTC_SFU_CANDIDATE, "");
 }
 
-static sfu_session_t *find_session(signaling_sfu_t *sfu, meeting_peer_t *owner,
-                                   const char *publisher) {
+static sfu_session_t *find_session(rtc_sfu_t *sfu, const char *room, const char *owner,
+                                   const char *publisher, uint32_t epoch) {
     for (sfu_session_t *s = sfu->sessions; s; s = s->next)
-        if (s->owner == owner && strcmp(s->publishing ? "sfu" : s->publisher->id, publisher) == 0)
+        if (s->epoch == epoch && strcmp(s->room, room) == 0 && strcmp(s->owner, owner) == 0 &&
+            strcmp(s->publishing ? "sfu" : s->publisher, publisher) == 0)
             return s;
     return NULL;
 }
@@ -179,7 +173,7 @@ static void destroy_session(sfu_session_t *session) {
     for (int i = 0; i < SDP_MAX_MEDIA; i++)
         rtc_producer_destroy(session->producers[i]);
     rtc_transport_destroy(session->transport);
-    if (!session->publishing)
+    if (session->listener != session->sfu->listener)
         rtc_listener_destroy(session->listener);
     rtc_sdp_close(&session->description);
     rtc_sdp_close(&session->remote);
@@ -193,19 +187,35 @@ static void on_feedback(const uint8_t *data, size_t len, void *user) {
             rtc_consumer_handle_rtcp(s->consumers[i], data, len);
 }
 
-static sfu_session_t *new_session(signaling_sfu_t *sfu, meeting_peer_t *owner,
-                                  meeting_peer_t *publisher, bool publishing) {
+static sfu_session_t *new_session(rtc_sfu_t *sfu, const rtc_sfu_command_t *command,
+                                  const char *publisher, bool publishing) {
     sfu_session_t *s = calloc(1, sizeof(*s));
     if (!s)
         return NULL;
-    s->owner = owner;
-    s->publisher = publisher;
+    snprintf(s->owner, sizeof(s->owner), "%s", command->owner);
+    snprintf(s->room, sizeof(s->room), "%s", command->room);
+    snprintf(s->publisher, sizeof(s->publisher), "%s", publisher);
+    s->epoch = command->epoch;
+    s->version = command->version;
+    if (publishing)
+        snprintf(s->session_id, sizeof(s->session_id), "%s", command->session_id);
+    else if (sfu->subscription_id(s->session_id, s->epoch, s->owner, s->publisher) != RTC_OK) {
+        free(s);
+        return NULL;
+    }
     s->publishing = publishing;
     s->sfu = sfu;
-    s->listener =
-        publishing ? sfu->listener
-                   : rtc_listener_create(sfu->worker,
-                                         &(rtc_listener_config_t){.listen_ip = sfu->listen_ip,
+    bool shared_listener = publishing;
+    for (sfu_session_t *other = sfu->sessions; shared_listener && other; other = other->next)
+        if (other->publishing && !strcmp(other->owner, command->owner) &&
+            !strcmp(other->room, command->room))
+            shared_listener = false;
+    /* Overlapping generations may share the client's UDP socket. Distinct local
+     * ports keep their DTLS associations from aliasing on the same tuple. */
+    s->listener = shared_listener
+                      ? sfu->listener
+                      : rtc_listener_create(
+                            sfu->worker, &(rtc_listener_config_t){.listen_ip = sfu->listen_ip,
                                                                   .announced_ip = sfu->announced_ip,
                                                                   .enable_udp = true});
     if (!s->listener) {
@@ -218,7 +228,7 @@ static sfu_session_t *new_session(signaling_sfu_t *sfu, meeting_peer_t *owner,
                                                .enable_twcc = publishing,
                                                .initial_outgoing_bitrate_bps = 1500000});
     if (!s->transport) {
-        if (!publishing)
+        if (s->listener != sfu->listener)
             rtc_listener_destroy(s->listener);
         free(s);
         return NULL;
@@ -229,7 +239,7 @@ static sfu_session_t *new_session(signaling_sfu_t *sfu, meeting_peer_t *owner,
     return s;
 }
 
-static int fill_local(signaling_sfu_t *sfu, sfu_session_t *session, rtc_sdp_type_t type) {
+static int fill_local(rtc_sfu_t *sfu, sfu_session_t *session, rtc_sdp_type_t type) {
     (void)sfu;
     rtc_sdp_t *sdp = &session->description;
     rtc_ice_parameters_t ice;
@@ -302,33 +312,6 @@ static int apply_remote(sfu_session_t *session, const rtc_sdp_t *remote) {
 static int add_trickled_candidate(sfu_session_t *session, const char *text) {
     if (!text[0])
         return RTC_OK;
-    const char *line = strncmp(text, "a=", 2) == 0 ? text + 2 : text;
-    if (strncmp(line, "candidate:", 10) == 0) {
-        char foundation[33], protocol[8], address[64], type[8];
-        unsigned component, priority, port;
-        int offset = 0;
-        int fields = sscanf(line + 10, "%32s %u %7s %u %63s %u typ %7s%n", foundation, &component,
-                            protocol, &priority, address, &port, type, &offset);
-        if (fields == 7 && (strcmp(protocol, "tcp") == 0 || strcmp(protocol, "TCP") == 0)) {
-            const char *attributes = line + 10 + offset;
-            const char *tcp = strstr(attributes, " tcptype ");
-            char tcp_type[16] = {0};
-            rtc_addr_t parsed_address;
-            if (!component || component > 256 || priority > INT32_MAX || !port || port > 65535 ||
-                (strcmp(type, "host") && strcmp(type, "srflx") && strcmp(type, "relay") &&
-                 strcmp(type, "prflx")) ||
-                rtc_addr_from_string(&parsed_address, address, (uint16_t)port) != RTC_OK || !tcp ||
-                sscanf(tcp, " tcptype %15s", tcp_type) != 1 ||
-                (strcmp(tcp_type, "active") && strcmp(tcp_type, "passive") &&
-                 strcmp(tcp_type, "so")) ||
-                strstr(tcp + 1, " tcptype "))
-                return RTC_ERR_SDP;
-            /* RFC 6544 candidates cannot form pairs with this UDP-only listener. */
-            RTC_LOG_INFO("SFU ICE candidate ineligible peer=%s to=%s transport=tcp (UDP-only)",
-                         session->owner->id, session->publishing ? "sfu" : session->publisher->id);
-            return RTC_OK;
-        }
-    }
     rtc_ice_candidate_t ice;
     rtc_transport_candidate_t candidate;
     int rc = rtc_sdp_parse_candidate_line(text, &ice);
@@ -341,10 +324,11 @@ static bool media_sending(const rtc_sdp_media_t *media) {
     return media->direction == 0 || media->direction == 1;
 }
 
-static int subscribe(signaling_sfu_t *sfu, meeting_peer_t *subscriber, sfu_session_t *publisher) {
-    if (subscriber == publisher->owner)
+static int subscribe(rtc_sfu_t *sfu, const char *subscriber, sfu_session_t *publisher) {
+    if (strcmp(subscriber, publisher->owner) == 0)
         return RTC_OK;
-    sfu_session_t *s = find_session(sfu, subscriber, publisher->owner->id);
+    sfu_session_t *s =
+        find_session(sfu, publisher->room, subscriber, publisher->owner, publisher->epoch);
     bool created = s == NULL;
     if (s && s->offer_pending) {
         int index = 0;
@@ -358,10 +342,17 @@ static int subscribe(signaling_sfu_t *sfu, meeting_peer_t *subscriber, sfu_sessi
         s->refresh_pending = true;
         return RTC_OK;
     }
-    if (!s)
-        s = new_session(sfu, subscriber, publisher->owner, false);
-    if (!s)
+    if (!s) {
+        rtc_sfu_command_t command = {.epoch = publisher->epoch, .version = publisher->version};
+        snprintf(command.owner, sizeof(command.owner), "%s", subscriber);
+        snprintf(command.room, sizeof(command.room), "%s", publisher->room);
+        s = new_session(sfu, &command, publisher->owner, false);
+    }
+    if (!s) {
+        RTC_LOG_ERR("SFU subscription session creation failed: subscriber=%s publisher=%s",
+                    subscriber, publisher->owner);
         return RTC_ERR_NOMEM;
+    }
     s->description.media_count = 0;
     for (int i = 0; i < publisher->description.media_count; i++) {
         if (publisher->description.media[i].media_type == RTC_MEDIA_APPLICATION)
@@ -381,6 +372,8 @@ static int subscribe(signaling_sfu_t *sfu, meeting_peer_t *subscriber, sfu_sessi
                     s->transport,
                     &(rtc_consumer_options_t){.producer = publisher->producers[i], .paused = true});
             if (publisher->producers[i] && !s->consumers[index]) {
+                RTC_LOG_ERR("SFU consumer creation failed: subscriber=%s publisher=%s media=%d",
+                            subscriber, publisher->owner, i);
                 if (created)
                     destroy_session(s);
                 return RTC_ERR_GENERIC;
@@ -403,6 +396,8 @@ static int subscribe(signaling_sfu_t *sfu, meeting_peer_t *subscriber, sfu_sessi
     }
     int rc = fill_local(sfu, s, RTC_SDP_OFFER);
     if (rc != RTC_OK) {
+        RTC_LOG_ERR("SFU subscription SDP failed: subscriber=%s publisher=%s error=%d", subscriber,
+                    publisher->owner, rc);
         if (created)
             destroy_session(s);
         return rc;
@@ -412,9 +407,8 @@ static int subscribe(signaling_sfu_t *sfu, meeting_peer_t *subscriber, sfu_sessi
         sfu->sessions = s;
     }
     s->offer_pending = true;
-    send_owned(sfu, subscriber,
-               sig_msg_build_relay_offer(publisher->owner->id, s->description.raw));
-    send_candidates(sfu, s);
+    emit(s, RTC_SFU_OFFER, s->description.raw);
+    send_candidates(s);
     return RTC_OK;
 }
 
@@ -466,11 +460,12 @@ static int validate_publisher(sfu_session_t *session, const rtc_sdp_t *remote, u
     return RTC_OK;
 }
 
-static int publish(signaling_sfu_t *sfu, meeting_peer_t *peer, const char *text) {
-    sfu_session_t *s = find_session(sfu, peer, "sfu");
+static int publish(rtc_sfu_t *sfu, const rtc_sfu_command_t *command) {
+    const char *peer = command->owner;
+    sfu_session_t *s = find_session(sfu, command->room, peer, "sfu", command->epoch);
     bool created = s == NULL;
     rtc_sdp_t remote = {0};
-    int rc = rtc_sdp_parse(&remote, text, strlen(text));
+    int rc = rtc_sdp_parse(&remote, command->text, strlen(command->text));
     uint8_t twcc_id = 0;
     if (rc == RTC_OK)
         rc = validate_publisher(s, &remote, &twcc_id);
@@ -479,7 +474,7 @@ static int publish(signaling_sfu_t *sfu, meeting_peer_t *peer, const char *text)
         return rc;
     }
     if (!s)
-        s = new_session(sfu, peer, peer, true);
+        s = new_session(sfu, command, peer, true);
     if (!s) {
         rtc_sdp_close(&remote);
         return RTC_ERR_NOMEM;
@@ -578,17 +573,17 @@ static int publish(signaling_sfu_t *sfu, meeting_peer_t *peer, const char *text)
         s->next = sfu->sessions;
         sfu->sessions = s;
     }
-    send_owned(sfu, peer, sig_msg_build_relay_answer("sfu", s->description.raw));
-    send_candidates(sfu, s);
-    meeting_t *room = &sfu->manager->meetings[peer->meeting_idx];
-    for (int i = 0; i < room->peer_count; i++)
-        if (subscribe(sfu, room->peers[i], s) != RTC_OK)
-            send_owned(sfu, room->peers[i], sig_msg_build_error("subscription creation failed"));
+    emit(s, RTC_SFU_ANSWER, s->description.raw);
+    send_candidates(s);
+    for (unsigned i = 0; i < command->peer_count; i++)
+        if (subscribe(sfu, command->peers[i], s) != RTC_OK)
+            emit(s, RTC_SFU_ERROR, "subscription creation failed");
     if (created)
         for (sfu_session_t *p = sfu->sessions; p; p = p->next)
-            if (p->publishing && p != s && p->owner->meeting_idx == peer->meeting_idx)
+            if (p->publishing && p != s && p->epoch == command->epoch &&
+                strcmp(p->room, command->room) == 0)
                 if (subscribe(sfu, peer, p) != RTC_OK)
-                    send_owned(sfu, peer, sig_msg_build_error("subscription creation failed"));
+                    emit(s, RTC_SFU_ERROR, "subscription creation failed");
     return RTC_OK;
 fail:
     for (int i = 0; i < SDP_MAX_MEDIA; i++)
@@ -600,17 +595,26 @@ fail:
     return rc;
 }
 
-signaling_sfu_t *signaling_sfu_create(meeting_manager_t *manager, const char *listen_ip,
-                                      const char *announced_ip, uint16_t port) {
-    signaling_sfu_t *sfu = calloc(1, sizeof(*sfu));
+rtc_sfu_t *rtc_sfu_create(const rtc_sfu_config_t *config) {
+    if (!config || !config->listen_ip || !config->on_event || !config->subscription_id)
+        return NULL;
+    const char *listen_ip = config->listen_ip;
+    const char *announced_ip = config->announced_ip;
+    uint16_t port = config->port;
+    rtc_sfu_t *sfu = calloc(1, sizeof(*sfu));
     if (!sfu)
         return NULL;
-    sfu->manager = manager;
+    sfu->on_event = config->on_event;
+    sfu->subscription_id = config->subscription_id;
+    sfu->user = config->user;
     sfu->trace = getenv("MRTC_SFU_TRACE") != NULL;
     snprintf(sfu->listen_ip, sizeof(sfu->listen_ip), "%s", listen_ip);
     snprintf(sfu->announced_ip, sizeof(sfu->announced_ip), "%s",
              announced_ip ? announced_ip : listen_ip);
-    sfu->worker = rtc_worker_create(NULL);
+    sfu->worker = rtc_worker_create(&(rtc_worker_config_t){
+        .max_io_sources = config->max_io_sources > 0
+                              ? config->max_io_sources
+                              : 1 + 2 * RTC_SFU_MAX_PEERS * RTC_SFU_MAX_PEERS});
     if (sfu->worker)
         sfu->listener = rtc_listener_create(
             sfu->worker,
@@ -624,25 +628,28 @@ signaling_sfu_t *signaling_sfu_create(meeting_manager_t *manager, const char *li
             rtc_transport_create(sfu->worker, &(rtc_transport_config_t){.listener = sfu->listener});
     }
     if (!sfu->router || !sfu->control) {
-        signaling_sfu_destroy(sfu);
+        rtc_sfu_destroy(sfu);
         return NULL;
     }
     return sfu;
 }
 
-static int handle_worker(signaling_sfu_t *sfu, meeting_peer_t *peer, const sig_msg_t *message) {
-    if (!sfu || !peer || peer->meeting_idx < 0)
+static int handle_worker(rtc_sfu_t *sfu, const rtc_sfu_command_t *message) {
+    if (!sfu || !message->owner[0] || !message->room[0])
         return RTC_ERR_INVALID;
-    if (message->type == SIG_MSG_OFFER && strcmp(message->to, "sfu") == 0)
-        return publish(sfu, peer, message->sdp);
-    sfu_session_t *s = find_session(sfu, peer, message->to);
+    if (message->type == RTC_SFU_OFFER && strcmp(message->remote, "sfu") == 0)
+        return publish(sfu, message);
+    sfu_session_t *s =
+        find_session(sfu, message->room, message->owner, message->remote, message->epoch);
     if (!s)
         return RTC_ERR_INVALID;
-    if (message->type == SIG_MSG_ANSWER && !s->publishing) {
+    if (message->session_id[0] && strcmp(s->session_id, message->session_id) != 0)
+        return RTC_ERR_INVALID;
+    if (message->type == RTC_SFU_ANSWER && !s->publishing) {
         if (!s->offer_pending)
             return RTC_ERR_INVALID;
         rtc_sdp_t remote = {0};
-        int rc = rtc_sdp_parse(&remote, message->sdp, strlen(message->sdp));
+        int rc = rtc_sdp_parse(&remote, message->text, strlen(message->text));
         if (rc == RTC_OK &&
             (remote.media_count != s->description.media_count ||
              (s->remote.fingerprint[0] && strcmp(s->remote.fingerprint, remote.fingerprint) != 0)))
@@ -674,20 +681,21 @@ static int handle_worker(signaling_sfu_t *sfu, meeting_peer_t *peer, const sig_m
             }
             if (s->refresh_pending) {
                 s->refresh_pending = false;
-                sfu_session_t *publisher = find_session(sfu, s->publisher, "sfu");
-                rc = publisher ? subscribe(sfu, peer, publisher) : RTC_ERR_INVALID;
+                sfu_session_t *publisher =
+                    find_session(sfu, s->room, s->publisher, "sfu", s->epoch);
+                rc = publisher ? subscribe(sfu, s->owner, publisher) : RTC_ERR_INVALID;
             }
         }
         rtc_sdp_close(&remote);
         return rc;
     }
-    if (message->type == SIG_MSG_CANDIDATE) {
-        return add_trickled_candidate(s, message->candidate);
+    if (message->type == RTC_SFU_CANDIDATE) {
+        return add_trickled_candidate(s, message->text);
     }
     return RTC_ERR_INVALID;
 }
 
-static void leave_worker(signaling_sfu_t *sfu, meeting_peer_t *peer) {
+static void leave_worker(rtc_sfu_t *sfu, const char *room, const char *peer, uint32_t epoch) {
     if (!sfu)
         return;
     /* Consumers must be removed before the corresponding producer. */
@@ -695,7 +703,9 @@ static void leave_worker(signaling_sfu_t *sfu, meeting_peer_t *peer) {
         sfu_session_t **cursor = &sfu->sessions;
         while (*cursor) {
             sfu_session_t *s = *cursor;
-            if ((int)s->publishing == publishing && (s->owner == peer || s->publisher == peer)) {
+            if ((int)s->publishing == publishing && strcmp(s->room, room) == 0 &&
+                (!epoch || s->epoch == epoch) &&
+                (strcmp(s->owner, peer) == 0 || strcmp(s->publisher, peer) == 0)) {
                 *cursor = s->next;
                 destroy_session(s);
             } else {
@@ -706,38 +716,88 @@ static void leave_worker(signaling_sfu_t *sfu, meeting_peer_t *peer) {
 }
 
 typedef struct {
-    signaling_sfu_t *sfu;
-    meeting_peer_t *peer;
-    const sig_msg_t *message;
+    rtc_sfu_t *sfu;
+    rtc_sfu_command_t message;
+    bool leave;
+    bool data;
+    size_t len;
+    uint8_t bytes[65535];
     int result;
 } sfu_command_t;
 
 static void handle_command(void *user) {
     sfu_command_t *command = user;
-    if (command->message)
-        command->result = handle_worker(command->sfu, command->peer, command->message);
-    else
-        leave_worker(command->sfu, command->peer);
+    if (command->leave)
+        leave_worker(command->sfu, command->message.room, command->message.owner,
+                     command->message.epoch);
+    else if (command->data) {
+        sfu_session_t *session =
+            find_session(command->sfu, command->message.room, command->message.owner, "sfu",
+                         command->message.epoch);
+        command->result =
+            session && session->channel
+                ? rtc_data_channel_send(session->channel, command->bytes, command->len)
+                : RTC_ERR_INVALID;
+    } else
+        command->result = handle_worker(command->sfu, &command->message);
 }
 
-int signaling_sfu_handle(signaling_sfu_t *sfu, meeting_peer_t *peer, const sig_msg_t *message) {
-    sfu_command_t command = {.sfu = sfu, .peer = peer, .message = message};
+int rtc_sfu_handle(rtc_sfu_t *sfu, const rtc_sfu_command_t *message) {
+    if (!sfu || sfu->closed || !message || message->peer_count > RTC_SFU_MAX_PEERS ||
+        !message->epoch || !memchr(message->room, 0, sizeof(message->room)) ||
+        !memchr(message->owner, 0, sizeof(message->owner)) ||
+        !memchr(message->remote, 0, sizeof(message->remote)) ||
+        !memchr(message->session_id, 0, sizeof(message->session_id)) ||
+        !memchr(message->text, 0, sizeof(message->text)))
+        return RTC_ERR_INVALID;
+    for (unsigned i = 0; i < message->peer_count; i++)
+        if (!message->peers[i][0] || !memchr(message->peers[i], 0, sizeof(message->peers[i])))
+            return RTC_ERR_INVALID;
+    sfu_command_t command = {.sfu = sfu, .message = *message};
     int rc = rtc_transport_invoke(sfu->control, handle_command, &command);
     return rc == RTC_OK ? command.result : rc;
 }
 
-void signaling_sfu_leave(signaling_sfu_t *sfu, meeting_peer_t *peer) {
-    if (!sfu)
+void rtc_sfu_leave(rtc_sfu_t *sfu, const char *room, const char *owner, uint32_t epoch) {
+    if (!sfu || sfu->closed || !room || !owner)
         return;
-    sfu_command_t command = {.sfu = sfu, .peer = peer};
+    sfu_command_t command = {.sfu = sfu, .leave = true};
+    snprintf(command.message.room, sizeof(command.message.room), "%s", room);
+    snprintf(command.message.owner, sizeof(command.message.owner), "%s", owner);
+    command.message.epoch = epoch;
     rtc_transport_invoke(sfu->control, handle_command, &command);
 }
 
-void signaling_sfu_destroy(signaling_sfu_t *sfu) {
-    if (!sfu)
+int rtc_sfu_send_data(rtc_sfu_t *sfu, const char *room, const char *owner, uint32_t epoch,
+                      const uint8_t *data, size_t len) {
+    if (!sfu || sfu->closed || !room || !owner || (!data && len) || len > 65535)
+        return RTC_ERR_INVALID;
+    sfu_command_t command = {.sfu = sfu, .data = true, .len = len};
+    snprintf(command.message.room, sizeof(command.message.room), "%s", room);
+    snprintf(command.message.owner, sizeof(command.message.owner), "%s", owner);
+    command.message.epoch = epoch;
+    if (len)
+        memcpy(command.bytes, data, len);
+    int rc = rtc_transport_invoke(sfu->control, handle_command, &command);
+    return rc == RTC_OK ? command.result : rc;
+}
+
+void rtc_sfu_close(rtc_sfu_t *sfu) {
+    if (!sfu || sfu->closed)
         return;
     while (sfu->sessions)
-        signaling_sfu_leave(sfu, sfu->sessions->owner);
+        rtc_sfu_leave(sfu, sfu->sessions->room, sfu->sessions->owner, 0);
+    sfu->closed = true;
+    rtc_transport_close(sfu->control);
+    rtc_router_close(sfu->router);
+    rtc_listener_close(sfu->listener);
+    rtc_worker_close(sfu->worker);
+}
+
+void rtc_sfu_destroy(rtc_sfu_t *sfu) {
+    if (!sfu)
+        return;
+    rtc_sfu_close(sfu);
     rtc_transport_destroy(sfu->control);
     rtc_router_destroy(sfu->router);
     rtc_listener_destroy(sfu->listener);

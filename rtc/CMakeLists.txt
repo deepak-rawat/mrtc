@@ -49,6 +49,22 @@ target_include_directories(mrtc
 target_link_libraries(mrtc PUBLIC mrtc_common OpenSSL::SSL OpenSSL::Crypto ${PLATFORM_LIBS})
 mrtc_set_warnings(mrtc)
 
+if(MRTC_ENABLE_CLIENT_API OR MRTC_ENABLE_ROUTING_API)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(USRSCTP REQUIRED usrsctp>=0.9.5)
+    find_path(USRSCTP_HEADER_DIR usrsctp.h
+        HINTS ${USRSCTP_INCLUDE_DIRS} ${USRSCTP_PREFIX}/include
+        PATH_SUFFIXES usrsctp)
+    if(NOT USRSCTP_HEADER_DIR)
+        message(FATAL_ERROR "usrsctp.h not found")
+    endif()
+    add_library(mrtc_sctp STATIC src/rtc_data_channel.c)
+    target_include_directories(mrtc_sctp PRIVATE src include/rtc ${USRSCTP_HEADER_DIR})
+    target_link_libraries(mrtc_sctp PUBLIC mrtc PRIVATE ${USRSCTP_LINK_LIBRARIES})
+    target_compile_options(mrtc_sctp PRIVATE ${USRSCTP_CFLAGS_OTHER})
+    mrtc_set_warnings(mrtc_sctp)
+endif()
+
 if(MRTC_ENABLE_TWCC)
     target_compile_definitions(mrtc PUBLIC MRTC_ENABLE_TWCC)
 endif()

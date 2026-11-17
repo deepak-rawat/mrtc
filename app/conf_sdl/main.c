@@ -31,6 +31,7 @@ int main(int argc, char *argv[]) {
     const char *meeting = NULL;
     const char *server_url = "ws://127.0.0.1:8080";
     const char *stun_ip = "stun:stun.l.google.com:19302";
+    const char *display_name = NULL;
     bool use_camera = false;
     bool use_mic = false;
 
@@ -42,6 +43,8 @@ int main(int argc, char *argv[]) {
             server_url = argv[++i];
         else if (strcmp(argv[i], "--stun") == 0 && i + 1 < argc)
             stun_ip = argv[++i];
+        else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc)
+            display_name = argv[++i];
         else if (strcmp(argv[i], "--camera") == 0)
             use_camera = true;
         else if (strcmp(argv[i], "--mic") == 0)
@@ -50,13 +53,14 @@ int main(int argc, char *argv[]) {
 
     if (!meeting) {
         printf("Usage: %s --meeting <name> [--server <url>] [--stun <server>]"
-               " [--camera] [--mic]\n\n",
+               " [--name <name>] [--camera] [--mic]\n\n",
                argv[0]);
         printf("  --meeting <name>   Meeting to join (required)\n");
         printf("  --server <url>     Signaling server (default: ws://127.0.0.1:8080)\n");
         printf("  --stun <server>    Hostname/IP or stun: URL (default: "
                "stun:stun.l.google.com:19302)\n");
         printf("  --camera           Use real webcam (default: test pattern)\n");
+        printf("  --name <name>      Display name (optional)\n");
         printf("  --mic              Use real microphone (default: 440Hz test tone)\n");
         return 1;
     }
@@ -143,6 +147,7 @@ int main(int argc, char *argv[]) {
         .audio_channels = 1,
         .audio_bitrate_bps = 32000,
         .stun_server = stun_ip,
+        .display_name = display_name,
         .callbacks =
             {
                 .on_remote_video = ui_sdl3_on_video_frame,
@@ -150,6 +155,8 @@ int main(int argc, char *argv[]) {
                 .on_peer_joined = NULL,
                 .on_peer_left = ui_sdl3_on_peer_left,
                 .on_joined = NULL,
+                .on_topology = ui_sdl3_on_topology,
+                .on_error = ui_sdl3_on_error,
             },
         .user_data = &ui,
     };

@@ -43,6 +43,9 @@ typedef struct {
     /* Status */
     void (*on_joined)(const char *my_id, void *user);
     void (*on_error)(const char *message, void *user);
+    /* mode: mesh/sfu; status: active/switching/error. Internal thread callback. */
+    void (*on_topology)(const char *mode, const char *status, uint32_t epoch, const char *reason,
+                        void *user);
 } conference_callbacks_t;
 
 typedef struct {
@@ -59,6 +62,7 @@ typedef struct {
 
     conference_callbacks_t callbacks;
     void *user_data;
+    const char *display_name;
 } conference_config_t;
 
 typedef struct conference conference_t;
@@ -69,6 +73,8 @@ conference_t *conference_create(const conference_config_t *cfg);
  * Get signaling config wired to this conference.
  * Call this BEFORE signaling_create() + signaling_connect().
  * The signaling client's callbacks will route to conference internals.
+ * Negotiates protocol v2 and advertises both concrete topologies and switching;
+ * the server decides fixed/automatic policy. Does not connect or bind the client.
  */
 void conference_get_signaling_callbacks(conference_t *c, signaling_config_t *out_cfg,
                                         const char *server_url, const char *meeting);
@@ -110,5 +116,14 @@ int conference_send_message(conference_t *c, const char *peer_id, const uint8_t 
 int conference_broadcast_message(conference_t *c, const uint8_t *data, size_t len);
 
 int conference_get_peer_count(conference_t *c);
+
+typedef struct {
+    uint64_t video_frames;
+    uint64_t audio_frames;
+} conference_source_stats_t;
+
+/* Counts rendered (active-generation only) decoded frames for a participant. */
+int conference_get_source_stats(conference_t *c, const char *peer_id,
+                                conference_source_stats_t *out);
 
 #endif /* CONFERENCE_H */

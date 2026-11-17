@@ -4,11 +4,13 @@
 #include "rtc_data_channel.h"
 
 /* RFC 8831 SCTP/DCEP endpoint. Call on the owning transport worker.
- * The application must call rtc_client_init()/rtc_client_cleanup(). */
+ * The application must call rtc_sctp_init()/rtc_sctp_cleanup(). */
 typedef struct rtc_dc_manager rtc_sctp_t;
 typedef int (*rtc_sctp_send_fn)(const uint8_t *packet, size_t len, void *user);
 typedef void (*rtc_sctp_on_channel_fn)(rtc_data_channel_t *channel, void *user);
 
+int rtc_sctp_init(void);
+void rtc_sctp_cleanup(void);
 rtc_sctp_t *rtc_sctp_create(rtc_sctp_send_fn send, void *user);
 void rtc_sctp_destroy(rtc_sctp_t *sctp);
 int rtc_sctp_connect(rtc_sctp_t *sctp, bool local_dtls_client);

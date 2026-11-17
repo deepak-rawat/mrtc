@@ -1,290 +1,142 @@
-# Conference Library (libmrtc_conference)
+# Native Conference Controller — libmrtc_conference
 
-High-level conferencing API over client peer connections, the media pipeline,
-and WebSocket signaling. Applications push raw frames and receive decoded media
-and participant callbacks; protocol algorithms stay in the RTC layer.
+The public API stays above native PeerConnection, media and WebSocket helpers.
+Applications push raw frames and receive decoded media/message/status callbacks.
+The server chooses each room's topology; the controller does not independently
+count members and switch modes.
 
-The default server selects SFU mode. The same API also works with a server
-started with `--mesh`; `on_mode` selects the topology before the joined callback.
+## Participants, Sources and Sessions
 
-## Default SFU Sessions
+These are separate identities:
 
-- One publishing peer connection identified internally as `"sfu"` carries local
-  media and the conference's standard SCTP/DCEP channel.
-- Remote publisher IDs identify subscription peer connections. They deliver
-  decoded frames under the original participant ID, not under `"sfu"`.
-- Local ICE candidates and end-of-candidates are forwarded over signaling;
-  incoming candidates are applied to the corresponding session.
-- The publisher's bitrate-estimate callback updates the pipeline's peer budget.
-  Recovery callbacks request a keyframe on the relevant receiver.
-- No local media sources are required for text chat through the conference API.
+- **Participant:** stable remote ID/name for the joined call and gallery.
+- **Local source:** capture/encoder state, surviving a transport change.
+- **Session:** one epoch/role-scoped PeerConnection, senders, receivers and SCTP.
+- **Graph:** the selected mesh/SFU sessions or one pending/retiring generation.
 
-The shared encoder sends once to the SFU, which performs encoded-packet fan-out.
-In mesh mode the pipeline instead fans the encoded payloads out to each peer.
+Session IDs follow [the shared wire contract](../signaling/PROTOCOL.md).
+An SFU publishing session is not an extra remote participant. A subscription
+identified by a remote participant still connects to the server, not directly
+to that participant.
 
-## Architecture
+The native sender pipeline shares encoders and fans encoded data out to active
+and preparing sessions. Receive pipelines belong to sessions so old/new decoder
+state cannot mix. This intentionally favors straightforward ownership over
+packing every decoder into a single global receive array.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Application                                                 │
-│    push_video/push_audio → conference → on_remote_video/audio│
-├─────────────────────────────────────────────────────────────┤
-│  Conference (this library)                                   │
-│    ├── sources[]          — local media ("camera", "mic")    │
-│    ├── peers[]            — remote participants              │
-│    └── pipeline           — shared media_pipeline_t          │
-├──────────┬──────────────┬───────────────┬───────────────────┤
-│  media   │  rtc          │  signaling    │                   │
-│  encode  │  ICE+DTLS     │  WebSocket    │                   │
-│  decode  │  SRTP+RTP     │  offer/answer │                   │
-│  fan-out │  data channel │  join/leave   │                   │
-└──────────┴──────────────┴───────────────┴───────────────────┘
-```
-
-## Data Structures
-
-```
-conference_t
- ├── cfg (conference_config_t)          — codecs, resolution, STUN, callbacks
- ├── pipeline (media_pipeline_t*)       — shared encode/decode engine
- ├── sources[4] (conf_source_t)         — local media sources
- │    ├── label ("camera", "mic")
- │    ├── is_video, muted, active
- │    └── stream (media_send_stream_t*) — pipeline encoder handle
- ├── peers[8] (conf_peer_t)            — remote participants
- │    ├── peer_id
- │    ├── pc (rtc_peer_connection_t*)   — WebRTC connection
- │    ├── video_sender, audio_sender    — RTP senders (pipeline fans out to)
- │    ├── recv_video, recv_audio        — pipeline decoder handles (lazy)
- │    └── dc (rtc_data_channel_t*)      — chat data channel
- └── signaling (signaling_client_t*)    — WebSocket connection
-```
-
-## Send Path (every frame push)
-
-```
-conference_push_video("camera", frame)
-  │
-  ├─ find_source("camera") → check !muted
-  │
-  └─ media_pipeline_push_video(pipeline, stream_handle, frame)
-       │
-       ├─ VP8 encode (once)
-       ├─ VP8 packetize (MTU-sized payloads)
-       │
-       └─ for each registered send peer:
-            rtc_rtp_sender_send(alice.video_sender, payload)
-               → RTP header → SRTP → UDP → alice
-            rtc_rtp_sender_send(bob.video_sender, payload)
-               → RTP header → SRTP → UDP → bob
-```
-
-## Recv Path (every incoming RTP packet)
-
-```
-UDP from alice → SRTP unprotect → RTP parse
-  → on_recv_video_rtp(payload, seq, ts, ssrc, marker)
-       │
-       ├─ first packet? → pipeline.add_recv_stream("alice", ssrc)
-       │                  → creates VP8 decoder, caches handle
-       │
-       └─ pipeline.recv_rtp(handle, payload, seq, ts, marker)
-            │
-            ├─ VP8 depacketize (reassemble fragments)
-            ├─ VP8 decode → video_frame_t
-            │
-            └─ renderer callback → conference → app
-                  on_remote_video("alice", "camera", decoded_frame)
-```
-
-## Peer Lifecycle
-
-### Joining a default SFU meeting
-
-1. Create the conference and local sources.
-2. Obtain callbacks, create signaling, and call `conference_join()` to bind it.
-3. Call `signaling_connect()`; the server reports `mode="sfu"` and a local ID.
-4. Offer a publishing connection to `"sfu"` and apply its answer.
-5. Answer server-provided subscription offers identified by remote publisher ID.
-6. Reuse inactive peer/media slots when participants leave and reconnect.
-
-`conference_get_peer_count()` counts remote participants, excluding the internal
-publishing session. Text-chat applications use the same lifecycle without
-adding camera/microphone sources.
-
-### Joining a mesh meeting (`--mesh`)
-
-```
-App                     Conference              Signaling Server
- │                         │                         │
- ├─ conference_create() ──→│ create pipeline          │
- ├─ add_video_source() ───→│ pipeline.add_send_stream │
- ├─ add_audio_source() ───→│ pipeline.add_send_stream │
- ├─ get_signaling_cbs() ──→│ wire callbacks           │
- ├─ signaling_connect() ──→│────────────────────────→│
- ├─ conference_join() ────→│──── join(meeting) ─────→│
- │                         │                         │
- │                         │←── on_joined(my_id,     │
- │                         │     [alice, bob])        │
- │                         │                         │
- │                         │ for each existing peer:  │
- │                         │  alloc_peer("alice")     │
- │                         │  create_pc + add tracks  │
- │                         │  create_offer            │
- │                         │──── offer(alice, sdp) ──→│→ alice
- │                         │                         │
- │                         │←── answer(alice, sdp) ──│← alice
- │                         │  set_remote_desc         │
- │                         │  → ICE+DTLS+SRTP auto    │
- │                         │                         │
- │                         │ on_conn_state(CONNECTED):│
- │                         │  pipeline.add_send_peer( │
- │                         │    "alice", v_sender,    │
- │                         │    a_sender)              │
-```
-
-### New mesh peer arrives after us
-
-```
-Signaling → sig_on_offer("charlie", sdp)
-  → alloc_peer("charlie")
-  → create_pc: add video+audio tracks, wire callbacks
-  → set_remote_desc(offer) → create_answer → set_local_desc
-  → signaling_send_answer
-  → ICE+DTLS complete → on_conn_state(CONNECTED)
-    → pipeline.add_send_peer("charlie", ...)
-  → on_remote_track(video) → wire on_recv_video_rtp
-  → on_remote_track(audio) → wire on_recv_audio_rtp
-```
-
-### Peer leaves
-
-```
-Signaling → sig_on_peer_left("charlie")
-  → destroy_peer:
-    pipeline.remove_send_peer("charlie")  — stop sending
-    rtc_peer_connection_close/destroy     — stop network
-    pipeline.remove_peer("charlie")       — remove decoders after callbacks drain
-  → app.on_peer_left("charlie")            — remove the participant's gallery tiles
-```
-
-Peer maps, slot reuse and in-flight send references are synchronized. Sends
-pin their peer while using its media/data handles; teardown marks the peer
-inactive and drains those references before closing the connection. Locks are
-not held across synchronous worker invocation, which could deadlock against a
-callback on that worker. Signaling disconnect is drained before peer storage
-is destroyed. Removed receive handles must not be used after slot reuse.
-
-## Usage Example
+## Public Lifecycle
 
 ```c
-// 1. Create conference with callbacks
-conference_config_t cfg = {
-    .video_codec = "VP8",
-    .audio_codec = "opus",
-    .video_width = 640, .video_height = 480,
-    .video_fps = 30, .video_bitrate_kbps = 500,
+conference_config_t config = {
+    .display_name = "Alice",
     .stun_server = "stun:stun.l.google.com:19302",
     .callbacks = {
-        .on_remote_video = my_render_video,   // decoded frames
-        .on_remote_audio = my_play_audio,     // decoded samples
-        .on_peer_joined  = my_on_join,
-        .on_peer_left    = my_on_leave,
-        .on_message      = my_on_chat,
+        .on_remote_video = render_video,
+        .on_remote_audio = play_audio,
+        .on_message = receive_message,
+        .on_topology = topology_changed,
+        .on_error = report_error,
     },
     .user_data = app,
 };
-conference_t *conf = conference_create(&cfg);
+conference_t *conference = conference_create(&config);
+conference_add_video_source(conference, "camera", 640, 480, 30, 500);
+conference_add_audio_source(conference, "mic", 48000, 1, 32000);
 
-// 2. Add local media sources (creates encoders in pipeline)
-conference_add_video_source(conf, "camera", 640, 480, 30, 500);
-conference_add_audio_source(conf, "mic", 48000, 1, 32000);
+signaling_config_t callbacks;
+conference_get_signaling_callbacks(conference, &callbacks,
+                                    "ws://127.0.0.1:8080/ws", "demo");
+signaling_client_t *signaling = signaling_create(&callbacks);
+conference_join(conference, signaling);
+signaling_connect(signaling);
+/* Capture loop: conference_push_video / conference_push_audio. */
 
-// 3. Connect signaling and join meeting
-signaling_config_t sig_cfg;
-conference_get_signaling_callbacks(conf, &sig_cfg, "ws://server:9000", "room1");
-signaling_client_t *sig = signaling_create(&sig_cfg);
-conference_join(conf, sig);
-signaling_connect(sig);
-
-// 4. Main loop — push local frames
-while (running) {
-    video_frame_t vf = capture_camera();
-    conference_push_video(conf, "camera", &vf);
-
-    audio_frame_t af = capture_mic();
-    conference_push_audio(conf, "mic", &af);
-
-    // Mute/unmute with keyboard
-    if (key_pressed('M'))
-        conference_mute_source(conf, "mic", !muted);
-
-    // Send chat message
-    if (has_chat_input())
-        conference_broadcast_message(conf, msg, msg_len);
-
-    // Remote frames arrive via callbacks automatically
-}
-
-// 5. Leave and cleanup
-conference_leave(conf);
-conference_destroy(conf);
+conference_leave(conference);
+signaling_destroy(signaling);
+conference_destroy(conference);
 ```
 
-## What Conference Does NOT Do
+Check return values in real applications. Bind signaling before connecting:
+the server may return a joined event before the connect call returns.
+Callbacks execute on internal threads; SDL operations must be handed to the
+main thread.
 
-| Concern | Who handles it |
-|---|---|
-| Encoding / decoding | `media_pipeline` |
-| VP8 packetization | `media_pipeline` → `vp8_packetizer` |
-| RTP / SRTP | `rtc_rtp_sender` / `rtc_peer_connection` |
-| ICE / DTLS | `rtc_peer_connection` (automatic) |
-| Frame capture / render | Application |
-| Signaling transport | `signaling_client` (WebSocket) |
+`conference_get_signaling_callbacks()` advertises protocol v2, both concrete
+topologies and live switching. Legacy protocol-v1 events can be used in fixed
+modes, not to silently enter an automatic room.
 
-## API Summary
+## Fixed Modes
 
-| Function | Purpose |
-|---|---|
-| `conference_create(cfg)` | Create conference + pipeline |
-| `conference_get_signaling_callbacks(...)` | Wire signaling to conference |
-| `conference_join(conf, signaling)` | Store signaling reference |
-| `conference_add_video_source(label, ...)` | Create encoder in pipeline |
-| `conference_add_audio_source(label, ...)` | Create encoder in pipeline |
-| `conference_push_video(label, frame)` | Encode → fan-out to all peers |
-| `conference_push_audio(label, audio)` | Encode → fan-out to all peers |
-| `conference_mute_source(label, mute)` | Stop encoding without removing |
-| `conference_remove_source(label)` | Remove source entirely |
-| `conference_send_message(peer_id, ...)` | Send data channel message |
-| `conference_broadcast_message(...)` | Send to all peers |
-| `conference_get_peer_count()` | Count active peers |
-| `conference_leave()` | Disconnect all peers |
-| `conference_destroy()` | Free all resources |
+Mesh creates one pair session per remote participant; the smaller ASCII ID
+makes the initial version-2 offer. Each sender has its own RTP/SRTP state.
 
-## Dependencies
+SFU creates one publishing session plus subscriptions for remote publishers.
+Native sources are encoded once for publishing. With no local sources the
+publishing session is SCTP-only, which supports text chat/audience clients.
+Remote media subscriptions remain possible.
 
-- **libmrtc** — rtc core (peer connection, tracks, data channels)
-- **libmrtc_media** — media pipeline (encode, decode, fan-out)
-- **libmrtc_signaling** — signaling client (WebSocket)
+ICE candidates/end-of-candidates, data channels and bandwidth-estimate/keyframe
+callbacks are installed for the corresponding session. Bare STUN hostname/IP,
+explicit STUN URL and disabled-STUN settings remain supported.
 
-## Limits
+## Live Topology Changes
 
-The native facade currently negotiates VP8 video and Opus audio for each
-publisher. The lower-level media pipeline and client transceiver APIs are more
-general; labels alone do not add a new negotiated conference track.
+```text
+active graph remains selected
+       |
+topology_prepare -> build pending graph -> topology_ready
+       |                                      |
+       +<----------- abort on failure --------+
+                                              |
+                               topology_commit / topology_ack
+                                              |
+                                  select new; retire old
+```
 
-| Resource | Max |
-|---|---|
-| Peers | 8 (`CONF_MAX_PEERS`) |
-| Sources | 4 (`CONF_MAX_SOURCES`) |
-| Send peers in pipeline | 8 (`MP_MAX_SEND_PEERS`) |
-| Recv streams in pipeline | 16 (`MP_MAX_RECV_STREAMS`) |
+Active and pending/retiring graphs have independent session keys. A delayed
+answer/candidate cannot be applied to a replacement connection for the same
+participant.
+
+Pending video/audio decodes without being selected twice for application
+render/playback. Readiness includes connected transport/data and usable pending
+media for recently flowing sources (freshness window 1500 ms). Muted, inactive
+and absent sources do not create an impossible media wait. Source diagnostics
+also verify actual decoding after handoff.
+
+Commit preserves participant IDs, local sources and encoders. Closing an old
+graph does not signal a participant leave or destroy capture. Abort destroys
+only pending sessions, reports a reason, and keeps the selected graph working.
+Genuine P2P failure requests SFU fallback from the authoritative coordinator.
+
+## Concurrency and Data
+
+Session lifetime is pinned around sends. Teardown marks a session inactive,
+removes it from routing and drains send/callback references before freeing it.
+Locks are not held across synchronous worker invocation. Signaling disconnect
+is drained before conference destruction.
+
+Version-2 application data uses the `MRC2` envelope and a room-wide sender
+message counter. Bounded per-participant deduplication handles overlapping
+receive paths; new sends select one graph. SCTP associations cannot be moved
+to a different endpoint merely by changing a topology flag.
+
+## Status and Diagnostics
+
+- `on_topology(mode, status, epoch, reason)` reports concrete mesh/SFU mode and
+  active/switching/error status.
+- `conference_get_peer_count()` counts participants, not internal connections.
+- `conference_get_source_stats()` snapshots active-rendered video/audio counts
+  per participant, excluding pending decode.
+- Mode selection alone does not prove that media has decoded; tests check both.
+
+The native facade currently negotiates VP8 and Opus. Lower-level transceivers
+and the media library are more general; source labels alone do not add another
+negotiated conference track.
 
 ## Validation
 
-- `test_conference` exercises reusable peer slots and disconnect notifications.
-- The native churn harness verifies 120 real meeting generations with media and
-  SCTP messages, not just allocation/free calls.
-- The local browser harness checks actual decoded media, standard data channels,
-  live publisher direction/restart behavior, retained subscriptions and gallery
-  cleanup.
+`test_conference` covers slot reuse, default STUN shapes, negotiated media
+parameters, send/leave/callback races, staged commit/abort/stale events,
+readiness and data deduplication. SDL tests cover thread-safe status and tile
+handoff. Real UI/native tests cover fixed modes, live 2→3→2 migration, mute/data
+cases, media/data continuity and 120 native call generations.

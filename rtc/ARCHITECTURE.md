@@ -9,6 +9,12 @@ server-side routing.
 The WebRTC-style peer-connection facade lives in
 [`libmrtc_client`](../client/ARCHITECTURE.md). Server-side router / producer /
 consumer primitives live in [`libmrtc_routing`](../routing/ARCHITECTURE.md).
+The sibling `mrtc_sctp` target owns the shared usrsctp/DCEP implementation,
+`rtc_sctp.h`, `rtc_data_channel.h`, and the internal data channel manager.
+It is built when either client or routing APIs are enabled, so server-side
+SCTP does not require `mrtc_client`. Runtime-only SCTP users call
+`rtc_sctp_init()` / `rtc_sctp_cleanup()` around their endpoint lifetimes.
+Room envelopes and topology policy remain above this transport layer.
 
 Follows the **Pion model**: codec-agnostic at the RTP payload level.
 Senders take already-encoded payloads. Receivers deliver raw RTP
@@ -183,6 +189,18 @@ and test target; the active runtime transport does not own an
 `rtc_transport_set_ice_controlling()` selects the full-ICE role.
 `rtc_transport_restart_ice()` restarts an established transport's ICE state
 without requiring a new transport object.
+
+**Candidate eligibility is not connectivity.** The shared parser retains valid
+numeric, mDNS-host and TCP metadata in both SDP and trickle candidates. Malformed
+attributes fail explicitly. UDP transports classify TCP alternatives as
+ineligible and defer `.local` hosts without unicast DNS lookup or worker
+blocking. An authenticated incoming check can then supply the peer-reflexive
+numeric tuple. Stale ICE username fragments do not mutate a restarted path.
+
+`remote_candidates_deferred` and `remote_candidates_ineligible` in transport
+stats make these classifications observable; they do not set selected/SRTP
+readiness. There is no multicast-DNS resolver. The legacy standalone ICE agent
+requires numeric UDP inputs; browser connections use the active runtime path.
 
 ### STUN / TURN (`src/rtc_stun.h/c`, `src/rtc_turn.h/c`)
 

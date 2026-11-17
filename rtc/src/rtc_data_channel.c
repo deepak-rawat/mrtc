@@ -779,6 +779,14 @@ uint64_t rtc_data_channel_bytes_received(const rtc_data_channel_t *dc) {
     return dc ? dc->bytes_received : 0;
 }
 
+int rtc_sctp_init(void) {
+    return rtc_dc_global_init();
+}
+
+void rtc_sctp_cleanup(void) {
+    rtc_dc_global_cleanup();
+}
+
 rtc_sctp_t *rtc_sctp_create(rtc_sctp_send_fn send, void *user) {
     rtc_sctp_t *sctp = calloc(1, sizeof(*sctp));
     if (sctp && rtc_dc_manager_init(sctp, send, user) != RTC_OK) {

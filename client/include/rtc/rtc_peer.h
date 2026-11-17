@@ -18,7 +18,7 @@
 
 #include "rtc_common.h"
 #include "rtc_track.h"
-#include "rtc_data_channel.h"
+#include <rtc/rtc_data_channel.h>
 
 typedef struct rtc_peer_connection rtc_peer_connection_t;
 
