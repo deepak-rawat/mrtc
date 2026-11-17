@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   native:
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -66,8 +67,15 @@ jobs:
         run: cmake --build build/ci --parallel 4
       - name: Test
         run: ctest --test-dir build/ci --output-on-failure --timeout 120
+      - name: Verify server without the native client facade
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S . -B build/server-only -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DMRTC_ENABLE_CLIENT_API=OFF -DMRTC_BUILD_TESTS=OFF
+          cmake --build build/server-only --parallel 2 --target mrtc_server
 
   address-sanitizer:
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,35 +96,41 @@ jobs:
         run: ctest --test-dir build/asan --output-on-failure --timeout 120
 
   browser-interop:
+    timeout-minutes: 15
     runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/mrtc-playwright
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '26'
           cache: npm
-          cache-dependency-path: app/browser_interop/package-lock.json
+          cache-dependency-path: |
+            web/package-lock.json
+            tests/interop/package-lock.json
       - name: Install native dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build pkg-config libssl-dev \
             libwebsockets-dev libcjson-dev libvpx-dev libopus-dev libusrsctp-dev
-      - name: Build local SFU fixtures
+      - name: Build the browser application
+        run: |
+          npm --prefix web ci
+          npm --prefix web test
+          npm --prefix web run build
+      - name: Build local server and native fixtures
         run: |
           cmake -S . -B build/browser -G Ninja -DCMAKE_BUILD_TYPE=Debug
-          cmake --build build/browser --parallel 4 --target signaling_server sfu_probe chat
+          cmake --build build/browser --parallel 4 --target mrtc_server sfu_probe chat
       - name: Install browser dependencies
-        working-directory: app/browser_interop
+        working-directory: tests/interop
         run: |
           npm ci
           npx playwright install --with-deps chromium
-      - name: Verify decoded browser media and standard data channels
-        working-directory: app/browser_interop
+      - name: Verify real UI, native interoperability, migration and churn
+        working-directory: tests/interop
         env:
           MRTC_BUILD_DIR: ${{ github.workspace }}/build/browser
-        run: npm test
-      - name: Verify full-stack participant churn
-        working-directory: app/browser_interop
-        env:
-          MRTC_BUILD_DIR: ${{ github.workspace }}/build/browser
-        run: npm run test:churn
+          MRTC_WEB_ROOT: ${{ github.workspace }}/web/dist
+        run: npm run test:all

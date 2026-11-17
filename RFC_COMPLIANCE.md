@@ -18,7 +18,7 @@ changes there alone do not change client or SFU connectivity.
 | RFC 8489 / RFC 5389 — STUN | UDP messages, integrity/fingerprint, address validation, ICE checks and credential-based TURN authentication | Authentication v2, alternate servers and TCP/TLS STUN are not implemented |
 | RFC 8445 — ICE | Full/lite operation, controlling/controlled roles, conflicts, nomination, consent and active restart on the runtime | Not a complete implementation of every checklist/dual-stack extension |
 | RFC 7675 — consent | Authenticated consent requests and expiration of an unresponsive selected path | Application reconnect policy remains application-owned |
-| RFC 8838 / RFC 8839 — trickle ICE and SDP | Asynchronous candidates, remote ingestion, end-of-candidates events, ICE-lite signaling | Full RFC-complete SDP attribute handling is not claimed |
+| RFC 8838 / RFC 8839 — trickle ICE and SDP | Asynchronous candidates, remote ingestion, end-of-candidates, ICE-lite signaling and retained browser candidate metadata | mDNS is deferred to authenticated peer-reflexive checks, not resolved by a multicast-DNS service |
 | RFC 8656 / RFC 5766 — TURN | Worker-owned UDP allocation, permissions/channels, refresh, cleanup and relay-only runtime connectivity | One authenticated UDP server; no TCP/TLS TURN or authentication v2 |
 | RFC 6347 / RFC 9147 — DTLS | Minimum DTLS 1.2; newer versions negotiated when supported by OpenSSL; datagram-preserving BIOs on OpenSSL 3.2+ | Older OpenSSL uses the existing memory-BIO fallback |
 | RFC 5764 — DTLS-SRTP | Profile negotiation, key export and remote SHA-256 fingerprint pinning | Signaling authenticity is not provided by fingerprint pinning alone |
@@ -79,6 +79,15 @@ MTU; stream-style reads must not split a handshake flight into invalid packets.
 
 ## ICE, TURN and Restart
 
+The common parser retains valid numeric, mDNS host and TCP candidate metadata
+both in trickle messages and embedded SDP. Malformed candidates fail explicitly
+instead of being silently dropped. UDP runtime transports classify TCP
+alternatives as ineligible and defer `.local` names without leaking them to
+unicast DNS or blocking the worker. Acceptance/defer counters do not mark a
+transport connected; an authenticated incoming check must establish the
+peer-reflexive tuple. Tests verify this with a controlling endpoint that has no
+numeric remote candidate and subsequently carries real encrypted RTP.
+
 ICE control operations execute on the owning worker. Full ICE handles
 controlling/controlled roles and role conflicts; ICE-lite answers authenticated
 checks. Consent expiration invalidates an unresponsive path. Active restart
@@ -115,22 +124,37 @@ threshold callbacks, stream reset, and close callbacks.
 **Validation:** [data-channel tests](client/tests/test_data_channel.c) and
 [peer integration tests](client/tests/test_peer_integration.c).
 
-## SFU and Browser Validation
+## Room Topology and Browser Validation
 
-The signaling server defaults to SFU operation; `--mesh` selects the legacy
-peer-to-peer signaling mode. It uses the existing routing/runtime primitives,
-not a second transport implementation. Publishing and subscription sessions
-have explicit ownership and teardown.
+The unified `mrtc_server` defaults to per-room AUTO policy: up to two admitted
+participants use P2P, then the coordinator prepares SFU. Forced mesh/SFU and
+configurable thresholds/hold-down remain available. This is an application
+protocol, not an additional WebRTC RFC.
 
-The local [browser harness](app/browser_interop/package.json) runs real
-Chromium/Chrome, synthetic media and a native conference probe. It checks
-decoded video and audio samples in both directions, standard SCTP/DCEP
-messages, join/leave/reconnect, and stale-tile removal. A silent WebAudio sink
-ensures audio playout is actually pulled without playing test tones aloud.
-Packet receipt alone is not treated as proof of audio decoding.
+[Protocol v2](signaling/PROTOCOL.md) separates participant identity from
+epoch/session identity and defines prepare/ready/commit/ack/abort. Capture,
+gallery identity and selected media survive handoff; old/pending descriptions
+cannot mutate another generation. A different remote endpoint requires new
+DTLS/SCTP sessions even though an ICE restart of one endpoint can preserve them.
+Application message IDs have bounded duplicate suppression, not an exactly-once
+delivery guarantee across arbitrary failures.
 
-The separate churn harness checks 120 native conference generations with real
-WebSocket, ICE, DTLS, SRTP, decoded media and SCTP messages.
+The independent SFU engine uses the existing runtime/routing/SCTP libraries,
+not the native client or codecs. The control loop owns room policy and
+WebSocket/HTTP state; the media worker receives stable-ID commands and emits
+copied events. These are threads in one process, not isolated worker processes.
+
+The [actual browser client](web/README.md) uses built-in WebRTC. The
+[interop harness](tests/interop/README.md) drives that UI through the C server's
+HTTP mount. Real Join clicks, default mDNS privacy and autoplay policies are
+preserved. Tests require per-source decoded video/audio in both directions,
+standard SCTP messages, fixed modes, live 2→3→2 migration, selected audio,
+capture/tile lifetime, restart, timeout/abort continuity and stale messages.
+Packet receipt or a mode label alone is not treated as successful media.
+
+The separate churn harness checks 120 native conference generations. Native
+and UI configuration regressions remain separate coverage; browser/probe
+success does not certify every SDL device/launch configuration.
 
 ## Deferred Work and Deployment Limits
 

@@ -22,13 +22,20 @@ The P0–P2 work is organized into independently testable areas:
 | Live negotiation | Track/direction updates, explicit glare rejection/rollback and safe rejection of unsupported codec changes |
 | Standard data channels | usrsctp SCTP/DCEP, partial reliability, fragmentation, backpressure and stream reset, verified with a browser |
 | Congestion and forwarding | Apply transport estimates to encoders; bounded send/retransmission state; explicit failure/drop reporting |
-| Default SFU | Publisher/subscriber orchestration over existing routing primitives, feedback routing, reconnect and deterministic teardown; explicit `--mesh` fallback |
-| Validation | Native tests, actual browser decoding/message exchange, full-stack churn, cross-platform CI and sanitizer coverage |
+| Independent SFU/server | Separate shared SCTP and SFU libraries; one launcher with control/media threads, stable-ID boundary and client-disabled server build |
+| Room topology | Per-room AUTO/fixed policy, configurable P2P threshold, hold-down, epoch-scoped prepare/commit/abort, stable capture/tiles and failure fallback |
+| Browser client | Real TypeScript UI using browser WebRTC in P2P/SFU/auto, including native interoperability without privacy/autoplay bypasses |
+| Validation | Native/TypeScript contracts, actual shipped UI, both migration directions, abort/stale isolation, full-stack churn, CI and sanitizer coverage |
 
 The native suite and focused ASan suites exercise these areas. The browser
 harness checks real decoded audio/video and standard data-channel messages,
 not merely ICE connection state or incoming packet counts. Remote CI results
 remain distinct from tests run locally.
+
+The original SFU-under-signaling layout and standalone browser test fixture
+have been replaced. See [the layout](ARCHITECTURE.md),
+[server coordinator](app/server/ARCHITECTURE.md),
+[SFU engine](sfu/ARCHITECTURE.md) and [browser app](web/README.md).
 
 ## Next Priorities After This Baseline
 
@@ -37,6 +44,8 @@ remain distinct from tests run locally.
 - Run the native suite on Linux, macOS and Windows.
 - Run AddressSanitizer/leak detection on Linux.
 - Keep browser media/data and 120-generation churn tests in CI.
+- Exercise the shipped UI, default STUN shapes, normal browser privacy, and
+  actual decoded sources after migration rather than a second test client.
 - Reproduce failures using bounded, isolated loopback fixtures.
 - Extend a focused regression before changing a protocol invariant.
 
@@ -62,6 +71,9 @@ working NACK, PLI, RTP extensions or replay windows.
 - Better operational counters and explicit resource limits.
 - Evaluate a single bidirectional bundled connection per participant before
   adding simulcast or more complex transport sharing.
+- Introduce independent SFU processes only if crash isolation or measured
+  scaling needs justify IPC, supervision and reconciliation; the stable-ID
+  library boundary already separates responsibilities.
 
 The current separate subscription connections deliberately favor straightforward
 ownership. Their UDP-port cost is documented; separate DTLS associations must

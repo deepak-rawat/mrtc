@@ -18,10 +18,15 @@ and library dependency graph. Per-component design docs:
 - `rtc/ARCHITECTURE.md` — core RTC runtime + protocol primitives
 - `client/ARCHITECTURE.md` — WebRTC-style peer connection facade
 - `routing/ARCHITECTURE.md` — server-side media routing and feedback
+- `sfu/ARCHITECTURE.md` — independent SFU session engine
 - `media/ARCHITECTURE.md` — codecs, jitter buffer, media pipeline
 - `signaling/ARCHITECTURE.md` — WebSocket signaling client + server
 - `conference/ARCHITECTURE.md` — multi-peer conferencing
 - `app/conf_sdl/ARCHITECTURE.md` — SDL3 video conference application
+- `app/server/ARCHITECTURE.md` — unified launcher, room policy and control/media ownership
+- `web/README.md` — real browser client
+- `tests/interop/README.md` — actual UI/native interoperability and migration tests
+- `signaling/PROTOCOL.md` — versioned room/session/topology contract
 
 ## Key Conventions
 
@@ -82,6 +87,12 @@ Uses modern EVP APIs (3.0+). Avoid deprecated functions like `HMAC()` or low-lev
 
 ### Testing
 Tests use a minimal harness (`tests/test_harness.h`) with `TEST()`, `RUN_TEST()`, `ASSERT*` macros. No external test framework. Each test is a standalone executable.
+
+The web client additionally uses TypeScript checking and Node contract tests.
+Playwright in `tests/interop` drives the actual built UI served by `mrtc_server`;
+do not replace it with a separate signaling implementation or disable browser
+privacy/autoplay to make interoperability pass. Test actual default native
+configuration as well as controlled synthetic capture and topology handoffs.
 
 ## Commit Message Style
 
