@@ -22,9 +22,11 @@ and library dependency graph. Per-component design docs:
 - `media/ARCHITECTURE.md` — codecs, jitter buffer, media pipeline
 - `signaling/ARCHITECTURE.md` — WebSocket signaling client + server
 - `conference/ARCHITECTURE.md` — multi-peer conferencing
-- `app/conf_sdl/ARCHITECTURE.md` — SDL3 video conference application
+- `app/desktop/ARCHITECTURE.md` — SDL3 video conference application
+- `app/cli/README.md` — headless media client and stdio control protocol
+- `app/common/` — shared native session lifecycle and synthetic media
 - `app/server/ARCHITECTURE.md` — unified launcher, room policy and control/media ownership
-- `web/README.md` — real browser client
+- `app/web/README.md` — real browser client
 - `tests/interop/README.md` — actual UI/native interoperability and migration tests
 - `signaling/PROTOCOL.md` — versioned room/session/topology contract
 

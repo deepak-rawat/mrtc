@@ -19,7 +19,10 @@ own WebRTC implementation, not native codecs compiled to WebAssembly.
 | [signaling/](signaling/ARCHITECTURE.md) | Versioned room protocol and WebSocket client |
 | [conference/](conference/ARCHITECTURE.md) | Native participant/capture state and staged transport graphs |
 | [app/server/](app/server/ARCHITECTURE.md) | Unified launcher, room policy, WebSocket/HTTP control loop |
-| [web/](web/README.md) | Real browser conferencing UI |
+| [app/common/](app/common/) | Shared native app sessions and synthetic sources |
+| [app/cli/](app/cli/README.md) | Headless audio/video, terminal chat and JSONL automation |
+| [app/desktop/](app/desktop/ARCHITECTURE.md) | Native SDL conferencing interface |
+| [app/web/](app/web/README.md) | Real browser conferencing UI |
 | [tests/interop/](tests/interop/README.md) | Automated tests driving the actual web UI and native clients |
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for ownership and dependencies,
@@ -89,17 +92,17 @@ cmake --build build --parallel 4
 All commands below are from the repository root unless stated otherwise.
 
 ```bash
-npm --prefix web ci
-npm --prefix web run build
+npm --prefix app/web ci
+npm --prefix app/web run build
 ```
 
-Generated assets live in ignored `web/dist`; TypeScript sources and lockfiles
+Generated assets live in ignored `app/web/dist`; TypeScript sources and lockfiles
 are committed. Browser source does not become a dependency of the native C build.
 
 ## Start Everything
 
 ```bash
-./build/app/server/mrtc_server 8080 --web-root web/dist
+./build/app/server/mrtc_server 8080 --web-root app/web/dist
 ```
 
 Open **http://localhost:8080** in browser tabs. Enter a name and room, then click
@@ -113,19 +116,51 @@ For native clients in the same room:
 
 ```bash
 # macOS — run the executable inside the app bundle, in two terminals
-./build/app/conf_sdl/conf_sdl.app/Contents/MacOS/conf_sdl --meeting demo --name Alice
+./build/app/desktop/mrtc_desktop.app/Contents/MacOS/mrtc_desktop --meeting demo --name Alice
 
 # Linux / Windows (MSYS2)
-./build/app/conf_sdl/conf_sdl --meeting demo --name Alice
+./build/app/desktop/mrtc_desktop --meeting demo --name Alice
 
-# Text chat; no local camera/microphone sources needed
-./build/app/chat/chat --meeting demo --name Alice
+# Headless audio/video plus terminal chat; no devices or SDL required
+./build/app/cli/mrtc_cli --meeting demo --name Alice
 ```
 
-The native gallery uses animated video and a tone by default. Add `--camera`
-and/or `--mic` for real devices. Controls: M = mute microphone, V = mute camera,
-Q = leave. Its title displays active topology, switching and errors; SDL updates
-stay on the main thread.
+Both native clients use the same session setup and synthetic media generation.
+The desktop provides a join screen, local preview, named gallery, status banner,
+mute controls and chat. Add `--camera` and/or `--mic` for real devices; explicit
+device failures are reported rather than silently replaced by synthetic media.
+The headless CLI encodes synthetic video/audio and decodes remote media without
+opening devices, windows or speakers.
+Desktop text currently uses SDL's ASCII atlas: UTF-8 is preserved, but non-ASCII
+glyphs display as `?`. See the [desktop guide](app/desktop/ARCHITECTURE.md).
+
+The old `build/app/chat/chat` and `build/app/conf_sdl/conf_sdl` (macOS app bundle
+on macOS) remain compatibility entrypoints. New scripts should use `mrtc_cli`
+and `mrtc_desktop`.
+
+### Automated headless end-to-end testing
+
+```bash
+# Start an isolated real server and controlled native clients; no browser needed
+MRTC_BUILD_DIR=build npm --prefix tests/interop run test:native
+```
+
+The Node controller launches `mrtc_cli --control stdio` and exchanges JSON Lines:
+
+```json
+{"version":1,"id":1,"command":"join","server":"ws://127.0.0.1:8080/ws","room":"demo","name":"Alice","video":"synthetic","audio":"synthetic"}
+{"version":1,"id":2,"command":"stats"}
+{"version":1,"id":3,"command":"leave"}
+{"version":1,"id":4,"command":"quit"}
+```
+
+Command responses are correlated by ID. Joining is asynchronous: an accepted
+command is not proof of media delivery. Tests require fresh decoded audio/video
+from each expected peer in the committed epoch, exact chat delivery and roster
+changes. Local call generations isolate leave/rejoin cycles. stdout is reserved
+for structured events/responses; stderr carries logs. See the
+[CLI protocol](app/cli/README.md) and [test controller](tests/interop/README.md).
+Node is required only by the optional E2E runner, never by native applications.
 
 Restart old server/client processes after updating binaries. Existing processes
 do not pick up a rebuilt executable or a new signaling protocol.
@@ -148,11 +183,11 @@ can keep the room on SFU even with two members.
 
 ```bash
 # Four or fewer use P2P; five or more prefer SFU
-./build/app/server/mrtc_server 8080 --mode auto --p2p-max 4 --web-root web/dist
+./build/app/server/mrtc_server 8080 --mode auto --p2p-max 4 --web-root app/web/dist
 
 # Explicit fixed modes; --mesh remains an alias for --mode mesh
-./build/app/server/mrtc_server 8080 --mode sfu --web-root web/dist
-./build/app/server/mrtc_server 8080 --mode mesh --web-root web/dist
+./build/app/server/mrtc_server 8080 --mode sfu --web-root app/web/dist
+./build/app/server/mrtc_server 8080 --mode mesh --web-root app/web/dist
 ```
 
 Other options:
@@ -183,7 +218,7 @@ For remote devices, bind and advertise the actual reachable server address:
 
 ```bash
 ./build/app/server/mrtc_server 8080 --listen-ip 0.0.0.0 \
-  --announced-ip 192.168.1.20 --web-root web/dist
+  --announced-ip 192.168.1.20 --web-root app/web/dist
 ```
 
 Account for UDP media ports in the test firewall. For camera/microphone capture
@@ -208,8 +243,8 @@ actual ICE/DTLS/media must succeed. There is no multicast-DNS resolver.
 
 ```bash
 ctest --test-dir build --output-on-failure --timeout 120
-npm --prefix web run typecheck
-npm --prefix web test
+npm --prefix app/web run typecheck
+npm --prefix app/web test
 ```
 
 Optional real UI/native interoperability:
@@ -217,7 +252,7 @@ Optional real UI/native interoperability:
 ```bash
 npm --prefix tests/interop ci
 npm --prefix tests/interop run install:browser
-MRTC_BUILD_DIR=build MRTC_WEB_ROOT=web/dist npm --prefix tests/interop run test:all
+MRTC_BUILD_DIR=build MRTC_WEB_ROOT=app/web/dist npm --prefix tests/interop run test:all
 ```
 
 The harness drives the shipped UI served by `mrtc_server`, not an independent
@@ -250,6 +285,7 @@ native client or routing support is enabled.
 
 Other existing options are `MRTC_BUILD_TESTS`, `MRTC_ENABLE_ASAN`,
 `MRTC_ENABLE_TWCC`, and `MRTC_ENABLE_RATE_CONTROL`.
+Set `MRTC_BUILD_DESKTOP=OFF` to build native CLI/server tests without SDL.
 
 ## License
 

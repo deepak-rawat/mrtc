@@ -125,6 +125,8 @@ to a different endpoint merely by changing a topology flag.
 - `on_topology(mode, status, epoch, reason)` reports concrete mesh/SFU mode and
   active/switching/error status.
 - `conference_get_peer_count()` counts participants, not internal connections.
+- `conference_get_peer_name()` copies the signaling display name (or ID fallback)
+  under the participant lock. Names survive transport-graph handoffs.
 - `conference_get_source_stats()` snapshots active-rendered video/audio counts
   per participant, excluding pending decode.
 - Mode selection alone does not prove that media has decoded; tests check both.

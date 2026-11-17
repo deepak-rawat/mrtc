@@ -144,7 +144,7 @@ not the native client or codecs. The control loop owns room policy and
 WebSocket/HTTP state; the media worker receives stable-ID commands and emits
 copied events. These are threads in one process, not isolated worker processes.
 
-The [actual browser client](web/README.md) uses built-in WebRTC. The
+The [actual browser client](app/web/README.md) uses built-in WebRTC. The
 [interop harness](tests/interop/README.md) drives that UI through the C server's
 HTTP mount. Real Join clicks, default mDNS privacy and autoplay policies are
 preserved. Tests require per-source decoded video/audio in both directions,

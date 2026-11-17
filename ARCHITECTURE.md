@@ -7,7 +7,9 @@ WebRTC. The browser uses its own media engine.
 ## Layers
 
 ```text
-Native SDL/chat apps                         Browser UI
+Native desktop/CLI apps                     Browser UI
+        |                                       |
+  shared app session                            |
         |                                       |
   conference controller                   browser RoomClient
         |                                       |
@@ -46,9 +48,11 @@ signaling/          JSON room protocol and WebSocket client
 conference/         native participants, capture and epoch-scoped sessions
 app/
   server/           unified launcher, room policy and HTTP/WS coordinator
-  conf_sdl/         native capture/playback/gallery
-  chat/             text client using conference orchestration
-web/                real browser UI and TypeScript room controller
+  common/           native app lifecycle, synthetic sources and snapshots
+  desktop/          SDL capture/playback/gallery and interactive controls
+  cli/              headless media, terminal commands and JSONL control
+  chat/             compatibility target using the CLI implementation
+  web/              real browser UI and TypeScript room controller
 tests/
   interop/          Playwright driving the actual shipped UI + native clients
   test_harness.h    native standalone test macros
@@ -76,6 +80,9 @@ mrtc_common
 mrtc_media       -> mrtc_client + VP8/Opus
 mrtc_signaling   -> mrtc_common + libwebsockets/cJSON
 mrtc_conference  -> mrtc_client + mrtc_media + mrtc_signaling
+mrtc_app_common  -> mrtc_conference
+mrtc_cli         -> mrtc_app_common (no SDL or Node dependency)
+mrtc_desktop     -> mrtc_app_common + SDL3
 mrtc_server     -> mrtc_signaling + mrtc_sfu (when routing enabled)
 ```
 
@@ -107,6 +114,13 @@ worker invocation. Shutdown drains callbacks before freeing reached objects.
 
 Runtime hot sends use atomic readiness and synchronized SRTP state. No producer
 or consumer owns a thread; the worker serializes its media graph.
+
+The CLI's stdio control mode accepts JSON Lines commands on stdin and emits
+versioned responses/events on stdout; diagnostics stay on stderr. A Node runner
+owns process orchestration, deadlines and assertions. It exercises the real
+application and server, not a second implementation of signaling. A local call
+generation disambiguates rejoining from server topology epochs, which can reset
+in a fresh room. Decoded-media snapshots attribute counters to the active epoch.
 
 ## Room Topology
 
@@ -154,8 +168,8 @@ remote endpoint requires a new SCTP association.
 - [Signaling](signaling/ARCHITECTURE.md)
 - [Unified server](app/server/ARCHITECTURE.md)
 - [Native conference](conference/ARCHITECTURE.md)
-- [SDL app](app/conf_sdl/ARCHITECTURE.md)
-- [Browser app](web/README.md)
+- [SDL app](app/desktop/ARCHITECTURE.md)
+- [Browser app](app/web/README.md)
 - [Wire protocol](signaling/PROTOCOL.md)
 
 See [README.md](README.md) for running and build profiles. Independent process

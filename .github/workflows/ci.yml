@@ -107,7 +107,7 @@ jobs:
           node-version: '26'
           cache: npm
           cache-dependency-path: |
-            web/package-lock.json
+            app/web/package-lock.json
             tests/interop/package-lock.json
       - name: Install native dependencies
         run: |
@@ -116,13 +116,13 @@ jobs:
             libwebsockets-dev libcjson-dev libvpx-dev libopus-dev libusrsctp-dev
       - name: Build the browser application
         run: |
-          npm --prefix web ci
-          npm --prefix web test
-          npm --prefix web run build
+          npm --prefix app/web ci
+          npm --prefix app/web test
+          npm --prefix app/web run build
       - name: Build local server and native fixtures
         run: |
           cmake -S . -B build/browser -G Ninja -DCMAKE_BUILD_TYPE=Debug
-          cmake --build build/browser --parallel 4 --target mrtc_server sfu_probe chat
+          cmake --build build/browser --parallel 4 --target mrtc_server mrtc_cli
       - name: Install browser dependencies
         working-directory: tests/interop
         run: |
@@ -132,5 +132,46 @@ jobs:
         working-directory: tests/interop
         env:
           MRTC_BUILD_DIR: ${{ github.workspace }}/build/browser
-          MRTC_WEB_ROOT: ${{ github.workspace }}/web/dist
+          MRTC_WEB_ROOT: ${{ github.workspace }}/app/web/dist
+          MRTC_TEST_ARTIFACTS: ${{ github.workspace }}/build/interop-failures
         run: npm run test:all
+      - name: Save interoperability failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-interop-failures
+          path: build/interop-failures
+          if-no-files-found: ignore
+
+  headless-native:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - name: Install native dependencies without SDL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config libssl-dev \
+            libwebsockets-dev libcjson-dev libvpx-dev libopus-dev libusrsctp-dev
+      - name: Build headless applications
+        run: |
+          cmake -S . -B build/headless -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DMRTC_BUILD_DESKTOP=OFF
+          cmake --build build/headless --parallel 4 --target mrtc_server mrtc_cli
+      - name: Verify controller and real native media
+        env:
+          MRTC_BUILD_DIR: ${{ github.workspace }}/build/headless
+          MRTC_TEST_ARTIFACTS: ${{ github.workspace }}/build/interop-failures
+        run: |
+          npm --prefix tests/interop run test:controller
+          npm --prefix tests/interop run test:native
+      - name: Save headless failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-headless-failures
+          path: build/interop-failures
+          if-no-files-found: ignore

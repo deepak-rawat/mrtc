@@ -25,6 +25,7 @@ The P0–P2 work is organized into independently testable areas:
 | Independent SFU/server | Separate shared SCTP and SFU libraries; one launcher with control/media threads, stable-ID boundary and client-disabled server build |
 | Room topology | Per-room AUTO/fixed policy, configurable P2P threshold, hold-down, epoch-scoped prepare/commit/abort, stable capture/tiles and failure fallback |
 | Browser client | Real TypeScript UI using browser WebRTC in P2P/SFU/auto, including native interoperability without privacy/autoplay bypasses |
+| Native apps | Shared session layer, headless media CLI with JSONL control, SDL desktop join/gallery/chat interface |
 | Validation | Native/TypeScript contracts, actual shipped UI, both migration directions, abort/stale isolation, full-stack churn, CI and sanitizer coverage |
 
 The native suite and focused ASan suites exercise these areas. The browser
@@ -35,7 +36,7 @@ remain distinct from tests run locally.
 The original SFU-under-signaling layout and standalone browser test fixture
 have been replaced. See [the layout](ARCHITECTURE.md),
 [server coordinator](app/server/ARCHITECTURE.md),
-[SFU engine](sfu/ARCHITECTURE.md) and [browser app](web/README.md).
+[SFU engine](sfu/ARCHITECTURE.md) and [browser app](app/web/README.md).
 
 ## Next Priorities After This Baseline
 
@@ -47,6 +48,9 @@ have been replaced. See [the layout](ARCHITECTURE.md),
 - Exercise the shipped UI, default STUN shapes, normal browser privacy, and
   actual decoded sources after migration rather than a second test client.
 - Reproduce failures using bounded, isolated loopback fixtures.
+- Use the real headless CLI's stdio protocol for native E2E control, rather than
+  maintaining a separate test participant with special reply behavior.
+- Validate desktop rendering separately from headless media transport tests.
 - Extend a focused regression before changing a protocol invariant.
 
 ### 2. Improve RTCP interoperability
