@@ -152,8 +152,10 @@ A later Chromium rerun failed decoded-audio assertions. Diagnostics showed
 zero outbound audio packets and a synthetic AudioContext in `running` state
 whose clock remained near 0.005 seconds after a two-second wait. The media
 assertions and normal autoplay/privacy policy were retained; this source-clock
-failure remains a qualification blocker, not a passing test or an established
-protocol diagnosis.
+failure was not counted as a passing test. The newer explicit synthetic source
+uses a silent AudioContext sink where supported, avoiding physical-speaker
+clock dependence without relaxing browser policy; the actual Chromium
+mesh/SFU/AUTO browser media suite passes after that change.
 
 After removing the application authentication/deployment bundle, the native
 build is warning-free and all 14 targeted signaling/app/protocol CTests pass.
@@ -230,3 +232,41 @@ not dynamic group reconsideration. Publisher SR timing is echoed in receiver
 reports, and retiring native/SFU sending sources attempt compound BYE before
 transport shutdown. Focused tests verify interval bounds, quiet-path encrypted
 receiver reports and their SR references, plus callback-safe teardown.
+
+The optional native soak runner now checks fresh per-source decode/SCTP and
+sampled RSS growth on owned processes, writing bounded-workload JSONL evidence.
+A 30-second/three-peer smoke run passed locally. This is not a 24/72-hour soak,
+capacity certification or a latency/quality measurement. See
+[the runner contract](tests/interop/README.md#native-media-and-rss-soak).
+
+## Latest local regression evidence
+
+The following newer checks supersede the earlier transient Debug timeouts and
+stalled synthetic browser-audio run. They were run locally on macOS/arm64,
+against the native protocol implementation through `d39c7b1` and browser
+synthetic-source fix `b46eee9`; they are not remote CI/platform certification.
+
+| Check | Result |
+|---|---|
+| Full Debug CTest suite, including desktop | 65/65 passed |
+| Full headless Release CTest suite | 63/63 passed |
+| Full headless ASan/UBSan CTest suite | 63/63 passed |
+| TSan worker/network/routing/SFU checks | 4/4 passed |
+| TWCC/AIMD-disabled focused build/tests | Clean build, 4/4 passed |
+| Web contracts and TypeScript/Vite build | 4 tests and build passed |
+| Controller/soak-runner failure contracts | 17/17 passed |
+| Full Chromium/native `test:all` | Passed, including migration/failure isolation and 120 generations |
+| Updated parser fuzz run | 1,525,420 inputs in 60 seconds, no findings |
+| Eight-person SFU/RSS run | 60 seconds, fresh per-source decode/SCTP, sampled growth gates passed |
+| Two simultaneous rooms, three native peers each | 30 seconds, decoded media/SCTP/RSS and clean shutdown passed |
+
+The eight-person run sampled server peak RSS at 66.75 MiB, with no measured
+post-warmup server RSS growth and at most 0.204 MiB growth per client. Warmup
+was 20 seconds; the report contains 12 samples. This is a short reference run,
+not evidence of no leaks, maximum capacity, delay bounds or a long-duration SLO.
+
+Reproduce the native suite with `ctest --test-dir build --output-on-failure
+--timeout 120`, browser/native scenarios with `MRTC_BUILD_DIR=build npm --prefix
+tests/interop run test:all`, and the sampled reference workload with
+`MRTC_BUILD_DIR=build MRTC_SOAK_SECONDS=60 MRTC_SOAK_PEERS=8 npm --prefix
+tests/interop run test:soak`.

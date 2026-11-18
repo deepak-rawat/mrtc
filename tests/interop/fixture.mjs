@@ -143,7 +143,7 @@ export async function fixture(mode, extra = [], { withBrowser = true } = {}) {
             await until(async () => (await page.evaluate(() => window.mrtc.stats())).id, `${name} UI join`);
             return page;
         }
-        return { url, http, run, page, logs, close, browser, artifacts, record, nativeClients };
+        return { url, http, run, page, logs, close, browser, artifacts, record, nativeClients, server };
     } catch (error) {
         await artifacts(error).catch(error => console.error(`Artifact write failed: ${error}`));
         await close();

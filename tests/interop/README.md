@@ -14,8 +14,10 @@ npm run test:browser
 npm test
 npm run test:migration
 npm run test:churn
-# All of the above:
+# Standard suite:
 npm run test:all
+# Optional longer run, not part of test:all:
+npm run test:soak
 ```
 
 `MRTC_BUILD_DIR` is relative to the repository root (absolute paths also work).
@@ -55,6 +57,35 @@ the native/browser migration case deliberately remains 2→3→2.
 `MRTC_DOWNGRADE_DELAY_MS` overrides its hold-down (default 250).
 `test:churn` preserves 120 real native reconnects; override
 `MRTC_CHURN_CYCLES` only for a local smoke run.
+
+## Native media and RSS soak
+
+The optional `test:soak` runner uses the real SFU and controlled native clients,
+not mock media. It requires fresh decoded media from every remote source and
+SCTP chat on each sample, then measures RSS of its owned server/client processes
+on Linux or macOS. Reports are JSONL beneath `build/`, including configuration,
+commit/dirty state, sampled RSS, growth and a terminal success/failure result.
+An existing output file is not overwritten.
+
+```sh
+MRTC_BUILD_DIR=build MRTC_SOAK_SECONDS=86400 \
+  MRTC_SOAK_PEERS=8 npm --prefix tests/interop run test:soak
+```
+
+Defaults are 300 seconds, eight peers, one room and five-second sampling.
+`MRTC_SOAK_SECONDS` accepts 10..259200; `MRTC_SOAK_PEERS` 2..8;
+`MRTC_SOAK_ROOMS` 1..32; `MRTC_SOAK_SAMPLE_MS` 1000..60000. Duration must allow
+at least three samples. Larger workloads should run on an isolated test host;
+the accepted options do not establish supported capacity.
+
+Warmup is the smaller of 60 seconds and one third of the run. Post-warmup peak
+sampled RSS growth must not exceed 64 MiB for the server or 16 MiB per client.
+Override these explicit thresholds with `MRTC_SOAK_SERVER_GROWTH_MIB` and
+`MRTC_SOAK_CLIENT_GROWTH_MIB` (1..4096). `MRTC_SOAK_REPORT` overrides the
+root-relative output path. These sampled growth gates do not prove absence of
+leaks or establish latency/quality SLOs. Review the report and run the actual
+24/72-hour qualification separately. CI's 30-second/three-peer run is only a
+smoke check.
 
 ## Headless native controller
 

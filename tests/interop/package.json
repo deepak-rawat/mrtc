@@ -12,8 +12,9 @@
     "test:churn": "node churn.mjs",
     "test:migration": "node migration.mjs",
     "test:native": "node native.mjs",
-    "test:controller": "node --test controller.test.mjs",
-    "test:all": "npm run test:controller && npm run test:native && npm run test:browser && npm test && npm run test:migration && npm run test:churn"
+    "test:controller": "node --test controller.test.mjs soak.test.mjs",
+    "test:all": "npm run test:controller && npm run test:native && npm run test:browser && npm test && npm run test:migration && npm run test:churn",
+    "test:soak": "node soak.mjs"
   },
   "devDependencies": {
     "playwright": "1.65.1"
