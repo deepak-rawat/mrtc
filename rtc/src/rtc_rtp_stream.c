@@ -26,6 +26,9 @@ struct rtc_rtp_send_stream {
     bool active;
 
     uint32_t max_bitrate_bps;
+    bool remb_enabled;
+    _Atomic uint32_t remote_limit_bps;
+    _Atomic uint64_t remote_limit_ms;
     bool send_active;
 
     rtc_rtp_send_stream_nack_fn on_nack;
@@ -83,6 +86,7 @@ rtc_rtp_send_stream_t *rtc_rtp_send_stream_create(const rtc_rtp_send_stream_conf
     stream->active = true;
     stream->send_active = true;
     atomic_init(&stream->keyframe_requested, false);
+    atomic_init(&stream->remote_limit_bps, UINT32_MAX);
     if (rtc_rtp_session_init(&stream->rtp_session, cfg->payload_type, cfg->clock_rate) != RTC_OK ||
         rtc_rtcp_stats_init(&stream->rtcp_stats, stream->rtp_session.ssrc) != RTC_OK) {
         free(stream);
@@ -221,6 +225,9 @@ static int send_stream_send(rtc_rtp_send_stream_t *stream, const uint8_t *payloa
         return RTC_ERR_INVALID;
     if (!stream->send_active)
         return RTC_OK;
+    if (atomic_load(&stream->remote_limit_bps) == 0 &&
+        rtc_time_ms() - atomic_load(&stream->remote_limit_ms) < 10000)
+        return RTC_OK;
 
     rtc_rtp_packet_t pkt;
     int rc;
@@ -301,22 +308,42 @@ int rtc_rtp_send_stream_send(rtc_rtp_send_stream_t *stream, const uint8_t *paylo
 }
 
 int rtc_rtp_send_stream_get_target_bitrate(const rtc_rtp_send_stream_t *stream) {
+    if (!stream)
+        return 0;
+    int kbps = 0;
 #ifdef MRTC_ENABLE_RATE_CONTROL
-    if (!stream || !stream->rate_ctrl)
-        return stream && stream->max_bitrate_bps ? (int)(stream->max_bitrate_bps / 1000) : 0;
-    int kbps = rtc_rate_control_get_bitrate(stream->rate_ctrl);
+    if (stream->rate_ctrl)
+        kbps = rtc_rate_control_get_bitrate(stream->rate_ctrl);
+#endif
     if (stream->max_bitrate_bps) {
         int cap_kbps = (int)(stream->max_bitrate_bps / 1000);
-        if (cap_kbps > 0 && kbps > cap_kbps)
+        if (cap_kbps > 0 && (!kbps || kbps > cap_kbps))
             kbps = cap_kbps;
     }
+    uint32_t cap = atomic_load(&stream->remote_limit_bps);
+    if (cap != UINT32_MAX && rtc_time_ms() - atomic_load(&stream->remote_limit_ms) < 10000) {
+        int remote = (int)(cap / 1000);
+        if (cap && remote == 0)
+            remote = 1;
+        if (!kbps || remote < kbps)
+            kbps = remote;
+    }
     return kbps;
-#else
-    if (stream && stream->max_bitrate_bps)
-        return (int)(stream->max_bitrate_bps / 1000);
-    (void)stream;
-    return 0;
-#endif
+}
+
+void rtc_rtp_send_stream_set_remote_feedback(rtc_rtp_send_stream_t *stream, uint8_t feedback) {
+    if (stream) {
+        stream->remb_enabled = (feedback & RTC_SDP_FB_REMB) != 0;
+        if (!stream->remb_enabled)
+            atomic_store(&stream->remote_limit_bps, UINT32_MAX);
+    }
+}
+
+void rtc_rtp_send_stream_on_remb(rtc_rtp_send_stream_t *stream, uint32_t bitrate_bps) {
+    if (stream && stream->remb_enabled) {
+        atomic_store(&stream->remote_limit_bps, bitrate_bps);
+        atomic_store(&stream->remote_limit_ms, rtc_time_ms());
+    }
 }
 
 bool rtc_rtp_send_stream_should_keyframe(rtc_rtp_send_stream_t *stream) {

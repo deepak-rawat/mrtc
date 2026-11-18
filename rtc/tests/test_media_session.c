@@ -115,6 +115,31 @@ TEST(unknown_ssrc_dropped) {
     rtc_rtp_send_stream_destroy(s1);
 }
 
+TEST(remb_caps_only_the_negotiated_named_sender) {
+    fb_rec_t record = {0};
+    rtc_rtp_send_stream_t *sender = make_stream(&record);
+    rtc_rtp_send_stream_set_max_bitrate(sender, 500000);
+    rtc_media_session_t session;
+    ASSERT_EQ(rtc_media_session_init(&session, NULL, NULL), RTC_OK);
+    ASSERT_EQ(rtc_media_session_add_sender(&session, sender), RTC_OK);
+    uint8_t wire[64];
+    size_t length;
+    uint32_t ssrc = rtc_rtp_send_stream_ssrc(sender);
+    ASSERT_EQ(rtc_rtcp_build_remb(wire, sizeof(wire), &length, 1, ssrc, 128000), RTC_OK);
+    rtc_media_session_handle_rtcp(&session, wire, length);
+    ASSERT_EQ(rtc_rtp_send_stream_get_target_bitrate(sender), 500);
+    rtc_rtp_send_stream_set_remote_feedback(sender, RTC_SDP_FB_REMB);
+    rtc_media_session_handle_rtcp(&session, wire, length);
+    ASSERT_EQ(rtc_rtp_send_stream_get_target_bitrate(sender), 128);
+    ASSERT_EQ(rtc_rtcp_build_remb(wire, sizeof(wire), &length, 1, ssrc + 1, 64000), RTC_OK);
+    rtc_media_session_handle_rtcp(&session, wire, length);
+    ASSERT_EQ(rtc_rtp_send_stream_get_target_bitrate(sender), 128);
+    rtc_rtp_send_stream_set_remote_feedback(sender, 0);
+    ASSERT_EQ(rtc_rtp_send_stream_get_target_bitrate(sender), 500);
+    rtc_media_session_close(&session);
+    rtc_rtp_send_stream_destroy(sender);
+}
+
 TEST(compound_rtcp_dispatches_all_subpackets) {
     fb_rec_t r1 = {0};
     fb_rec_t r2 = {0};
@@ -389,6 +414,7 @@ int main(void) {
     RUN_TEST(nack_routes_to_named_sender);
     RUN_TEST(pli_routes_to_named_sender);
     RUN_TEST(unknown_ssrc_dropped);
+    RUN_TEST(remb_caps_only_the_negotiated_named_sender);
     RUN_TEST(compound_rtcp_dispatches_all_subpackets);
     RUN_TEST(custom_interceptor_sees_rtcp_and_is_freed);
     RUN_TEST(resolve_routes_same_pt_by_mid);

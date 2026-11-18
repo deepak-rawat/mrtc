@@ -62,6 +62,8 @@ void rtc_rtp_send_stream_arm_video(rtc_rtp_send_stream_t *stream);
 void rtc_rtp_send_stream_set_send_active(rtc_rtp_send_stream_t *stream, bool active);
 bool rtc_rtp_send_stream_send_active(const rtc_rtp_send_stream_t *stream);
 void rtc_rtp_send_stream_set_max_bitrate(rtc_rtp_send_stream_t *stream, uint32_t bitrate_bps);
+void rtc_rtp_send_stream_set_remote_feedback(rtc_rtp_send_stream_t *stream, uint8_t feedback);
+void rtc_rtp_send_stream_on_remb(rtc_rtp_send_stream_t *stream, uint32_t bitrate_bps);
 uint32_t rtc_rtp_send_stream_max_bitrate(const rtc_rtp_send_stream_t *stream);
 
 int rtc_rtp_send_stream_send(rtc_rtp_send_stream_t *stream, const uint8_t *payload, size_t len,

@@ -499,6 +499,49 @@ bool rtc_rtcp_is_rtcp(const uint8_t *data, size_t len) {
     return (pt >= 200 && pt <= 206);
 }
 
+int rtc_rtcp_build_remb(uint8_t *buf, size_t capacity, size_t *len, uint32_t sender_ssrc,
+                        uint32_t media_ssrc, uint32_t bitrate_bps) {
+    if (!buf || !len || !media_ssrc)
+        return RTC_ERR_INVALID;
+    if (capacity < 24)
+        return RTC_ERR_NOMEM;
+    memset(buf, 0, 24);
+    buf[0] = 0x8f;
+    buf[1] = RTCP_PT_PSFB;
+    write_u16(buf + 2, 5);
+    write_u32(buf + 4, sender_ssrc);
+    memcpy(buf + 12, "REMB", 4);
+    buf[16] = 1;
+    unsigned exponent = 0;
+    uint32_t mantissa = bitrate_bps;
+    while (mantissa > 0x3ffff) {
+        mantissa >>= 1;
+        exponent++;
+    }
+    buf[17] = (uint8_t)((exponent << 2) | (mantissa >> 16));
+    buf[18] = (uint8_t)(mantissa >> 8);
+    buf[19] = (uint8_t)mantissa;
+    write_u32(buf + 20, media_ssrc);
+    *len = 24;
+    return RTC_OK;
+}
+
+int rtc_rtcp_parse_remb(rtc_rtcp_remb_t *out, const uint8_t *data, size_t len) {
+    if (!out || !data || len < 24 || data[0] != 0x8f || data[1] != RTCP_PT_PSFB ||
+        read_u16(data + 2) != 5 || read_u32(data + 8) != 0 || memcmp(data + 12, "REMB", 4) ||
+        data[16] != 1)
+        return RTC_ERR_INVALID;
+    unsigned exponent = data[17] >> 2;
+    uint32_t mantissa = ((uint32_t)(data[17] & 3) << 16) | ((uint32_t)data[18] << 8) | data[19];
+    out->sender_ssrc = read_u32(data + 4);
+    out->media_ssrc = read_u32(data + 20);
+    out->bitrate_bps = !mantissa ? 0
+                       : exponent >= 32 || mantissa > (UINT32_MAX >> exponent)
+                           ? UINT32_MAX
+                           : mantissa << exponent;
+    return out->media_ssrc ? RTC_OK : RTC_ERR_INVALID;
+}
+
 bool rtc_rtcp_get_pt_fmt(const uint8_t *data, size_t len, uint8_t *pt, uint8_t *fmt) {
     if (!data || len < 4)
         return false;

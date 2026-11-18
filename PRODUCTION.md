@@ -170,8 +170,8 @@ The retained changes are a tested foundation, not completion of work items 0–6
    capability intersection, rejected sections and browser-specific SDP shapes.
 2. Complete RTCP scheduling and source retirement/collisions. Compound feedback
    composition and supported feedback/extension intersection are now implemented.
-3. Implement downstream congestion-aware allocation/pacing on both SFU media
-   legs, then measure loss recovery and bounded delay under impairments.
+3. Qualify conservative shared-source bitrate adaptation under impairments,
+   then complete pacing and subscriber-wide allocation across media legs.
 4. Qualify TURN under hostile networks and complete server/address failover and
    dual-stack selection. Nonblocking read/write readiness and TCP/TLS TURN are
    now implemented, with verified certificates, bounded framing/partial writes,
@@ -208,3 +208,16 @@ SDP. Native answers can adopt an initially offered dynamic payload type while
 established mappings remain immutable. Receivers gate NACK/PLI/FIR on negotiated
 support. Targeted protocol tests and their ASan/UBSan counterparts pass, as do
 the four native mesh/SFU/AUTO decoded-media/SCTP E2E scenarios.
+
+Negotiated single-source REMB now carries the minimum fresh active-consumer
+video bound to the original publisher SSRC. Receiver-report loss/RTT uses the
+existing AIMD controller; paused/closed consumers and ten-second-old bounds
+are excluded. Native senders honor negotiated limits (including zero-rate
+pause) and expire unrefreshed limits after ten seconds. Audio is unaffected.
+This intentionally shares source quality across receivers; full subscriber
+allocation, pacing and simulcast remain distinct work.
+
+Focused regressions verify loss-driven decrease/recovery, minimum-consumer
+aggregation, stale/paused exclusion, feedback quantization/bounds and a real
+encrypted downstream-to-publisher limit. The four native E2E scenarios and
+targeted ASan/UBSan tests pass with this path enabled.

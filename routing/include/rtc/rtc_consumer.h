@@ -27,6 +27,7 @@ typedef struct {
     uint64_t bytes_sent;
     uint64_t packets_dropped;
     uint64_t packets_retransmitted;
+    uint32_t estimated_bitrate_bps;
 } rtc_consumer_stats_t;
 
 rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,

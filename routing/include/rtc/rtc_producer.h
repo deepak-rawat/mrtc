@@ -21,6 +21,7 @@ typedef struct {
     rtc_media_kind_t kind;
     uint64_t packets_received;
     uint64_t bytes_received;
+    uint32_t target_bitrate_bps; /* UINT32_MAX: no fresh active-subscriber bound */
 } rtc_producer_stats_t;
 
 rtc_producer_t *rtc_transport_produce(rtc_transport_t *transport,
@@ -33,5 +34,7 @@ void rtc_producer_close(rtc_producer_t *producer);
 void rtc_producer_destroy(rtc_producer_t *producer);
 int rtc_producer_get_stats(rtc_producer_t *producer, rtc_producer_stats_t *out);
 int rtc_producer_request_keyframe(rtc_producer_t *producer);
+/* Configure negotiated upstream feedback on the owning transport worker. */
+void rtc_producer_set_rtcp_feedback(rtc_producer_t *producer, uint8_t feedback);
 
 #endif /* RTC_PRODUCER_H */

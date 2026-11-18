@@ -105,7 +105,8 @@ static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media
         } feedback[] = {{RTC_SDP_FB_NACK, "nack"},
                         {RTC_SDP_FB_PLI, "nack pli"},
                         {RTC_SDP_FB_FIR, "ccm fir"},
-                        {RTC_SDP_FB_TRANSPORT_CC, "transport-cc"}};
+                        {RTC_SDP_FB_TRANSPORT_CC, "transport-cc"},
+                        {RTC_SDP_FB_REMB, "goog-remb"}};
         for (size_t i = 0; i < sizeof(feedback) / sizeof(feedback[0]); i++)
             if (m->rtcp_feedback & feedback[i].bit)
                 SDP_WRITE(p, remain, "a=rtcp-fb:%d %s\r\n", m->payload_type, feedback[i].name);
@@ -594,6 +595,7 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
                               : !strcmp(kind, "nack pli")     ? RTC_SDP_FB_PLI
                               : !strcmp(kind, "ccm fir")      ? RTC_SDP_FB_FIR
                               : !strcmp(kind, "transport-cc") ? RTC_SDP_FB_TRANSPORT_CC
+                              : !strcmp(kind, "goog-remb")    ? RTC_SDP_FB_REMB
                                                               : 0;
                 uint32_t payload;
                 if (!strcmp(pt, "*"))

@@ -207,6 +207,15 @@ int rtc_rtcp_parse_nack(rtc_rtcp_nack_t *out, const uint8_t *data, size_t len);
 int rtc_rtcp_parse_pli(rtc_rtcp_pli_t *out, const uint8_t *data, size_t len);
 int rtc_rtcp_parse_fir(rtc_rtcp_fir_t *out, const uint8_t *data, size_t len);
 int rtc_rtcp_parse_twcc(rtc_rtcp_twcc_t *out, const uint8_t *data, size_t len);
+typedef struct {
+    uint32_t sender_ssrc;
+    uint32_t media_ssrc;
+    uint32_t bitrate_bps;
+} rtc_rtcp_remb_t;
+/* Single-source REMB (goog-remb) for the one-camera profile. */
+int rtc_rtcp_build_remb(uint8_t *buf, size_t capacity, size_t *len, uint32_t sender_ssrc,
+                        uint32_t media_ssrc, uint32_t bitrate_bps);
+int rtc_rtcp_parse_remb(rtc_rtcp_remb_t *out, const uint8_t *data, size_t len);
 
 /* Extract PT and FMT from an RTCP header (after version check).
  * Useful for dispatch. Returns false if data too short or version != 2. */

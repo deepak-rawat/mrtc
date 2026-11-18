@@ -72,6 +72,18 @@ There is no unbounded per-subscriber queue. Closed/not-ready transports and
 failed sends produce checked failures and drop counters. This is a simple
 forwarder, not a simulcast selector or a full subscriber bitrate allocator.
 
+Video consumers reuse the core AIMD controller for receiver-report loss/RTT
+estimates and accept single-source REMB when offered. Producers aggregate the
+minimum fresh active-consumer limit and send negotiated REMB for the original
+publisher SSRC, never the downstream rewritten SSRC. Paused/closed consumers
+and estimates older than ten seconds do not hold back the source.
+
+This is conservative shared-source adaptation: one weak receiver can lower
+video quality for all subscribers of that source. It leaves audio untouched,
+does not add a media queue and is not per-subscriber layer selection, pacing or
+allocation across all of a subscriber's connections. Bounds are exposed in
+producer/consumer statistics for qualification.
+
 ## Tests
 
 | Test | Coverage |

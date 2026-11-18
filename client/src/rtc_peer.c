@@ -1266,6 +1266,7 @@ static int peer_set_remote_desc(rtc_peer_connection_t *pc, const rtc_desc_t *des
             struct rtc_rtp_transceiver *t = &pc->transceivers[j];
             if (t->mid_index == m->mid_index) {
                 rtc_rtp_recv_stream_set_feedback(t->receiver.stream, m->rtcp_feedback);
+                rtc_rtp_send_stream_set_remote_feedback(t->sender.stream, m->rtcp_feedback);
                 if (m->ssrc)
                     rtc_media_session_bind_receiver(&pc->media_session, t->receiver.stream,
                                                     m->ssrc);

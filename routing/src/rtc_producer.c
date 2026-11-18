@@ -29,6 +29,10 @@ struct rtc_producer {
     _Atomic uint64_t bytes_received;
     _Atomic uint64_t last_keyframe_request_ms;
     rtc_rtcp_stats_t rtcp;
+    _Atomic uint8_t feedback;
+    uint32_t last_bitrate_limit;
+    uint64_t last_bitrate_feedback_ms;
+    _Atomic unsigned fir_sequence;
 };
 
 static _Atomic uint32_t g_next_producer_id = 1;
@@ -63,6 +67,8 @@ rtc_producer_t *rtc_transport_produce(rtc_transport_t *transport,
     producer->rtp = opts->rtp;
     copy_label(producer->label, sizeof(producer->label), opts->label);
     producer->app_data = opts->app_data;
+    atomic_init(&producer->feedback, RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR);
+    producer->last_bitrate_limit = UINT32_MAX;
     rtc_rtcp_stats_init(&producer->rtcp, id);
     if (rtc_vec_init(&producer->consumers, sizeof(rtc_consumer_t *)) != RTC_OK ||
         rtc_mutex_init(&producer->consumers_mutex) != RTC_OK) {
@@ -82,6 +88,64 @@ rtc_producer_t *rtc_transport_produce(rtc_transport_t *transport,
 
 const char *rtc_producer_id(const rtc_producer_t *producer) {
     return producer ? producer->id : "";
+}
+
+void rtc_producer_set_rtcp_feedback(rtc_producer_t *producer, uint8_t feedback) {
+    if (producer)
+        atomic_store(&producer->feedback, feedback);
+}
+
+typedef struct {
+    rtc_producer_t *producer;
+    int result;
+} producer_bitrate_args_t;
+
+static uint32_t producer_bitrate_limit(rtc_producer_t *producer, uint64_t now) {
+    uint32_t limit = UINT32_MAX;
+    rtc_mutex_lock(&producer->consumers_mutex);
+    for (size_t i = 0; i < rtc_vec_len(&producer->consumers); i++) {
+        rtc_consumer_t **slot = rtc_vec_at(&producer->consumers, i);
+        uint32_t candidate = rtc_consumer_bitrate_limit(*slot, now);
+        if (candidate < limit)
+            limit = candidate;
+    }
+    rtc_mutex_unlock(&producer->consumers_mutex);
+    return limit;
+}
+
+static void producer_update_bitrate_on_worker(void *user) {
+    producer_bitrate_args_t *args = user;
+    rtc_producer_t *producer = args->producer;
+    args->result = RTC_OK;
+    if (atomic_load(&producer->closed) || producer->kind != RTC_MEDIA_KIND_VIDEO ||
+        !(atomic_load(&producer->feedback) & RTC_SDP_FB_REMB))
+        return;
+    uint64_t now = rtc_time_ms();
+    uint32_t limit = producer_bitrate_limit(producer, now);
+    if ((limit == UINT32_MAX && producer->last_bitrate_limit == UINT32_MAX) ||
+        now - producer->last_bitrate_feedback_ms < 200 ||
+        (limit == producer->last_bitrate_limit && now - producer->last_bitrate_feedback_ms < 1000))
+        return;
+    producer->last_bitrate_feedback_ms = now;
+    uint8_t packet[64 + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
+    size_t len;
+    int rc = rtc_rtcp_build_remb(packet, sizeof(packet), &len, producer->rtcp.ssrc,
+                                 producer->rtp.ssrc, limit);
+    if (rc == RTC_OK)
+        rc = rtc_transport_send_rtcp(producer->transport, packet, &len, sizeof(packet));
+    args->result = rc;
+    if (rc == RTC_OK)
+        producer->last_bitrate_limit = limit;
+    else
+        RTC_LOG_WARN("Producer bitrate feedback failed: %d", rc);
+}
+
+int rtc_producer_update_bitrate(rtc_producer_t *producer) {
+    if (!producer)
+        return RTC_ERR_INVALID;
+    producer_bitrate_args_t args = {.producer = producer, .result = RTC_ERR_INVALID};
+    int rc = rtc_transport_invoke(producer->transport, producer_update_bitrate_on_worker, &args);
+    return rc == RTC_OK ? args.result : rc;
 }
 
 int rtc_producer_get_rtp_parameters(rtc_producer_t *producer, rtc_rtp_parameters_t *out) {
@@ -121,6 +185,7 @@ int rtc_producer_get_stats(rtc_producer_t *producer, rtc_producer_stats_t *out) 
     out->kind = producer->kind;
     out->packets_received = atomic_load_explicit(&producer->packets_received, memory_order_relaxed);
     out->bytes_received = atomic_load_explicit(&producer->bytes_received, memory_order_relaxed);
+    out->target_bitrate_bps = producer_bitrate_limit(producer, rtc_time_ms());
     return RTC_OK;
 }
 
@@ -136,9 +201,19 @@ int rtc_producer_request_keyframe(rtc_producer_t *producer) {
         return RTC_OK;
     if (!atomic_compare_exchange_strong(&producer->last_keyframe_request_ms, &previous, now))
         return RTC_OK;
+    uint8_t feedback = atomic_load(&producer->feedback);
+    if (!(feedback & (RTC_SDP_FB_PLI | RTC_SDP_FB_FIR))) {
+        RTC_LOG_WARN("Producer keyframe feedback was not negotiated");
+        return RTC_ERR_INVALID;
+    }
     uint8_t packet[64 + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
     size_t len = 0;
-    int rc = rtc_rtcp_build_pli(packet, sizeof(packet), &len, 1, producer->rtp.ssrc);
+    int rc = feedback & RTC_SDP_FB_PLI
+                 ? rtc_rtcp_build_pli(packet, sizeof(packet), &len, producer->rtcp.ssrc,
+                                      producer->rtp.ssrc)
+                 : rtc_rtcp_build_fir(packet, sizeof(packet), &len, producer->rtcp.ssrc,
+                                      producer->rtp.ssrc,
+                                      (uint8_t)atomic_fetch_add(&producer->fir_sequence, 1));
     if (rc != RTC_OK)
         return rc;
     return rtc_transport_send_rtcp(producer->transport, packet, &len, sizeof(packet));
@@ -174,6 +249,8 @@ void rtc_producer_remove_consumer(rtc_producer_t *producer, rtc_consumer_t *cons
         }
     }
     rtc_mutex_unlock(&producer->consumers_mutex);
+    if (atomic_load(&producer->feedback) & RTC_SDP_FB_REMB)
+        (void)rtc_producer_update_bitrate(producer);
 }
 
 void rtc_producer_on_rtp(rtc_producer_t *producer, const rtc_rtp_packet_t *pkt) {
@@ -209,4 +286,6 @@ void rtc_producer_on_rtp(rtc_producer_t *producer, const rtc_rtp_packet_t *pkt) 
             rtc_consumer_on_producer_rtp(*slot, pkt);
     }
     rtc_mutex_unlock(&producer->consumers_mutex);
+    if (atomic_load(&producer->feedback) & RTC_SDP_FB_REMB)
+        (void)rtc_producer_update_bitrate(producer);
 }

@@ -7,7 +7,7 @@ add_library(mrtc_routing STATIC
 )
 target_include_directories(mrtc_routing
     PUBLIC  include
-    PRIVATE src
+    PRIVATE src ${PROJECT_SOURCE_DIR}/rtc/src
 )
 target_link_libraries(mrtc_routing PUBLIC mrtc)
 mrtc_set_warnings(mrtc_routing)

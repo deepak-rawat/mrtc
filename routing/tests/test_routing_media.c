@@ -10,6 +10,7 @@
 #include <rtc/rtc_consumer.h>
 #include <rtc/rtc_rtcp.h>
 #include "test_harness.h"
+#include "rtc_consumer_internal.h"
 
 #include <stdatomic.h>
 
@@ -71,6 +72,79 @@ static rtc_producer_options_t video_producer_options(void) {
     opts.rtp.codecs[0].clock_rate = 90000;
     return opts;
 }
+
+#ifdef MRTC_ENABLE_RATE_CONTROL
+typedef struct {
+    rtc_consumer_t *consumer;
+    const uint8_t *wire;
+    size_t len;
+    int result;
+} feedback_args_t;
+
+static void consume_report_on_worker(void *user) {
+    feedback_args_t *args = user;
+    args->result = rtc_consumer_handle_rtcp(args->consumer, args->wire, args->len);
+}
+
+TEST(receiver_reports_drive_bounded_consumer_estimates) {
+    test_env_t env;
+    ASSERT(make_env(&env));
+    rtc_producer_options_t options = video_producer_options();
+    rtc_producer_t *producer = rtc_transport_produce(env.transport, &options);
+    ASSERT(producer != NULL);
+    rtc_consumer_t *consumer =
+        rtc_transport_consume(env.transport, &(rtc_consumer_options_t){.producer = producer});
+    ASSERT(consumer != NULL);
+    rtc_rtp_parameters_t params;
+    ASSERT_EQ(rtc_consumer_get_rtp_parameters(consumer, &params), RTC_OK);
+    rtc_rtcp_stats_t report_stats = {.ssrc = 1,
+                                     .remote_ssrc = params.ssrc,
+                                     .first_packet = false,
+                                     .packets_expected = 100,
+                                     .packets_received = 80,
+                                     .packets_lost = 20};
+    rtc_rtcp_packet_t report;
+    ASSERT_EQ(rtc_rtcp_build_rr(&report, &report_stats), RTC_OK);
+    feedback_args_t args = {.consumer = consumer, .wire = report.buf, .len = report.buf_len};
+    ASSERT_EQ(rtc_transport_invoke(env.transport, consume_report_on_worker, &args), RTC_OK);
+    ASSERT_EQ(args.result, RTC_OK);
+    rtc_consumer_stats_t stats;
+    ASSERT_EQ(rtc_consumer_get_stats(consumer, &stats), RTC_OK);
+    ASSERT_EQ(stats.estimated_bitrate_bps, 400000);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(consumer, rtc_time_ms() + 10001), UINT32_MAX);
+    report_stats.packets_expected = report_stats.packets_received = 200;
+    report_stats.packets_lost = 0;
+    ASSERT_EQ(rtc_rtcp_build_rr(&report, &report_stats), RTC_OK);
+    ASSERT_EQ(rtc_transport_invoke(env.transport, consume_report_on_worker, &args), RTC_OK);
+    ASSERT_EQ(args.result, RTC_OK);
+    ASSERT_EQ(rtc_consumer_get_stats(consumer, &stats), RTC_OK);
+    ASSERT_EQ(stats.estimated_bitrate_bps, 420000);
+    rtc_consumer_t *slower =
+        rtc_transport_consume(env.transport, &(rtc_consumer_options_t){.producer = producer});
+    ASSERT(slower != NULL);
+    ASSERT_EQ(rtc_consumer_get_rtp_parameters(slower, &params), RTC_OK);
+    uint8_t remb[64];
+    size_t remb_len;
+    ASSERT_EQ(rtc_rtcp_build_remb(remb, sizeof(remb), &remb_len, 1, params.ssrc, 128000), RTC_OK);
+    args.consumer = slower;
+    args.wire = remb;
+    args.len = remb_len;
+    ASSERT_EQ(rtc_transport_invoke(env.transport, consume_report_on_worker, &args), RTC_OK);
+    ASSERT_EQ(args.result, RTC_OK);
+    rtc_producer_stats_t producer_stats;
+    ASSERT_EQ(rtc_producer_get_stats(producer, &producer_stats), RTC_OK);
+    ASSERT_EQ(producer_stats.target_bitrate_bps, 128000);
+    rtc_consumer_pause(slower);
+    ASSERT_EQ(rtc_producer_get_stats(producer, &producer_stats), RTC_OK);
+    ASSERT_EQ(producer_stats.target_bitrate_bps, 420000);
+    rtc_consumer_destroy(slower);
+    rtc_consumer_pause(consumer);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(consumer, rtc_time_ms()), UINT32_MAX);
+    rtc_consumer_destroy(consumer);
+    rtc_producer_destroy(producer);
+    close_env(&env);
+}
+#endif
 
 TEST(producer_create_stats) {
     test_env_t env;
@@ -589,6 +663,9 @@ TEST(routed_loss_wrap_and_bounded_retransmission) {
 int main(void) {
     rtc_init();
     RUN_TEST(producer_create_stats);
+#ifdef MRTC_ENABLE_RATE_CONTROL
+    RUN_TEST(receiver_reports_drive_bounded_consumer_estimates);
+#endif
     RUN_TEST(consumer_create_pause_resume);
     RUN_TEST(media_rejects_closed_inputs);
     RUN_TEST(consumer_rejects_malformed_feedback);

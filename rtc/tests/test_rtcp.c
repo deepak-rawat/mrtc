@@ -81,6 +81,30 @@ TEST(rtcp_build_sr) {
            pkt.sr.sender_oct_count);
 }
 
+TEST(rtcp_remb_bounds_and_quantization) {
+    uint8_t wire[64];
+    size_t length;
+    const uint32_t rates[] = {0, 128000, 800000, UINT32_MAX};
+    for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
+        ASSERT_EQ(rtc_rtcp_build_remb(wire, sizeof(wire), &length, 1, 0x12345678, rates[i]),
+                  RTC_OK);
+        rtc_rtcp_remb_t parsed;
+        ASSERT_EQ(rtc_rtcp_parse_remb(&parsed, wire, length), RTC_OK);
+        ASSERT_EQ(parsed.media_ssrc, 0x12345678);
+        ASSERT(parsed.bitrate_bps <= rates[i]);
+        ASSERT(rates[i] - parsed.bitrate_bps < 16384);
+        ASSERT_EQ(rtc_rtcp_parse_remb(&parsed, wire, length - 1), RTC_ERR_INVALID);
+    }
+    rtc_rtcp_remb_t parsed;
+    wire[16] = 2;
+    ASSERT_EQ(rtc_rtcp_parse_remb(&parsed, wire, length), RTC_ERR_INVALID);
+    wire[16] = 1;
+    wire[17] = 0xfc;
+    wire[18] = wire[19] = 0;
+    ASSERT_EQ(rtc_rtcp_parse_remb(&parsed, wire, length), RTC_OK);
+    ASSERT_EQ(parsed.bitrate_bps, 0);
+}
+
 TEST(rtcp_feedback_is_compound_without_reduced_size) {
     uint8_t wire[256], original[64];
     size_t length;
@@ -342,6 +366,7 @@ int main(void) {
     rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(rtcp_build_sr);
+    RUN_TEST(rtcp_remb_bounds_and_quantization);
     RUN_TEST(rtcp_feedback_is_compound_without_reduced_size);
     RUN_TEST(rtcp_compound_cname_and_report_boundaries);
     RUN_TEST(rtcp_interval_loss_and_late_rollover);

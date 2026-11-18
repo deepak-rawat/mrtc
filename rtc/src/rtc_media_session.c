@@ -121,6 +121,15 @@ static void session_handle_nack(rtc_media_session_t *s, const uint8_t *buf, size
  * is consumed, so they share routing. */
 static void session_handle_psfb(rtc_media_session_t *s, uint8_t fmt, const uint8_t *buf,
                                 size_t len) {
+    if (fmt == 15) {
+        rtc_rtcp_remb_t feedback;
+        if (rtc_rtcp_parse_remb(&feedback, buf, len) == RTC_OK) {
+            rtc_rtp_send_stream_t *sender = session_sender(s, feedback.media_ssrc);
+            if (sender)
+                rtc_rtp_send_stream_on_remb(sender, feedback.bitrate_bps);
+        }
+        return;
+    }
     uint32_t media_ssrc;
     if (fmt == RTCP_FMT_PLI) {
         rtc_rtcp_pli_t pli;

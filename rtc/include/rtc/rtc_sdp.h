@@ -48,6 +48,7 @@ typedef struct {
 #define RTC_SDP_FB_PLI          0x02
 #define RTC_SDP_FB_FIR          0x04
 #define RTC_SDP_FB_TRANSPORT_CC 0x08
+#define RTC_SDP_FB_REMB         0x10
 
 typedef struct {
     uint8_t id; /* 1..14 */

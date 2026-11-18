@@ -343,7 +343,7 @@ static int subscribe(rtc_sfu_t *sfu, const char *subscriber, sfu_session_t *publ
         s->description.media[index].extmap_count = 0;
         s->description.media[index].rtcp_feedback =
             s->description.media[index].media_type == RTC_MEDIA_VIDEO
-                ? RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR
+                ? RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR | RTC_SDP_FB_REMB
                 : 0;
         if (s->subscriptions[index] != publisher->producers[i]) {
             rtc_consumer_destroy(s->consumers[index]);
@@ -544,8 +544,11 @@ static int publish(rtc_sfu_t *sfu, const rtc_sfu_command_t *command) {
         }
         s->description.media[i].direction = media_sending(m) ? 2 : 3;
         s->description.media[i].rtcp_feedback &=
-            m->media_type == RTC_MEDIA_VIDEO ? RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR
-                                             : 0;
+            m->media_type == RTC_MEDIA_VIDEO
+                ? RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR | RTC_SDP_FB_REMB
+                : 0;
+        if (s->producers[i])
+            rtc_producer_set_rtcp_feedback(s->producers[i], s->description.media[i].rtcp_feedback);
         s->description.media[i].extmap_count = 0;
         if (twcc_id && rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC) == twcc_id) {
             rtc_sdp_media_add_extmap(&s->description.media[i], twcc_id, RTC_EXT_URI_TRANSPORT_CC);

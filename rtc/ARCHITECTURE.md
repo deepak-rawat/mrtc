@@ -99,8 +99,10 @@ Internal / private helpers (`rtc_ice.h`, `rtc_dtls.h`, `rtc_srtp.h`,
 `rtc_rate_control.h`, `rtc_twcc_sender.h`, `rtc_twcc_receiver.h`, `rtc_bwe.h`,
 `rtc_packet_io.h`, `rtc_poller.h`, `rtc_timer_sched.h`) live in `src/`. The
 congestion-control primitives (NACK buffer, AIMD rate control, TWCC, BWE) are
-encapsulated by the transport and the send/recv streams, so consumers never
-name them directly.
+encapsulated by the transport and the send/recv streams. Routing additionally
+reuses the internal AIMD controller for downstream receiver-report estimates,
+instead of duplicating its algorithm; this is a private build dependency, not
+an additional public protocol API.
 
 ## Module Details
 

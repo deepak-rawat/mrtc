@@ -145,6 +145,7 @@ static void bitrate_estimate(uint32_t bitrate, void *user) {
 
 static void received_feedback(const uint8_t *data, size_t len, void *user) {
     endpoint_t *endpoint = user;
+    rtc_media_session_handle_rtcp(&endpoint->pc->media_session, data, len);
     size_t offset = 0;
     while (len - offset >= 4) {
         size_t size = (((size_t)data[offset + 2] << 8) | data[offset + 3]) * 4 + 4;
@@ -318,6 +319,25 @@ TEST(sfu_live_tracks_restart_sctp_and_publisher_feedback) {
     rtc_consumer_t *consumer = subscription->consumers[0];
     rtc_rtp_parameters_t original;
     ASSERT_EQ(rtc_consumer_get_rtp_parameters(consumer, &original), RTC_OK);
+    uint8_t bitrate_feedback[64 + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
+    size_t bitrate_feedback_len;
+    int previous_target = rtc_rtp_sender_get_target_bitrate(sender);
+    ASSERT(previous_target == 0 || previous_target > 128);
+    ASSERT_EQ(rtc_rtcp_build_remb(bitrate_feedback, sizeof(bitrate_feedback), &bitrate_feedback_len,
+                                  1, original.ssrc, 128000),
+              RTC_OK);
+    ASSERT_EQ(rtc_transport_send_rtcp(subscriber.pc->runtime_transport, bitrate_feedback,
+                                      &bitrate_feedback_len, sizeof(bitrate_feedback)),
+              RTC_OK);
+    deadline = rtc_time_ms() + 3000;
+    while (rtc_time_ms() < deadline && (rtc_rtp_sender_get_target_bitrate(sender) == 0 ||
+                                        rtc_rtp_sender_get_target_bitrate(sender) > 128)) {
+        ASSERT(pump(&fixture));
+        ASSERT_EQ(rtc_rtp_sender_send(sender, payload, sizeof(payload), 3000, true), RTC_OK);
+        SLEEP_MS(10);
+    }
+    ASSERT(rtc_rtp_sender_get_target_bitrate(sender) > 0);
+    ASSERT(rtc_rtp_sender_get_target_bitrate(sender) <= 128);
 
     rtc_rtp_transceiver_set_direction(video, RTC_DIR_INACTIVE);
     ASSERT(offer(&fixture, &publisher));

@@ -212,6 +212,11 @@ Established mappings remain immutable. Active RTP sections require rtcp-mux;
 rejected RTP sections remain rejected/inactive. Feedback and RTP extension IDs
 in answers are intersected with the offer rather than independently assigned.
 
+Negotiated single-source REMB constrains the named video sender's target used
+by the native encoder pipeline; unrelated/unnegotiated bounds are ignored.
+Limits expire after ten seconds without refresh. A zero limit pauses that RTP
+sender's wire output without stopping audio or signaling.
+
 `rtc_peer_connection_restart_ice()` supports an active connection. The
 application exchanges the new ICE credentials through another offer/answer
 cycle; a successful restart preserves the SCTP association and RTP streams.

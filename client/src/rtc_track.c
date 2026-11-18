@@ -202,7 +202,7 @@ void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc
     m->ssrc = rtc_rtp_send_stream_ssrc(t->sender.stream);
     m->direction = t->direction;
     if (m->media_type == RTC_MEDIA_VIDEO)
-        m->rtcp_feedback = RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR;
+        m->rtcp_feedback = RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR | RTC_SDP_FB_REMB;
 
     /* Advertise the MID extension so the peer tags inbound RTP with its MID,
      * letting us route bundled m-sections that share a payload type. */

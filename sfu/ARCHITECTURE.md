@@ -73,6 +73,11 @@ creates new epoch-scoped sessions.
 - Negotiated publisher TWCC drives real transport estimates for the client
   encoder path.
 - Subscriber-wide bitrate allocation and simulcast selection are not provided.
+- Negotiated single-source REMB and receiver-report AIMD estimates propagate
+  the lowest fresh active-subscriber video bound upstream. This deliberately
+  chooses common source quality rather than independent subscriber layers;
+  audio remains independent. A real encrypted feedback test checks the
+  downstream-to-original SSRC mapping and resulting publisher send target.
 - Candidate validation/classification is shared with the RTC runtime. Valid
   mDNS hosts are deferred to authenticated peer-reflexive checks; TCP
   alternatives cannot pair with UDP listeners. Malformed candidates fail.

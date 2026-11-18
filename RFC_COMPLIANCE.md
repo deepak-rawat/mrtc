@@ -27,6 +27,7 @@ changes there alone do not change client or SFU connectivity.
 | RFC 8285 — RTP extensions | One-byte extension form, MID and transport-cc negotiation | Two-byte form and encrypted extensions are not implemented |
 | RFC 4585 / RFC 5104 — feedback | NACK, PLI and FIR build/parse/routing; receiver loss feedback and bounded retransmission history | No RTX/FEC implementation |
 | Transport-wide CC draft / GCC | Transport-wide sequence numbers, arrival feedback and delay/loss estimation | This is not a claim to implement the different RFC 8888 wire format |
+| REMB draft — `goog-remb` | Negotiated single-source bitrate feedback; conservative minimum fresh-consumer video bound mapped to the original source; native encoder target constraints | Not a subscriber-wide allocator, pacer or simulcast selector; not an RFC 8888 implementation |
 | RFC 7741 — VP8 payload | Fragmentation, bounded sequence-aware assembly, PictureID lengths and keyframe detection | No temporal-layer scheduling or arbitrary cross-frame reorder buffer |
 | RFC 7587 — Opus payload | Opus at 48 kHz, one encoded audio frame per packet | Codec format-parameter coverage and in-band FEC negotiation remain limited |
 | RFC 8831 / RFC 8832 / RFC 8261 — data channels | usrsctp SCTP-over-DTLS, DCEP, stream resets, reliable/partial-reliable delivery and backpressure | Application message schemas remain application-specific |
