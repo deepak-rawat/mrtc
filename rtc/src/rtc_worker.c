@@ -124,7 +124,7 @@ static void *worker_thread_fn(void *arg) {
 
         /* Drain ready sockets. The io table is loop-thread-only. */
         for (int e = 0; e < n; e++) {
-            if (!(evs[e].events & RTC_POLLER_EV_READ))
+            if (!(evs[e].events & (RTC_POLLER_EV_READ | RTC_POLLER_EV_WRITE | RTC_POLLER_EV_ERROR)))
                 continue;
             for (int i = 0; i < worker->io_count; i++) {
                 if (worker->io[i].fd == evs[e].fd) {
@@ -367,6 +367,7 @@ typedef struct {
     rtc_socket_t fd;
     rtc_worker_io_fn fn;
     void *user;
+    int events;
     int rc;
 } worker_io_add_ctx_t;
 
@@ -377,7 +378,12 @@ static void worker_do_add_io(void *user) {
         ctx->rc = RTC_ERR_NOMEM;
         return;
     }
-    ctx->rc = rtc_poller_add(&worker->poller, ctx->fd);
+    for (int i = 0; i < worker->io_count; i++)
+        if (worker->io[i].fd == ctx->fd) {
+            ctx->rc = RTC_ERR_INVALID;
+            return;
+        }
+    ctx->rc = rtc_poller_add_events(&worker->poller, ctx->fd, ctx->events);
     if (ctx->rc != RTC_OK)
         return;
     worker->io[worker->io_count].fd = ctx->fd;
@@ -387,13 +393,35 @@ static void worker_do_add_io(void *user) {
 }
 
 int rtc_worker_add_io(rtc_worker_t *worker, rtc_socket_t fd, rtc_worker_io_fn fn, void *user) {
+    return rtc_worker_add_io_events(worker, fd, RTC_POLLER_EV_READ, fn, user);
+}
+
+int rtc_worker_add_io_events(rtc_worker_t *worker, rtc_socket_t fd, int events, rtc_worker_io_fn fn,
+                             void *user) {
     if (!worker || fd == RTC_INVALID_SOCKET || !fn)
         return RTC_ERR_INVALID;
-    worker_io_add_ctx_t ctx = {worker, fd, fn, user, RTC_OK};
+    worker_io_add_ctx_t ctx = {worker, fd, fn, user, events, RTC_OK};
     rtc_worker_invoke(worker, worker_do_add_io, &ctx);
     return ctx.rc;
 }
 
+static void worker_do_update_io(void *user) {
+    worker_io_add_ctx_t *ctx = user;
+    ctx->rc = RTC_ERR_INVALID;
+    for (int i = 0; i < ctx->worker->io_count; i++)
+        if (ctx->worker->io[i].fd == ctx->fd) {
+            ctx->rc = rtc_poller_update(&ctx->worker->poller, ctx->fd, ctx->events);
+            return;
+        }
+}
+
+int rtc_worker_update_io(rtc_worker_t *worker, rtc_socket_t fd, int events) {
+    if (!worker || fd == RTC_INVALID_SOCKET)
+        return RTC_ERR_INVALID;
+    worker_io_add_ctx_t ctx = {.worker = worker, .fd = fd, .events = events};
+    int rc = rtc_worker_invoke(worker, worker_do_update_io, &ctx);
+    return rc == RTC_OK ? ctx.rc : rc;
+}
 typedef struct {
     rtc_worker_t *worker;
     rtc_socket_t fd;

@@ -11,6 +11,7 @@
 #define RTC_WORKER_INTERNAL_H
 
 #include "rtc/rtc_worker.h"
+#include "rtc_poller.h"
 
 /* Task executed on the worker's loop thread. */
 typedef void (*rtc_worker_task_fn)(void *user);
@@ -36,6 +37,10 @@ int rtc_worker_post(rtc_worker_t *worker, rtc_worker_task_fn fn, void *user);
  */
 int rtc_worker_add_io(rtc_worker_t *worker, rtc_socket_t fd, rtc_worker_io_fn fn, void *user);
 int rtc_worker_remove_io(rtc_worker_t *worker, rtc_socket_t fd);
+/* Stream users enable write readiness only while connecting or backpressured. */
+int rtc_worker_add_io_events(rtc_worker_t *worker, rtc_socket_t fd, int events, rtc_worker_io_fn fn,
+                             void *user);
+int rtc_worker_update_io(rtc_worker_t *worker, rtc_socket_t fd, int events);
 
 /* True when called from the worker's loop thread. */
 bool rtc_worker_on_loop_thread(rtc_worker_t *worker);

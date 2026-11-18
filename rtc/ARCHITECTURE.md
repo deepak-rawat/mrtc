@@ -114,6 +114,9 @@ consumers.
   task queue. It drains registered sockets, fires timers, and runs
   marshalled control / teardown work, so all per-transport protocol
   state (ICE, DTLS, SRTP) stays single-threaded without per-object locks.
+- Internal stream users can register/update read/write interests on that same
+  worker. Write readiness is disabled after draining pending writes so an idle
+  connected stream does not spin the event loop; socket errors also dispatch.
 - **`rtc_listener_t`** — owns a UDP packet I/O socket and demux maps.
   One listener can serve many logical transports on the same local port.
 - **`rtc_transport_t`** — one logical ICE / DTLS / SRTP endpoint over a

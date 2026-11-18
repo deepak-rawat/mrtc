@@ -55,6 +55,28 @@ static rtc_socket_t make_udp_loopback(rtc_addr_t *addr_out) {
     return s;
 }
 
+TEST(poller_write_interest_can_be_disabled) {
+    rtc_poller_t poller;
+    ASSERT_EQ(rtc_poller_init(&poller), RTC_OK);
+    rtc_socket_t socket = make_udp_loopback(NULL);
+    ASSERT(socket != RTC_INVALID_SOCKET);
+    ASSERT_EQ(rtc_poller_add_events(&poller, socket, RTC_POLLER_EV_WRITE), RTC_OK);
+    rtc_poller_event_t events[4];
+    int count = rtc_poller_wait(&poller, events, 4, 1000);
+    ASSERT(count > 0);
+    ASSERT_EQ(events[0].fd, socket);
+    ASSERT(events[0].events & RTC_POLLER_EV_WRITE);
+    ASSERT_EQ(rtc_poller_update(&poller, socket, RTC_POLLER_EV_READ), RTC_OK);
+    ASSERT_EQ(rtc_poller_wait(&poller, events, 4, 30), 0);
+    ASSERT_EQ(rtc_poller_update(&poller, socket, 0), RTC_ERR_INVALID);
+    ASSERT_EQ(rtc_poller_update(&poller, socket, RTC_POLLER_EV_WRITE), RTC_OK);
+    ASSERT(rtc_poller_wait(&poller, events, 4, 1000) > 0);
+    ASSERT_EQ(rtc_poller_remove(&poller, socket), RTC_OK);
+    ASSERT_EQ(rtc_poller_wait(&poller, events, 4, 30), 0);
+    rtc_close_socket(socket);
+    rtc_poller_close(&poller);
+}
+
 TEST(poller_init_close) {
     rtc_poller_t p;
     int rc = rtc_poller_init(&p);
@@ -270,6 +292,7 @@ int main(void) {
     rtc_init();
 
     RUN_TEST(poller_init_close);
+    RUN_TEST(poller_write_interest_can_be_disabled);
     RUN_TEST(poller_add_remove);
     RUN_TEST(poller_wait_timeout);
     RUN_TEST(poller_wait_reports_ready_fd);

@@ -22,9 +22,9 @@
  * per-peer sockets or a TCP listener to the same poller. */
 #define RTC_POLLER_MAX_EVENTS 64
 
-/* Event flags reported in rtc_poller_event_t::events. Bitmask so a future
- * write-readiness flag can be added without breaking the API. */
-#define RTC_POLLER_EV_READ 0x01
+#define RTC_POLLER_EV_READ  0x01
+#define RTC_POLLER_EV_WRITE 0x02
+#define RTC_POLLER_EV_ERROR 0x04
 
 typedef struct {
     rtc_socket_t fd;
@@ -46,6 +46,7 @@ typedef struct {
 #else /* Windows / fallback: select + wake socket */
 typedef struct {
     rtc_socket_t fds[RTC_POLLER_MAX_EVENTS];
+    int interests[RTC_POLLER_MAX_EVENTS];
     int fd_count;
     rtc_socket_t wake_sock;        /* receives wake "ping" packets */
     rtc_addr_t wake_addr;          /* bound address of wake_sock */
@@ -58,12 +59,14 @@ int rtc_poller_init(rtc_poller_t *p);
 
 /* Add a socket for read-readiness monitoring. */
 int rtc_poller_add(rtc_poller_t *p, rtc_socket_t sock);
+int rtc_poller_add_events(rtc_poller_t *p, rtc_socket_t sock, int events);
+int rtc_poller_update(rtc_poller_t *p, rtc_socket_t sock, int events);
 
 /* Remove a socket. */
 int rtc_poller_remove(rtc_poller_t *p, rtc_socket_t sock);
 
 /*
- * Wait for read readiness on any registered socket. Wake events are
+ * Wait for requested readiness or socket errors. Wake events are
  * drained internally and do NOT appear in events[].
  *
  *   events    - caller-allocated array of at least max_events entries.

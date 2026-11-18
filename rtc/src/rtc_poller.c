@@ -8,6 +8,14 @@
 
 #include <string.h>
 
+static bool valid_interests(int events) {
+    return events && !(events & ~(RTC_POLLER_EV_READ | RTC_POLLER_EV_WRITE));
+}
+
+int rtc_poller_add(rtc_poller_t *p, rtc_socket_t sock) {
+    return rtc_poller_add_events(p, sock, RTC_POLLER_EV_READ);
+}
+
 #ifdef __linux__ /* epoll + eventfd backend */
 
 #  include <sys/eventfd.h>
@@ -42,12 +50,23 @@ int rtc_poller_init(rtc_poller_t *p) {
     return RTC_OK;
 }
 
-int rtc_poller_add(rtc_poller_t *p, rtc_socket_t sock) {
+static int poller_set(rtc_poller_t *p, rtc_socket_t sock, int events, int operation) {
+    if (!p || sock == RTC_INVALID_SOCKET || !valid_interests(events))
+        return RTC_ERR_INVALID;
     struct epoll_event ev;
     memset(&ev, 0, sizeof(ev));
-    ev.events = EPOLLIN;
+    ev.events = ((events & RTC_POLLER_EV_READ) ? EPOLLIN : 0) |
+                ((events & RTC_POLLER_EV_WRITE) ? EPOLLOUT : 0);
     ev.data.fd = sock;
-    return (epoll_ctl(p->epoll_fd, EPOLL_CTL_ADD, sock, &ev) == 0) ? RTC_OK : RTC_ERR_GENERIC;
+    return epoll_ctl(p->epoll_fd, operation, sock, &ev) == 0 ? RTC_OK : RTC_ERR_GENERIC;
+}
+
+int rtc_poller_add_events(rtc_poller_t *p, rtc_socket_t sock, int events) {
+    return poller_set(p, sock, events, EPOLL_CTL_ADD);
+}
+
+int rtc_poller_update(rtc_poller_t *p, rtc_socket_t sock, int events) {
+    return poller_set(p, sock, events, EPOLL_CTL_MOD);
 }
 
 int rtc_poller_remove(rtc_poller_t *p, rtc_socket_t sock) {
@@ -76,7 +95,9 @@ int rtc_poller_wait(rtc_poller_t *p, rtc_poller_event_t *events, int max_events,
         if (out >= max_events)
             break;
         events[out].fd = evs[i].data.fd;
-        events[out].events = (evs[i].events & EPOLLIN) ? RTC_POLLER_EV_READ : 0;
+        events[out].events = ((evs[i].events & EPOLLIN) ? RTC_POLLER_EV_READ : 0) |
+                             ((evs[i].events & EPOLLOUT) ? RTC_POLLER_EV_WRITE : 0) |
+                             ((evs[i].events & (EPOLLERR | EPOLLHUP)) ? RTC_POLLER_EV_ERROR : 0);
         out++;
     }
     return out;
@@ -125,16 +146,31 @@ int rtc_poller_init(rtc_poller_t *p) {
     return RTC_OK;
 }
 
-int rtc_poller_add(rtc_poller_t *p, rtc_socket_t sock) {
-    struct kevent ev;
-    EV_SET(&ev, (uintptr_t)sock, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, NULL);
-    return (kevent(p->kq_fd, &ev, 1, NULL, 0, NULL) == 0) ? RTC_OK : RTC_ERR_GENERIC;
+static int poller_set(rtc_poller_t *p, rtc_socket_t sock, int events, bool add) {
+    if (!p || sock == RTC_INVALID_SOCKET || !valid_interests(events))
+        return RTC_ERR_INVALID;
+    struct kevent changes[2];
+    unsigned flags = add ? EV_ADD : 0;
+    EV_SET(&changes[0], (uintptr_t)sock, EVFILT_READ,
+           flags | ((events & RTC_POLLER_EV_READ) ? EV_ENABLE : EV_DISABLE), 0, 0, NULL);
+    EV_SET(&changes[1], (uintptr_t)sock, EVFILT_WRITE,
+           flags | ((events & RTC_POLLER_EV_WRITE) ? EV_ENABLE : EV_DISABLE), 0, 0, NULL);
+    return kevent(p->kq_fd, changes, 2, NULL, 0, NULL) == 0 ? RTC_OK : RTC_ERR_GENERIC;
+}
+
+int rtc_poller_add_events(rtc_poller_t *p, rtc_socket_t sock, int events) {
+    return poller_set(p, sock, events, true);
+}
+
+int rtc_poller_update(rtc_poller_t *p, rtc_socket_t sock, int events) {
+    return poller_set(p, sock, events, false);
 }
 
 int rtc_poller_remove(rtc_poller_t *p, rtc_socket_t sock) {
-    struct kevent ev;
-    EV_SET(&ev, (uintptr_t)sock, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-    return (kevent(p->kq_fd, &ev, 1, NULL, 0, NULL) == 0) ? RTC_OK : RTC_ERR_GENERIC;
+    struct kevent changes[2];
+    EV_SET(&changes[0], (uintptr_t)sock, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+    EV_SET(&changes[1], (uintptr_t)sock, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+    return kevent(p->kq_fd, changes, 2, NULL, 0, NULL) == 0 ? RTC_OK : RTC_ERR_GENERIC;
 }
 
 int rtc_poller_wait(rtc_poller_t *p, rtc_poller_event_t *events, int max_events, int timeout_ms) {
@@ -165,7 +201,9 @@ int rtc_poller_wait(rtc_poller_t *p, rtc_poller_event_t *events, int max_events,
         if (out >= max_events)
             break;
         events[out].fd = (rtc_socket_t)evs[i].ident;
-        events[out].events = (evs[i].filter == EVFILT_READ) ? RTC_POLLER_EV_READ : 0;
+        events[out].events = ((evs[i].filter == EVFILT_READ) ? RTC_POLLER_EV_READ : 0) |
+                             ((evs[i].filter == EVFILT_WRITE) ? RTC_POLLER_EV_WRITE : 0) |
+                             ((evs[i].flags & (EV_EOF | EV_ERROR)) ? RTC_POLLER_EV_ERROR : 0);
         out++;
     }
     return out;
@@ -240,6 +278,7 @@ static int wake_pair_init(rtc_poller_t *p) {
      * UDP packet to loopback effectively never blocks. */
 
     /* Register wake_sock so wait() reports it. */
+    p->interests[p->fd_count] = RTC_POLLER_EV_READ;
     p->fds[p->fd_count++] = p->wake_sock;
     return RTC_OK;
 }
@@ -252,17 +291,39 @@ int rtc_poller_init(rtc_poller_t *p) {
     return RTC_OK;
 }
 
-int rtc_poller_add(rtc_poller_t *p, rtc_socket_t sock) {
+int rtc_poller_add_events(rtc_poller_t *p, rtc_socket_t sock, int events) {
+    if (!p || sock == RTC_INVALID_SOCKET || !valid_interests(events))
+        return RTC_ERR_INVALID;
+#  ifndef _WIN32
+    if (sock < 0 || sock >= FD_SETSIZE)
+        return RTC_ERR_INVALID;
+#  endif
     if (p->fd_count >= RTC_POLLER_MAX_EVENTS)
         return RTC_ERR_NOMEM;
+    for (int i = 0; i < p->fd_count; i++)
+        if (p->fds[i] == sock)
+            return RTC_ERR_INVALID;
+    p->interests[p->fd_count] = events;
     p->fds[p->fd_count++] = sock;
     return RTC_OK;
+}
+
+int rtc_poller_update(rtc_poller_t *p, rtc_socket_t sock, int events) {
+    if (!p || !valid_interests(events))
+        return RTC_ERR_INVALID;
+    for (int i = 0; i < p->fd_count; i++)
+        if (p->fds[i] == sock) {
+            p->interests[i] = events;
+            return RTC_OK;
+        }
+    return RTC_ERR_INVALID;
 }
 
 int rtc_poller_remove(rtc_poller_t *p, rtc_socket_t sock) {
     for (int i = 0; i < p->fd_count; i++) {
         if (p->fds[i] == sock) {
             p->fds[i] = p->fds[--p->fd_count];
+            p->interests[i] = p->interests[p->fd_count];
             return RTC_OK;
         }
     }
@@ -273,13 +334,19 @@ int rtc_poller_wait(rtc_poller_t *p, rtc_poller_event_t *events, int max_events,
     if (!events || max_events <= 0)
         return RTC_ERR_INVALID;
 
-    fd_set readfds;
+    fd_set readfds, writefds, errorfds;
     FD_ZERO(&readfds);
+    FD_ZERO(&writefds);
+    FD_ZERO(&errorfds);
 #  ifndef _WIN32
     int max_fd = 0;
 #  endif
     for (int i = 0; i < p->fd_count; i++) {
-        FD_SET(p->fds[i], &readfds);
+        if (p->interests[i] & RTC_POLLER_EV_READ)
+            FD_SET(p->fds[i], &readfds);
+        if (p->interests[i] & RTC_POLLER_EV_WRITE)
+            FD_SET(p->fds[i], &writefds);
+        FD_SET(p->fds[i], &errorfds);
 #  ifndef _WIN32
         if ((int)p->fds[i] > max_fd)
             max_fd = (int)p->fds[i];
@@ -294,16 +361,19 @@ int rtc_poller_wait(rtc_poller_t *p, rtc_poller_event_t *events, int max_events,
     }
 
 #  ifdef _WIN32
-    int n = select(0, &readfds, NULL, NULL, tvp); /* nfds ignored on Windows */
+    int n = select(0, &readfds, &writefds, &errorfds, tvp); /* nfds ignored on Windows */
 #  else
-    int n = select(max_fd + 1, &readfds, NULL, NULL, tvp);
+    int n = select(max_fd + 1, &readfds, &writefds, &errorfds, tvp);
 #  endif
     if (n < 0)
         return RTC_ERR_GENERIC;
 
     int out = 0;
     for (int i = 0; i < p->fd_count && n > 0; i++) {
-        if (!FD_ISSET(p->fds[i], &readfds))
+        int ready = (FD_ISSET(p->fds[i], &readfds) ? RTC_POLLER_EV_READ : 0) |
+                    (FD_ISSET(p->fds[i], &writefds) ? RTC_POLLER_EV_WRITE : 0) |
+                    (FD_ISSET(p->fds[i], &errorfds) ? RTC_POLLER_EV_ERROR : 0);
+        if (!ready)
             continue;
         n--;
         if (p->fds[i] == p->wake_sock) {
@@ -319,7 +389,7 @@ int rtc_poller_wait(rtc_poller_t *p, rtc_poller_event_t *events, int max_events,
         if (out >= max_events)
             break;
         events[out].fd = p->fds[i];
-        events[out].events = RTC_POLLER_EV_READ;
+        events[out].events = ready;
         out++;
     }
     return out;
