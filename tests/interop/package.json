@@ -2,7 +2,9 @@
   "name": "mrtc-real-ui-interop",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.18.0" },
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "scripts": {
     "install:browser": "node install-browser.mjs",
     "test": "node interop.mjs",
@@ -15,5 +17,6 @@
   },
   "devDependencies": {
     "playwright": "1.65.1"
-  }
+  },
+  "license": "MIT"
 }

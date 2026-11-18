@@ -293,5 +293,6 @@ Set `MRTC_BUILD_DESKTOP=OFF` to build native CLI/server tests without SDL.
 
 ## License
 
-Public domain / educational use. Dependencies retain their respective licenses.
+[MIT](LICENSE). Dependencies retain their respective licenses; the project
+license does not relicense bundled or linked third-party software.
 Not intended for production.

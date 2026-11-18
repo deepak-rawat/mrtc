@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.18.0" },
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
@@ -13,5 +15,6 @@
   "devDependencies": {
     "typescript": "^7.0.2",
     "vite": "^8.3.8"
-  }
+  },
+  "license": "MIT"
 }
