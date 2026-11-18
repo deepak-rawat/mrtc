@@ -26,6 +26,13 @@ Chromium under this harness's ignored `node_modules/.cache`, not system-wide.
 `PLAYWRIGHT_BROWSERS_PATH` overrides that location. Playwright remains pinned
 to 1.65.1.
 
+`MRTC_BROWSER=chromium|firefox|webkit` selects the engine (default Chromium).
+Install the selected runtime with `npx playwright install firefox`, for example.
+Only Chromium accepts `MRTC_CHROME_PATH`. Chromium and Firefox have separate CI
+jobs; configured jobs are not qualification results. WebKit runs are useful
+additional checks but do not certify actual Safari. All engines retain their
+normal privacy/autoplay behavior; no fake-media permission bypass is enabled.
+
 Fixtures reserve loopback ephemeral ports and terminate only their own child
 processes. No existing application or server is reused. Tests use explicit
 synthetic capture through the same Join control, not fake device fallbacks.

@@ -13,6 +13,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        configuration: [Debug, Release]
         include:
           - os: ubuntu-latest
             shell: bash
@@ -62,7 +64,7 @@ jobs:
             args+=("-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@4)")
             args+=("-DCMAKE_PREFIX_PATH=$(brew --prefix)")
           fi
-          cmake -S . -B build/ci -G Ninja -DCMAKE_BUILD_TYPE=Debug "${args[@]}"
+          cmake -S . -B build/ci -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.configuration }} "${args[@]}"
       - name: Build
         run: cmake --build build/ci --parallel 4
       - name: Test
@@ -87,7 +89,7 @@ jobs:
       - name: Configure
         run: >-
           cmake -S . -B build/asan -G Ninja
-          -DCMAKE_BUILD_TYPE=Debug -DMRTC_ENABLE_ASAN=ON
+          -DCMAKE_BUILD_TYPE=Debug -DMRTC_ENABLE_ASAN=ON -DMRTC_ENABLE_UBSAN=ON
       - name: Build
         run: cmake --build build/asan --parallel 4
       - name: Test
@@ -98,8 +100,13 @@ jobs:
   browser-interop:
     timeout-minutes: 15
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox]
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/mrtc-playwright
+      MRTC_BROWSER: ${{ matrix.browser }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -127,7 +134,7 @@ jobs:
         working-directory: tests/interop
         run: |
           npm ci
-          npx playwright install --with-deps chromium
+          npx playwright install --with-deps ${{ matrix.browser }}
       - name: Verify real UI, native interoperability, migration and churn
         working-directory: tests/interop
         env:
@@ -139,8 +146,61 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: browser-interop-failures
+          name: browser-interop-failures-${{ matrix.browser }}
           path: build/interop-failures
+          if-no-files-found: ignore
+
+  thread-sanitizer:
+    timeout-minutes: 10
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang ninja-build pkg-config libssl-dev \
+            libwebsockets-dev libcjson-dev
+      - name: Build concurrency fixtures
+        run: |
+          cmake -S . -B build/tsan -G Ninja -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_BUILD_TYPE=Debug -DMRTC_ENABLE_TSAN=ON \
+            -DMRTC_ENABLE_CLIENT_API=OFF -DMRTC_ENABLE_ROUTING_API=OFF
+          cmake --build build/tsan --parallel 4 --target test_worker test_network_runtime
+      - name: Test worker and transport concurrency
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build/tsan --output-on-failure --timeout 120 -R '^test_(worker|network_runtime)$'
+
+  parser-fuzz:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang ninja-build pkg-config libssl-dev \
+            libwebsockets-dev libcjson-dev
+      - name: Build instrumented parsers
+        run: |
+          cmake -S . -B build/fuzz -G Ninja -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_BUILD_TYPE=Debug -DMRTC_BUILD_FUZZERS=ON \
+            -DMRTC_ENABLE_ASAN=ON -DMRTC_ENABLE_UBSAN=ON \
+            -DMRTC_BUILD_TESTS=OFF -DMRTC_ENABLE_CLIENT_API=OFF \
+            -DMRTC_ENABLE_ROUTING_API=OFF
+          cmake --build build/fuzz --parallel 4 --target fuzz_packet_parsers
+      - name: Exercise parsers
+        run: |
+          mkdir -p build/fuzz/corpus build/fuzz/findings
+          build/fuzz/rtc/fuzz_packet_parsers build/fuzz/corpus \
+            -max_total_time=60 -max_len=8192 -print_final_stats=1 \
+            -artifact_prefix=build/fuzz/findings/
+      - name: Save reproducing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parser-fuzz-findings
+          path: build/fuzz/findings
           if-no-files-found: ignore
 
   headless-native:

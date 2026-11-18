@@ -39,6 +39,34 @@ are parallel release blockers, not substitutes for protocol correctness.
 
 ## Required qualification
 
+### Developer safety commands
+
+Configure a separate Debug build with `-DMRTC_ENABLE_ASAN=ON
+-DMRTC_ENABLE_UBSAN=ON`, then build and run CTest normally. UBSan failures are
+non-recovering. `-DMRTC_ENABLE_TSAN=ON` requires a separate build without ASan;
+the worker and network-runtime fixtures are the initial focused race checks.
+Do not treat these as complete concurrency coverage.
+
+For coverage-guided parser fuzzing, use a Clang distribution with libFuzzer
+(on macOS, Homebrew LLVM rather than Apple Command Line Tools):
+
+```sh
+cmake -S . -B build/fuzz -G Ninja -DCMAKE_C_COMPILER=clang \
+  -DCMAKE_BUILD_TYPE=Debug -DMRTC_BUILD_FUZZERS=ON \
+  -DMRTC_ENABLE_ASAN=ON -DMRTC_ENABLE_UBSAN=ON
+cmake --build build/fuzz --parallel 4 --target fuzz_packet_parsers
+mkdir -p build/fuzz/corpus build/fuzz/findings
+build/fuzz/rtc/fuzz_packet_parsers build/fuzz/corpus \
+  -max_total_time=60 -max_len=8192 -artifact_prefix=build/fuzz/findings/
+```
+
+The harness instruments the library as well as the entry point, exercising
+STUN, RTP/extensions, RTCP/feedback, SDP and ICE candidates. Retain reproducing
+inputs and add focused regressions for findings. This is parser fuzzing, not
+stateful transport fuzzing or an independent security audit.
+
+### Release evidence
+
 Release evidence must identify the commit, build profile, dependency versions,
 machine, network conditions, test command and result. A configured CI job is not
 evidence that it passed.
@@ -87,3 +115,22 @@ retirement remain required work; compound reports alone do not complete RTCP.
 Negotiated MID routing rejects unknown MIDs and ambiguous payload-type-only
 matches instead of binding a new source to the first stream. SR reception also
 dispatches its reception-report blocks to the sender feedback path.
+
+Local qualification so far:
+
+- Warning-free Release build and all 58 headless Release CTests passed.
+- All 58 headless ASan/UBSan CTests passed.
+- Focused TSan worker/network-runtime tests passed (2 tests).
+- A 30-second instrumented parser fuzz run executed 1,429,929 inputs without
+  findings. This duration is a smoke test, not a fuzzing completion threshold.
+- Complete Chromium/native interop passed, including mesh/SFU/AUTO, migration,
+  failure continuity and 120 same-process reconnect generations.
+- Web contracts, TypeScript build and 15 controller tests passed.
+- Firefox was installed but could not launch on this host: it reported
+  `Could not find profile folder` with both system and workspace-local temporary
+  profiles. Firefox qualification remains open; privacy settings were not
+  weakened to bypass the launch failure.
+
+CI now defines Debug/Release native matrices, combined ASan/UBSan, focused TSan,
+parser fuzzing and Chromium/Firefox jobs. Remote runs are not established by
+these local results.

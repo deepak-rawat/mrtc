@@ -14,6 +14,9 @@ endif()
 # Options
 option(MRTC_BUILD_TESTS "Build test executables" ON)
 option(MRTC_ENABLE_ASAN "Enable AddressSanitizer (Debug builds)" OFF)
+option(MRTC_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+option(MRTC_ENABLE_TSAN "Enable ThreadSanitizer (separate from ASan)" OFF)
+option(MRTC_BUILD_FUZZERS "Build Clang libFuzzer parser targets" OFF)
 option(MRTC_BUILD_DESKTOP "Build the SDL desktop application and UI tests" ON)
 
 # Feature toggles
@@ -32,9 +35,27 @@ function(mrtc_set_warnings target)
 endfunction()
 
 # AddressSanitizer
+if(MRTC_ENABLE_TSAN AND MRTC_ENABLE_ASAN)
+    message(FATAL_ERROR "ThreadSanitizer and AddressSanitizer require separate builds")
+endif()
+if((MRTC_ENABLE_ASAN OR MRTC_ENABLE_UBSAN OR MRTC_ENABLE_TSAN)
+        AND NOT CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    message(FATAL_ERROR "Requested sanitizers require a supported Clang or GCC toolchain")
+endif()
 if(MRTC_ENABLE_ASAN AND CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address)
+endif()
+if(MRTC_ENABLE_UBSAN)
+    add_compile_options(-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=undefined -fno-sanitize-recover=all)
+endif()
+if(MRTC_ENABLE_TSAN)
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=thread)
+endif()
+if(MRTC_BUILD_FUZZERS AND NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "MRTC_BUILD_FUZZERS requires Clang libFuzzer")
 endif()
 
 # Platform detection

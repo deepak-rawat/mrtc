@@ -106,11 +106,16 @@ export async function fixture(mode, extra = [], { withBrowser = true } = {}) {
             } catch { return false; }
         }, 'real server HTTP readiness');
         if (withBrowser) {
-            const { chromium } = await import('playwright');
-            browser = await chromium.launch({
+            const engine = process.env.MRTC_BROWSER || 'chromium';
+            if (!['chromium', 'firefox', 'webkit'].includes(engine))
+                throw Error(`Unsupported MRTC_BROWSER: ${engine}`);
+            if (engine !== 'chromium' && process.env.MRTC_CHROME_PATH)
+                throw Error('MRTC_CHROME_PATH only applies to Chromium');
+            const engines = await import('playwright');
+            browser = await engines[engine].launch({
             headless: true,
             ...(process.env.MRTC_CHROME_PATH ? { executablePath: process.env.MRTC_CHROME_PATH } : {}),
-            args: ['--no-sandbox', '--mute-audio'],
+            args: engine === 'chromium' ? ['--no-sandbox', '--mute-audio'] : [],
             });
         }
         const context = await browser?.newContext();
