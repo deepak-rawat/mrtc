@@ -109,6 +109,9 @@ typedef struct {
 
     /* Timing for report interval */
     uint64_t last_report_time; /* when we last sent SR/RR */
+    uint64_t next_report_time;
+    uint32_t report_target_bps;
+    size_t last_report_size;
 } rtc_rtcp_stats_t;
 
 /* Initialize RTCP statistics context */
@@ -138,7 +141,15 @@ const char *rtc_rtcp_cname(void);
 
 /* Build SR/RR followed by an SDES CNAME chunk (RFC 3550 section 6.1). */
 int rtc_rtcp_build_report(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats, bool sender);
-void rtc_rtcp_stats_report_sent(rtc_rtcp_stats_t *stats);
+int rtc_rtcp_stats_report_sent(rtc_rtcp_stats_t *stats);
+/* RFC 3550 A.7 interval calculation, including initial minimum/randomization. */
+uint32_t rtc_rtcp_interval_ms(uint32_t bandwidth_bps, size_t average_packet_bytes, unsigned members,
+                              unsigned senders, bool sending, bool initial, uint32_t random_value);
+/* Small one-camera/one-microphone connection timing model (four SSRCs).
+ * RTC_ERR_TIMEOUT means the report is not due yet. */
+int rtc_rtcp_report_due(rtc_rtcp_stats_t *stats, uint32_t media_target_bps, size_t report_size,
+                        uint64_t now_ms);
+int rtc_rtcp_build_bye(uint8_t *buf, size_t capacity, size_t *len, uint32_t ssrc);
 /* Prefix standalone feedback/BYE with RR + SDES; reduced-size RTCP is not
  * advertised. Existing SR/RR compounds are left unchanged. */
 int rtc_rtcp_compound_feedback(uint8_t *buf, size_t *len, size_t capacity);

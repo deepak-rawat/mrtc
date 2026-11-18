@@ -485,6 +485,9 @@ Client-facade tests (`test_peer`, `test_data_channel`,
 - TURN uses long-term credentials over UDP/TCP/verified TLS; server/address
   failover and authentication v2 are not implemented.
 - Reports and feedback are compound SR/RR + SDES, with feedback capability
-  intersection in SDP. Full scheduling/source lifecycle remain incomplete.
+  intersection in SDP. Reports use randomized bandwidth-aware scheduling for
+  the four-SSRC one-camera/one-microphone connection, not full dynamic RTP-group
+  reconsideration. Outgoing source retirement emits BYE; incoming BYE/source
+  expiry and SSRC collision recovery remain incomplete.
 - Replay windows and fingerprint checks are implemented, but this educational
   stack has not undergone an independent production security audit.

@@ -68,6 +68,14 @@ are bounded; missing history can request an upstream keyframe through the
 producer. PLI/FIR similarly target the originating producer, not an unrelated
 consumer SSRC.
 
+Reports run on independent owning-worker timers, including during idle or
+paused media, rather than waiting for another RTP packet. Report intervals use
+the shared RFC 3550 A.7 calculation with randomized initial/steady minima and a
+5% media-target budget in the four-SSRC connection model. Publisher SR timing
+is retained for RR LSR/DLSR. Closing consumers cancels report callbacks and
+attempts BYE before freeing their state; the SFU retires them before closing
+their transport.
+
 There is no unbounded per-subscriber queue. Closed/not-ready transports and
 failed sends produce checked failures and drop counters. This is a simple
 forwarder, not a simulcast selector or a full subscriber bitrate allocator.

@@ -263,6 +263,7 @@ static void peer_runtime_close(rtc_peer_connection_t *pc) {
         rtc_worker_cancel_timer(worker, pc->runtime_connect_timer);
         pc->runtime_connect_timer = RTC_WORKER_TIMER_INVALID;
     }
+    rtc_media_session_send_bye(&pc->media_session);
     rtc_media_session_stop(&pc->media_session);
     if (pc->runtime_transport) {
         rtc_transport_destroy(pc->runtime_transport);

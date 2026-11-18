@@ -351,12 +351,83 @@ int rtc_rtcp_build_report(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats,
     return RTC_OK;
 }
 
-void rtc_rtcp_stats_report_sent(rtc_rtcp_stats_t *stats) {
-    if (stats) {
-        stats->expected_prior = stats->packets_expected;
-        stats->received_prior = stats->packets_received;
-        stats->last_report_time = rtc_time_ms();
+uint32_t rtc_rtcp_interval_ms(uint32_t bandwidth_bps, size_t average_packet_bytes, unsigned members,
+                              unsigned senders, bool sending, bool initial, uint32_t random_value) {
+    if (!bandwidth_bps || !average_packet_bytes || !members || senders > members ||
+        (sending && !senders)) {
+        RTC_LOG_ERR("Invalid RTCP interval parameters");
+        return 0;
     }
+    double bandwidth = bandwidth_bps / 8.0;
+    double sources = members;
+    if (senders <= members * 0.25) {
+        if (sending) {
+            bandwidth *= 0.25;
+            sources = senders;
+        } else {
+            bandwidth *= 0.75;
+            sources = members - senders;
+        }
+    }
+    double interval = (double)average_packet_bytes * sources * 1000.0 / bandwidth;
+    double minimum = initial ? 2500.0 : 5000.0;
+    if (interval < minimum)
+        interval = minimum;
+    interval *= (0.5 + (double)random_value / UINT32_MAX) / 1.21828;
+    return interval >= UINT32_MAX ? UINT32_MAX : (uint32_t)(interval + 0.5);
+}
+
+static int schedule_report(rtc_rtcp_stats_t *stats, uint64_t now, bool initial,
+                           size_t packet_size) {
+    uint32_t random_value;
+    if (rtc_random_bytes((uint8_t *)&random_value, sizeof(random_value)) != RTC_OK) {
+        RTC_LOG_ERR("RTCP report timer randomization failed");
+        return RTC_ERR_SSL;
+    }
+    uint32_t target = stats->report_target_bps ? stats->report_target_bps : 500000;
+    uint32_t budget = target / 20;
+    uint32_t interval = rtc_rtcp_interval_ms(budget ? budget : 1, packet_size, 4, 2,
+                                             stats->packets_sent != 0, initial, random_value);
+    if (!interval)
+        return RTC_ERR_INVALID;
+    stats->next_report_time = now + interval;
+    return RTC_OK;
+}
+
+int rtc_rtcp_report_due(rtc_rtcp_stats_t *stats, uint32_t media_target_bps, size_t report_size,
+                        uint64_t now_ms) {
+    if (!stats || !report_size)
+        return RTC_ERR_INVALID;
+    stats->report_target_bps = media_target_bps;
+    if (!stats->next_report_time) {
+        int rc = schedule_report(stats, now_ms, true, report_size);
+        if (rc != RTC_OK)
+            return rc;
+    }
+    return now_ms >= stats->next_report_time ? RTC_OK : RTC_ERR_TIMEOUT;
+}
+
+int rtc_rtcp_stats_report_sent(rtc_rtcp_stats_t *stats) {
+    if (!stats)
+        return RTC_ERR_INVALID;
+    stats->expected_prior = stats->packets_expected;
+    stats->received_prior = stats->packets_received;
+    stats->last_report_time = rtc_time_ms();
+    return schedule_report(stats, stats->last_report_time, false,
+                           stats->last_report_size ? stats->last_report_size : 128);
+}
+
+int rtc_rtcp_build_bye(uint8_t *buf, size_t capacity, size_t *len, uint32_t ssrc) {
+    if (!buf || !len || !ssrc)
+        return RTC_ERR_INVALID;
+    if (capacity < 8)
+        return RTC_ERR_NOMEM;
+    buf[0] = 0x81;
+    buf[1] = RTCP_PT_BYE;
+    write_u16(buf + 2, 1);
+    write_u32(buf + 4, ssrc);
+    *len = 8;
+    return RTC_OK;
 }
 
 int rtc_rtcp_compound_feedback(uint8_t *buf, size_t *len, size_t capacity) {

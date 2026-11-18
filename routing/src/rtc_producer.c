@@ -8,6 +8,8 @@
 #include "rtc_consumer_internal.h"
 #include "rtc_producer_internal.h"
 #include "rtc_router_internal.h"
+#include "rtc_transport_internal.h"
+#include "rtc_worker_internal.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -33,9 +35,36 @@ struct rtc_producer {
     uint32_t last_bitrate_limit;
     uint64_t last_bitrate_feedback_ms;
     _Atomic unsigned fir_sequence;
+    rtc_worker_t *worker;
+    rtc_worker_timer_t report_timer;
 };
 
 static _Atomic uint32_t g_next_producer_id = 1;
+
+static void producer_report_timer(void *user) {
+    rtc_producer_t *producer = user;
+    producer->report_timer = RTC_WORKER_TIMER_INVALID;
+    if (atomic_load(&producer->closed))
+        return;
+    int rc = rtc_transport_send_report(producer->transport, &producer->rtcp, false);
+    if (rc != RTC_OK && rc != RTC_ERR_TIMEOUT)
+        RTC_LOG_WARN("Producer receiver report failed: %d", rc);
+    uint64_t now = rtc_time_ms();
+    producer->report_timer = rtc_worker_add_timer(
+        producer->worker,
+        producer->rtcp.next_report_time > now ? producer->rtcp.next_report_time : now + 1000,
+        producer_report_timer, producer);
+    if (producer->report_timer == RTC_WORKER_TIMER_INVALID)
+        RTC_LOG_ERR("Producer report timer allocation failed");
+}
+
+static void producer_retire_on_worker(void *user) {
+    rtc_producer_t *producer = user;
+    if (producer->report_timer != RTC_WORKER_TIMER_INVALID) {
+        rtc_worker_cancel_timer(producer->worker, producer->report_timer);
+        producer->report_timer = RTC_WORKER_TIMER_INVALID;
+    }
+}
 
 static void copy_label(char *dst, size_t dst_len, const char *src) {
     if (!src)
@@ -63,6 +92,8 @@ rtc_producer_t *rtc_transport_produce(rtc_transport_t *transport,
     uint32_t id = atomic_fetch_add_explicit(&g_next_producer_id, 1, memory_order_relaxed);
     snprintf(producer->id, sizeof(producer->id), "prod-%u", (unsigned)id);
     producer->transport = transport;
+    producer->worker = rtc_transport_worker(transport);
+    producer->report_timer = RTC_WORKER_TIMER_INVALID;
     producer->kind = opts->kind;
     producer->rtp = opts->rtp;
     copy_label(producer->label, sizeof(producer->label), opts->label);
@@ -93,6 +124,26 @@ const char *rtc_producer_id(const rtc_producer_t *producer) {
 void rtc_producer_set_rtcp_feedback(rtc_producer_t *producer, uint8_t feedback) {
     if (producer)
         atomic_store(&producer->feedback, feedback);
+}
+
+int rtc_producer_handle_rtcp(rtc_producer_t *producer, const uint8_t *data, size_t len) {
+    if (!producer || !data || atomic_load(&producer->closed))
+        return RTC_ERR_INVALID;
+    size_t offset = 0;
+    while (len - offset >= 4) {
+        size_t size = (((size_t)data[offset + 2] << 8) | data[offset + 3]) * 4 + 4;
+        if (size > len - offset || (data[offset] >> 6) != 2)
+            return RTC_ERR_INVALID;
+        if (data[offset + 1] == RTCP_PT_SR) {
+            rtc_rtcp_packet_t report;
+            if (rtc_rtcp_parse(&report, data + offset, size) != RTC_OK)
+                return RTC_ERR_INVALID;
+            if (report.sender_ssrc == producer->rtp.ssrc)
+                rtc_rtcp_stats_on_sr_recv(&producer->rtcp, &report.sr);
+        }
+        offset += size;
+    }
+    return offset == len ? RTC_OK : RTC_ERR_INVALID;
 }
 
 typedef struct {
@@ -163,6 +214,7 @@ void rtc_producer_close(rtc_producer_t *producer) {
         return;
     if (producer->transport && producer->rtp.ssrc != 0)
         rtc_router_unregister_producer(producer->transport, producer->rtp.ssrc);
+    rtc_worker_invoke(producer->worker, producer_retire_on_worker, producer);
 }
 
 void rtc_producer_destroy(rtc_producer_t *producer) {
@@ -263,19 +315,11 @@ void rtc_producer_on_rtp(rtc_producer_t *producer, const rtc_rtp_packet_t *pkt) 
     uint32_t clock_rate = producer->rtp.codec_count ? producer->rtp.codecs[0].clock_rate : 90000;
     rtc_rtcp_stats_on_rtp_recv(&producer->rtcp, pkt->header.seq, pkt->header.timestamp,
                                pkt->header.ssrc, clock_rate);
-    uint64_t now = rtc_time_ms();
-    if (now - producer->rtcp.last_report_time >= 1000) {
-        rtc_rtcp_packet_t report;
-        if (rtc_rtcp_build_report(&report, &producer->rtcp, false) == RTC_OK) {
-            uint8_t wire[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
-            size_t len = report.buf_len;
-            memcpy(wire, report.buf, len);
-            int rc = rtc_transport_send_rtcp(producer->transport, wire, &len, sizeof(wire));
-            if (rc != RTC_OK)
-                RTC_LOG_WARN("Producer receiver report failed: %d", rc);
-            else
-                rtc_rtcp_stats_report_sent(&producer->rtcp);
-        }
+    if (producer->report_timer == RTC_WORKER_TIMER_INVALID) {
+        producer->report_timer =
+            rtc_worker_add_timer(producer->worker, rtc_time_ms(), producer_report_timer, producer);
+        if (producer->report_timer == RTC_WORKER_TIMER_INVALID)
+            RTC_LOG_ERR("Producer report timer allocation failed");
     }
 
     rtc_mutex_lock(&producer->consumers_mutex);

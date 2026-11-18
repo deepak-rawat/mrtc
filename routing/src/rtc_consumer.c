@@ -7,6 +7,8 @@
 #include "rtc_producer_internal.h"
 #include "rtc/rtc_rtcp.h"
 #include "rtc_rate_control.h"
+#include "rtc_transport_internal.h"
+#include "rtc_worker_internal.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -42,9 +44,42 @@ struct rtc_consumer {
     rtc_rate_controller_t *rate_controller;
     _Atomic uint32_t estimated_bitrate_bps;
     _Atomic uint64_t bitrate_feedback_ms;
+    rtc_worker_t *worker;
+    rtc_worker_timer_t report_timer;
 };
 
 static _Atomic uint32_t g_next_consumer_id = 1;
+
+static void consumer_report_timer(void *user) {
+    rtc_consumer_t *consumer = user;
+    rtc_mutex_lock(&consumer->media_mutex);
+    consumer->report_timer = RTC_WORKER_TIMER_INVALID;
+    if (atomic_load(&consumer->closed)) {
+        rtc_mutex_unlock(&consumer->media_mutex);
+        return;
+    }
+    int rc = rtc_transport_send_report(consumer->transport, &consumer->rtcp, true);
+    uint64_t next = consumer->rtcp.next_report_time;
+    if (rc != RTC_OK && rc != RTC_ERR_TIMEOUT)
+        RTC_LOG_WARN("Consumer sender report failed: %d", rc);
+    uint64_t now = rtc_time_ms();
+    consumer->report_timer = rtc_worker_add_timer(consumer->worker, next > now ? next : now + 1000,
+                                                  consumer_report_timer, consumer);
+    if (consumer->report_timer == RTC_WORKER_TIMER_INVALID)
+        RTC_LOG_ERR("Consumer report timer allocation failed");
+    rtc_mutex_unlock(&consumer->media_mutex);
+}
+
+static void consumer_retire_on_worker(void *user) {
+    rtc_consumer_t *consumer = user;
+    if (consumer->report_timer != RTC_WORKER_TIMER_INVALID) {
+        rtc_worker_cancel_timer(consumer->worker, consumer->report_timer);
+        consumer->report_timer = RTC_WORKER_TIMER_INVALID;
+    }
+    if (atomic_load(&consumer->packets_sent) &&
+        rtc_transport_send_bye(consumer->transport, consumer->rtp.ssrc) != RTC_OK)
+        RTC_LOG_DBG("RTCP BYE unavailable on retiring consumer");
+}
 
 rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
                                       const rtc_consumer_options_t *opts) {
@@ -65,6 +100,8 @@ rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
     uint32_t id = atomic_fetch_add_explicit(&g_next_consumer_id, 1, memory_order_relaxed);
     snprintf(consumer->id, sizeof(consumer->id), "cons-%u", (unsigned)id);
     consumer->transport = transport;
+    consumer->worker = rtc_transport_worker(transport);
+    consumer->report_timer = RTC_WORKER_TIMER_INVALID;
     consumer->producer = opts->producer;
     consumer->kind = producer_stats.kind;
     if (rtc_producer_get_rtp_parameters(opts->producer, &consumer->rtp) != RTC_OK) {
@@ -102,8 +139,8 @@ rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
             free(consumer);
             return NULL;
         }
-#endif
     }
+#endif
     rtc_rtcp_stats_init(&consumer->rtcp, consumer->rtp.ssrc);
     atomic_store_explicit(&consumer->paused, opts->paused, memory_order_release);
     if (rtc_producer_add_consumer(opts->producer, consumer) != RTC_OK) {
@@ -149,6 +186,7 @@ void rtc_consumer_close(rtc_consumer_t *consumer) {
         return;
     if (consumer->producer)
         rtc_producer_remove_consumer(consumer->producer, consumer);
+    rtc_worker_invoke(consumer->worker, consumer_retire_on_worker, consumer);
 }
 
 void rtc_consumer_destroy(rtc_consumer_t *consumer) {
@@ -247,18 +285,11 @@ void rtc_consumer_on_producer_rtp(rtc_consumer_t *consumer, const rtc_rtp_packet
     atomic_fetch_add_explicit(&consumer->bytes_sent, (uint64_t)pkt->payload_len,
                               memory_order_relaxed);
     rtc_rtcp_stats_on_rtp_send(&consumer->rtcp, pkt->header.timestamp, pkt->payload_len);
-    uint64_t now = rtc_time_ms();
-    if (now - consumer->rtcp.last_report_time >= 1000) {
-        rtc_rtcp_packet_t report;
-        if (rtc_rtcp_build_report(&report, &consumer->rtcp, true) == RTC_OK) {
-            uint8_t wire[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
-            size_t len = report.buf_len;
-            memcpy(wire, report.buf, len);
-            if (rtc_transport_send_rtcp(consumer->transport, wire, &len, sizeof(wire)) != RTC_OK)
-                atomic_fetch_add(&consumer->packets_dropped, 1);
-            else
-                rtc_rtcp_stats_report_sent(&consumer->rtcp);
-        }
+    if (consumer->report_timer == RTC_WORKER_TIMER_INVALID) {
+        consumer->report_timer =
+            rtc_worker_add_timer(consumer->worker, rtc_time_ms(), consumer_report_timer, consumer);
+        if (consumer->report_timer == RTC_WORKER_TIMER_INVALID)
+            RTC_LOG_ERR("Consumer report timer allocation failed");
     }
     rtc_mutex_unlock(&consumer->media_mutex);
 }

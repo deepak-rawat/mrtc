@@ -1090,7 +1090,17 @@ static int tx_get_stats_impl(rtc_transport_t *transport, void *arg) {
     out->ice_restarting = transport->ice_restarting;
     out->remote_candidates_deferred = transport->remote_candidates_deferred;
     out->remote_candidates_ineligible = transport->remote_candidates_ineligible;
+    out->target_bitrate_bps =
+        transport->initial_outgoing_bitrate_bps ? transport->initial_outgoing_bitrate_bps : 500000;
+#ifdef MRTC_ENABLE_TWCC
+    if (transport->bwe)
+        out->target_bitrate_bps = rtc_bwe_target_bitrate(transport->bwe);
+#endif
     return RTC_OK;
+}
+
+rtc_worker_t *rtc_transport_worker(rtc_transport_t *transport) {
+    return transport ? transport->worker : NULL;
 }
 
 int rtc_transport_get_stats(rtc_transport_t *transport, rtc_transport_stats_t *out) {
@@ -1488,4 +1498,36 @@ int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *le
     }
     rtc_mutex_unlock(&transport->send_mutex);
     return rc;
+}
+
+int rtc_transport_send_report(rtc_transport_t *transport, rtc_rtcp_stats_t *stats, bool sender) {
+    if (!transport || !stats)
+        return RTC_ERR_INVALID;
+    rtc_transport_stats_t state;
+    int rc = rtc_transport_get_stats(transport, &state);
+    if (rc != RTC_OK || state.closed || !state.srtp_ready)
+        return rc != RTC_OK ? rc : RTC_ERR_INVALID;
+    rtc_rtcp_packet_t packet;
+    rc = rtc_rtcp_build_report(&packet, stats, sender);
+    if (rc != RTC_OK)
+        return rc;
+    rc = rtc_rtcp_report_due(stats, state.target_bitrate_bps, packet.buf_len + 20, rtc_time_ms());
+    if (rc != RTC_OK)
+        return rc;
+    uint8_t wire[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
+    memcpy(wire, packet.buf, packet.buf_len);
+    size_t length = packet.buf_len;
+    rc = rtc_transport_send_rtcp(transport, wire, &length, sizeof(wire));
+    if (rc == RTC_OK) {
+        stats->last_report_size = length;
+        rc = rtc_rtcp_stats_report_sent(stats);
+    }
+    return rc;
+}
+
+int rtc_transport_send_bye(rtc_transport_t *transport, uint32_t ssrc) {
+    uint8_t wire[8 + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
+    size_t length;
+    int rc = rtc_rtcp_build_bye(wire, sizeof(wire), &length, ssrc);
+    return rc == RTC_OK ? rtc_transport_send_rtcp(transport, wire, &length, sizeof(wire)) : rc;
 }

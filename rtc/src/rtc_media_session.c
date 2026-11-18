@@ -8,7 +8,6 @@
 
 #include <stdlib.h>
 
-#define RTC_MEDIA_SESSION_REPORT_MS   5000
 #define RTC_MEDIA_SESSION_FEEDBACK_MS 20
 
 /* ---- Transport RTP router: deliver + resolve ---- */
@@ -284,10 +283,7 @@ static void session_report_timer(void *user) {
     uint64_t now = rtc_time_ms();
     for (size_t i = 0; i < rtc_vec_len(&s->recv_streams); i++)
         rtc_rtp_recv_stream_tick(session_recv_at(s, i), now);
-    if (now >= s->next_report_ms) {
-        rtc_interceptor_chain_tick(&s->chain, now);
-        s->next_report_ms = now + RTC_MEDIA_SESSION_REPORT_MS;
-    }
+    rtc_interceptor_chain_tick(&s->chain, now);
 
     s->report_timer = rtc_worker_add_timer(s->worker, rtc_time_ms() + RTC_MEDIA_SESSION_FEEDBACK_MS,
                                            session_report_timer, s);
@@ -310,7 +306,6 @@ rtc_err_t rtc_media_session_init(rtc_media_session_t *s, rtc_transport_t *transp
     s->transport = transport;
     s->worker = worker;
     s->report_timer = RTC_WORKER_TIMER_INVALID;
-    s->next_report_ms = 0;
     s->mid_ext_id = 0;
     atomic_store_explicit(&s->running, false, memory_order_relaxed);
     s->ready = true;
@@ -373,8 +368,6 @@ void rtc_media_session_start(rtc_media_session_t *s) {
     if (atomic_exchange_explicit(&s->running, true, memory_order_acq_rel))
         return;
     if (s->report_timer == RTC_WORKER_TIMER_INVALID)
-        s->next_report_ms = rtc_time_ms() + RTC_MEDIA_SESSION_REPORT_MS;
-    if (s->report_timer == RTC_WORKER_TIMER_INVALID)
         s->report_timer = rtc_worker_add_timer(
             s->worker, rtc_time_ms() + RTC_MEDIA_SESSION_FEEDBACK_MS, session_report_timer, s);
 }
@@ -396,4 +389,20 @@ void rtc_media_session_close(rtc_media_session_t *s) {
     rtc_u32_map_free(&s->send_streams);
     rtc_vec_free(&s->recv_streams);
     s->ready = false;
+}
+
+void rtc_media_session_send_bye(rtc_media_session_t *s) {
+    if (!s || !s->ready || !s->transport)
+        return;
+    rtc_u32_map_iter_t iterator = {0};
+    uint32_t ssrc;
+    void *value;
+    while (rtc_u32_map_next(&s->send_streams, &iterator, &ssrc, &value)) {
+        const rtc_rtcp_stats_t *stats = rtc_rtp_send_stream_stats(value);
+        if (stats && stats->packets_sent) {
+            int rc = rtc_transport_send_bye(s->transport, ssrc);
+            if (rc != RTC_OK)
+                RTC_LOG_DBG("RTCP BYE unavailable on retiring source: %d", rc);
+        }
+    }
 }

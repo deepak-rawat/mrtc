@@ -439,20 +439,9 @@ bool rtc_rtp_send_stream_on_rr(rtc_rtp_send_stream_t *stream, const rtc_rtcp_rr_
  * `transport`, stamping the report time on success. Shared by the send-stream
  * SR path and the recv-stream RR path. */
 static void emit_rtcp_report(rtc_rtcp_stats_t *stats, rtc_transport_t *transport, bool sender) {
-    rtc_rtcp_packet_t pkt;
-    if (rtc_rtcp_build_report(&pkt, stats, sender) != RTC_OK)
-        return;
-    uint8_t buf[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
-    if (pkt.buf_len > sizeof(buf))
-        return;
-    memcpy(buf, pkt.buf, pkt.buf_len);
-    size_t len = pkt.buf_len;
-    int rc = rtc_transport_send_rtcp(transport, buf, &len, sizeof(buf));
-    if (rc != RTC_OK) {
+    int rc = rtc_transport_send_report(transport, stats, sender);
+    if (rc != RTC_OK && rc != RTC_ERR_TIMEOUT)
         RTC_LOG_WARN("RTCP report send failed: %d", rc);
-        return;
-    }
-    rtc_rtcp_stats_report_sent(stats);
 }
 
 void rtc_rtp_send_stream_emit_sr(rtc_rtp_send_stream_t *stream, rtc_transport_t *transport) {

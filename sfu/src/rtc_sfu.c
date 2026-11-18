@@ -166,6 +166,8 @@ static sfu_session_t *find_session(rtc_sfu_t *sfu, const char *room, const char 
 static void destroy_session(sfu_session_t *session) {
     /* Stop callbacks before releasing any object reached from them. */
     rtc_worker_cancel_timer(session->sfu->worker, session->timer);
+    for (int i = 0; i < SDP_MAX_MEDIA; i++)
+        rtc_consumer_close(session->consumers[i]);
     rtc_transport_close(session->transport);
     rtc_sctp_destroy(session->sctp);
     for (int i = 0; i < SDP_MAX_MEDIA; i++)
@@ -182,9 +184,12 @@ static void destroy_session(sfu_session_t *session) {
 
 static void on_feedback(const uint8_t *data, size_t len, void *user) {
     sfu_session_t *s = user;
-    for (int i = 0; i < SDP_MAX_MEDIA; i++)
-        if (s->consumers[i])
+    for (int i = 0; i < SDP_MAX_MEDIA; i++) {
+        if (s->publishing && s->producers[i])
+            rtc_producer_handle_rtcp(s->producers[i], data, len);
+        else if (s->consumers[i])
             rtc_consumer_handle_rtcp(s->consumers[i], data, len);
+    }
 }
 
 static sfu_session_t *new_session(rtc_sfu_t *sfu, const rtc_sfu_command_t *command,
@@ -233,8 +238,7 @@ static sfu_session_t *new_session(rtc_sfu_t *sfu, const rtc_sfu_command_t *comma
         free(s);
         return NULL;
     }
-    if (!publishing)
-        rtc_transport_on_rtcp(s->transport, on_feedback, s);
+    rtc_transport_on_rtcp(s->transport, on_feedback, s);
     s->timer = rtc_worker_add_timer(sfu->worker, rtc_time_ms() + 10, session_tick, s);
     return s;
 }

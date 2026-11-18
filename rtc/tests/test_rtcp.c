@@ -81,6 +81,29 @@ TEST(rtcp_build_sr) {
            pkt.sr.sender_oct_count);
 }
 
+TEST(rtcp_randomized_bandwidth_intervals_and_bye) {
+    uint32_t minimum = rtc_rtcp_interval_ms(6400, 100, 4, 2, true, false, 0);
+    uint32_t maximum = rtc_rtcp_interval_ms(6400, 100, 4, 2, true, false, UINT32_MAX);
+    ASSERT(minimum >= 2050 && minimum <= 2053);
+    ASSERT(maximum >= 6155 && maximum <= 6158);
+    uint32_t constrained = rtc_rtcp_interval_ms(8000, 100, 100, 10, false, false, UINT32_MAX);
+    ASSERT(constrained >= 14774 && constrained <= 14777);
+    ASSERT(rtc_rtcp_interval_ms(6400, 100, 4, 2, true, true, UINT32_MAX) < minimum * 2);
+    rtc_rtcp_stats_t stats;
+    ASSERT_EQ(rtc_rtcp_stats_init(&stats, 0x12345678), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_report_due(&stats, 128000, 100, 10000), RTC_ERR_TIMEOUT);
+    ASSERT(stats.next_report_time > 10000 && stats.next_report_time <= 13079);
+    ASSERT_EQ(rtc_rtcp_report_due(&stats, 128000, 100, stats.next_report_time), RTC_OK);
+    uint8_t wire[128];
+    size_t length;
+    ASSERT_EQ(rtc_rtcp_build_bye(wire, sizeof(wire), &length, 0x12345678), RTC_OK);
+    ASSERT_EQ(length, 8);
+    ASSERT_EQ(rtc_rtcp_compound_feedback(wire, &length, sizeof(wire)), RTC_OK);
+    ASSERT_EQ(wire[length - 7], RTCP_PT_BYE);
+    ASSERT_EQ(wire[length - 4], 0x12);
+    ASSERT_EQ(wire[length - 1], 0x78);
+}
+
 TEST(rtcp_remb_bounds_and_quantization) {
     uint8_t wire[64];
     size_t length;
@@ -366,6 +389,7 @@ int main(void) {
     rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(rtcp_build_sr);
+    RUN_TEST(rtcp_randomized_bandwidth_intervals_and_bye);
     RUN_TEST(rtcp_remb_bounds_and_quantization);
     RUN_TEST(rtcp_feedback_is_compound_without_reduced_size);
     RUN_TEST(rtcp_compound_cname_and_report_boundaries);

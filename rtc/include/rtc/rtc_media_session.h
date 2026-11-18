@@ -36,7 +36,6 @@ typedef struct {
     rtc_vec_t recv_streams;        /* rtc_rtp_recv_stream_t* (RTP resolve + RR emission) */
     rtc_interceptor_chain_t chain; /* RTCP handling: report, NACK, PLI + custom */
     rtc_worker_timer_t report_timer;
-    uint64_t next_report_ms;
     uint8_t mid_ext_id; /* negotiated MID header-extension id (0 = none) */
     _Atomic bool running;
     bool ready;
@@ -90,6 +89,8 @@ void rtc_media_session_start(rtc_media_session_t *s);
 
 /* Stop the emission timer. Call before the transport / worker are torn down. */
 void rtc_media_session_stop(rtc_media_session_t *s);
+/* Best-effort departure reports for sources that sent RTP; owning worker only. */
+void rtc_media_session_send_bye(rtc_media_session_t *s);
 
 /* Free the stream registries. Call after the transport has been destroyed (so
  * no dispatch races the free). Idempotent. */

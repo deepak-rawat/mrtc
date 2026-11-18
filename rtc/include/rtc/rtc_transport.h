@@ -6,6 +6,7 @@
 
 #include "rtc_common.h"
 #include "rtc_rtp.h"
+#include "rtc_rtcp.h"
 #include "rtc_sdp.h"
 #include "rtc_worker.h"
 
@@ -94,6 +95,7 @@ typedef struct {
     bool ice_restarting;
     uint32_t remote_candidates_deferred;
     uint32_t remote_candidates_ineligible;
+    uint32_t target_bitrate_bps; /* configured/estimated target, not measured capacity */
 } rtc_transport_stats_t;
 
 rtc_transport_t *rtc_transport_create(rtc_worker_t *worker, const rtc_transport_config_t *cfg);
@@ -184,6 +186,8 @@ int rtc_transport_retransmit_rtp(rtc_transport_t *transport, const uint8_t *wire
 /* Standalone feedback is prefixed with RR/SDES before encryption. Reserve
  * RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD beyond the original packet length. */
 int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap);
+int rtc_transport_send_report(rtc_transport_t *transport, rtc_rtcp_stats_t *stats, bool sender);
+int rtc_transport_send_bye(rtc_transport_t *transport, uint32_t ssrc);
 void rtc_transport_close(rtc_transport_t *transport);
 void rtc_transport_destroy(rtc_transport_t *transport);
 

@@ -56,8 +56,10 @@ have been replaced. See [the layout](ARCHITECTURE.md),
 ### 2. Improve RTCP interoperability
 
 - Preserve compound SR/RR + SDES CNAME on native and routing report paths.
-- Add randomized bandwidth-adaptive intervals and timer reconsideration.
-- Add BYE/source lifecycle coverage and explicit reduced-size RTCP negotiation.
+- Preserve randomized bandwidth-aware small-connection intervals; add dynamic
+  membership reconsideration beyond that model.
+- Complete incoming BYE/source expiry and collision recovery. Outgoing BYE and
+  compound feedback are implemented; reduced-size RTCP is not advertised.
 
 These are more useful next protocol improvements than reimplementing already
 working NACK, PLI, RTP extensions or replay windows.

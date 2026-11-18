@@ -120,7 +120,7 @@ Implemented: native and SFU periodic reports include SDES with the same random
 process-local CNAME advertised in SDP. Report parsing respects sub-packet
 boundaries; loss fractions use report intervals, and late pre-rollover packets
 do not create a false cycle. Focused RTCP/SDP/media/routing/peer/SFU tests pass
-locally. Adaptive scheduling and source retirement remain required work;
+locally. Full dynamic source lifecycle/reconsideration remains required work;
 compound reports alone do not complete RTCP.
 
 Negotiated MID routing rejects unknown MIDs and ambiguous payload-type-only
@@ -168,8 +168,9 @@ The retained changes are a tested foundation, not completion of work items 0–6
 
 1. Complete supported-profile negotiation validation, including feedback
    capability intersection, rejected sections and browser-specific SDP shapes.
-2. Complete RTCP scheduling and source retirement/collisions. Compound feedback
-   composition and supported feedback/extension intersection are now implemented.
+2. Complete incoming BYE/source expiry, SSRC collision recovery and dynamic
+   membership reconsideration. Small-connection scheduling, outgoing BYE,
+   compound feedback and capability intersection are implemented.
 3. Qualify conservative shared-source bitrate adaptation under impairments,
    then complete pacing and subscriber-wide allocation across media legs.
 4. Qualify TURN under hostile networks and complete server/address failover and
@@ -221,3 +222,11 @@ Focused regressions verify loss-driven decrease/recovery, minimum-consumer
 aggregation, stale/paused exclusion, feedback quantization/bounds and a real
 encrypted downstream-to-publisher limit. The four native E2E scenarios and
 targeted ASan/UBSan tests pass with this path enabled.
+
+Reports now use shared randomized, bandwidth-aware interval calculation and
+independent worker timers, including while media is idle/paused. Runtime
+membership uses the declared four-SSRC one-camera/one-microphone model; this is
+not dynamic group reconsideration. Publisher SR timing is echoed in receiver
+reports, and retiring native/SFU sending sources attempt compound BYE before
+transport shutdown. Focused tests verify interval bounds, quiet-path encrypted
+receiver reports and their SR references, plus callback-safe teardown.
