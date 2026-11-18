@@ -47,6 +47,7 @@ struct rtc_listener {
     char stun_server[256];
     uint16_t stun_port;
     rtc_addr_t stun_addr;
+    bool stun_addr_valid;
     uint8_t gather_txn_id[STUN_TXN_ID_SIZE];
     bool gather_txn_registered;
     rtc_worker_timer_t gather_timer;
@@ -295,9 +296,7 @@ static void listener_start_stun_gather(void *user) {
         listener_mark_gathering_done(listener);
         return;
     }
-    if (listener_resolve_addr(listener->stun_server, listener->stun_port, &listener->stun_addr) !=
-        RTC_OK) {
-        RTC_LOG_WARN("Listener: failed to resolve STUN server %s", listener->stun_server);
+    if (!listener->stun_addr_valid) {
         listener_mark_gathering_done(listener);
         return;
     }
@@ -325,6 +324,29 @@ static void listener_start_stun_gather(void *user) {
     }
     listener->gather_timer = rtc_worker_add_timer(listener->worker, rtc_time_ms() + 3000,
                                                   listener_stun_timeout, listener);
+}
+
+typedef struct {
+    rtc_listener_t *listener;
+    int result;
+} listener_gather_start_t;
+
+static void listener_begin_gather_on_worker(void *user) {
+    listener_gather_start_t *start = user;
+    rtc_listener_t *listener = start->listener;
+    start->result = RTC_OK;
+    if (listener->stun_server[0]) {
+        listener->gather_timer = rtc_worker_add_timer(listener->worker, rtc_time_ms(),
+                                                      listener_start_stun_gather, listener);
+        if (listener->gather_timer == RTC_WORKER_TIMER_INVALID)
+            start->result = RTC_ERR_NOMEM;
+    } else {
+        listener_mark_gathering_done(listener);
+    }
+}
+
+static void listener_cancel_gather_on_worker(void *user) {
+    listener_cancel_gather(user);
 }
 
 static int listener_gather_host_candidates(rtc_listener_t *listener,
@@ -628,6 +650,21 @@ rtc_listener_t *rtc_listener_create(rtc_worker_t *worker, const rtc_listener_con
         return NULL;
     }
 
+    if (listener->stun_server[0]) {
+        if (rtc_addr_from_string(&listener->stun_addr, listener->stun_server,
+                                 listener->stun_port) == RTC_OK) {
+            listener->stun_addr_valid = true;
+        } else if (rtc_worker_on_loop_thread(worker)) {
+            RTC_LOG_WARN("Listener: STUN hostname resolution requires a non-worker caller");
+        } else {
+            listener->stun_addr_valid =
+                listener_resolve_addr(listener->stun_server, listener->stun_port,
+                                      &listener->stun_addr) == RTC_OK;
+            if (!listener->stun_addr_valid)
+                RTC_LOG_WARN("Listener: failed to resolve STUN server %s", listener->stun_server);
+        }
+    }
+
     /* Hand the socket to the worker: from here its loop thread drains
      * the socket and dispatches packets to listener_on_packet. */
     rc = rtc_worker_add_io(worker, rtc_packet_io_get_socket(&listener->io), listener_io_ready,
@@ -642,11 +679,12 @@ rtc_listener_t *rtc_listener_create(rtc_worker_t *worker, const rtc_listener_con
         free(listener);
         return NULL;
     }
-    if (listener->stun_server[0] != '\0') {
-        listener->gather_timer =
-            rtc_worker_add_timer(worker, rtc_time_ms(), listener_start_stun_gather, listener);
-    } else {
-        listener_mark_gathering_done(listener);
+    listener_gather_start_t start = {.listener = listener, .result = RTC_ERR_GENERIC};
+    rc = rtc_worker_invoke(worker, listener_begin_gather_on_worker, &start);
+    if (rc != RTC_OK || start.result != RTC_OK) {
+        RTC_LOG_ERR("Listener STUN gathering could not be scheduled");
+        rtc_listener_destroy(listener);
+        return NULL;
     }
     return listener;
 }
@@ -657,7 +695,7 @@ void rtc_listener_close(rtc_listener_t *listener) {
     bool was_closed = atomic_exchange_explicit(&listener->closed, true, memory_order_acq_rel);
     if (was_closed)
         return;
-    listener_cancel_gather(listener);
+    rtc_worker_invoke(listener->worker, listener_cancel_gather_on_worker, listener);
     /* Stop the worker polling this socket (runs on the loop thread, so no
      * drain can be in flight afterwards), then close the socket. */
     rtc_worker_remove_io(listener->worker, rtc_packet_io_get_socket(&listener->io));

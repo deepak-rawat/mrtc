@@ -98,7 +98,11 @@ static rtc_client_runtime_t *client_runtime_create(const rtc_client_runtime_conf
         goto fail;
     runtime->peer_mutex_ready = true;
 
-    runtime->worker = rtc_worker_create(NULL);
+    /* Relay allocations need sockets alongside the shared listener and
+     * overlapping small-room transport generations. */
+    runtime->worker = rtc_worker_create(&(rtc_worker_config_t){
+        .max_io_sources = 32,
+    });
     if (!runtime->worker)
         goto fail;
 

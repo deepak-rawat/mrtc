@@ -196,6 +196,12 @@ Key functions: `rtc_data_channel_send()`,
 
 ### Live Negotiation and ICE Restart
 
+The shared native runtime reserves 32 I/O entries for its common listener and
+per-peer relay allocations, including overlapping small-room graphs. A focused
+construction regression creates eight relay-configured peers on that runtime;
+the old eight-entry budget could not fit eight allocations plus the listener.
+This is a socket-budget check, not an eight-person relay media/capacity claim.
+
 Repeated offer/answer cycles can add or remove tracks and change directions
 after a connection is established. Changes are applied on the worker rather
 than by mutating live protocol objects from the application thread.

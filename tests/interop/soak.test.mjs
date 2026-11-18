@@ -15,7 +15,9 @@ test('soak rejects malformed duration before launching media', () => {
     assert.match(result.stderr, /MRTC_SOAK_SECONDS must be/);
 });
 
-test('missing server produces one failed soak result, never success', async () => {
+test('missing server produces one failed soak result, never success', {
+    skip: !['linux', 'darwin'].includes(process.platform) && 'RSS soak requires Linux or macOS',
+}, async () => {
     const directory = await mkdtemp(join(tmpdir(), 'mrtc-soak-controller-'));
     try {
         const path = join(directory, 'report.jsonl');

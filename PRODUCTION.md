@@ -242,20 +242,22 @@ capacity certification or a latency/quality measurement. See
 ## Latest local regression evidence
 
 The following newer checks supersede the earlier transient Debug timeouts and
-stalled synthetic browser-audio run. They were run locally on macOS/arm64,
-against the native protocol implementation through `d39c7b1` and browser
-synthetic-source fix `b46eee9`; they are not remote CI/platform certification.
+stalled synthetic browser-audio run. They were run locally on macOS/arm64.
+The full native suites were rerun after the listener fix described below;
+the browser and long reconnect runs used native code through `d39c7b1` and
+browser source `b46eee9`. These are not remote CI/platform certification.
 
 | Check | Result |
 |---|---|
 | Full Debug CTest suite, including desktop | 65/65 passed |
 | Full headless Release CTest suite | 63/63 passed |
 | Full headless ASan/UBSan CTest suite | 63/63 passed |
-| TSan worker/network/routing/SFU checks | 4/4 passed |
+| Expanded TSan worker/network/peer/routing/relay checks | 9/9 passed |
 | TWCC/AIMD-disabled focused build/tests | Clean build, 4/4 passed |
 | Web contracts and TypeScript/Vite build | 4 tests and build passed |
 | Controller/soak-runner failure contracts | 17/17 passed |
 | Full Chromium/native `test:all` | Passed, including migration/failure isolation and 120 generations |
+| Extended native reconnect run | 1,000 generations passed on `d39c7b1`; see provenance below |
 | Updated parser fuzz run | 1,525,420 inputs in 60 seconds, no findings |
 | Eight-person SFU/RSS run | 60 seconds, fresh per-source decode/SCTP, sampled growth gates passed |
 | Two simultaneous rooms, three native peers each | 30 seconds, decoded media/SCTP/RSS and clean shutdown passed |
@@ -270,3 +272,18 @@ Reproduce the native suite with `ctest --test-dir build --output-on-failure
 tests/interop run test:all`, and the sampled reference workload with
 `MRTC_BUILD_DIR=build MRTC_SOAK_SECONDS=60 MRTC_SOAK_PEERS=8 npm --prefix
 tests/interop run test:soak`.
+
+A broader TSan TCP/TLS check subsequently detected an existing listener STUN
+timer-handle race between its constructor and an immediate worker callback.
+Timer creation/publication and cancellation are now serialized on the worker;
+STUN hostname resolution is kept off that loop. The shared client worker's I/O
+budget also accommodates eight relay allocations plus its listener. A focused
+eight-peer construction regression covers that previous budget failure.
+
+After these fixes the complete Debug suite passes again (65 tests), as do both
+headless Release and ASan/UBSan suites (63 tests each) and nine focused
+TSan worker/peer/routing/relay cases. The four TCP/TLS relay cases additionally
+passed three consecutive TSan repetitions without suppressions. The
+1,000-generation native reconnect run completed successfully against the
+earlier `d39c7b1` native implementation; the later listener change has separate
+focused regression coverage rather than being silently counted in that run.

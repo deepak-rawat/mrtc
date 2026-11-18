@@ -159,17 +159,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang ninja-build pkg-config libssl-dev \
-            libwebsockets-dev libcjson-dev
+            libwebsockets-dev libcjson-dev libvpx-dev libopus-dev libusrsctp-dev coturn openssl
       - name: Build concurrency fixtures
         run: |
           cmake -S . -B build/tsan -G Ninja -DCMAKE_C_COMPILER=clang \
             -DCMAKE_BUILD_TYPE=Debug -DMRTC_ENABLE_TSAN=ON \
-            -DMRTC_ENABLE_CLIENT_API=OFF -DMRTC_ENABLE_ROUTING_API=OFF
-          cmake --build build/tsan --parallel 4 --target test_worker test_network_runtime
-      - name: Test worker and transport concurrency
+            -DMRTC_BUILD_DESKTOP=OFF
+          cmake --build build/tsan --parallel 4 --target test_worker test_network_runtime \
+            test_peer test_peer_integration test_routing_media test_sfu_session
+      - name: Test worker, relay, peer and routing concurrency
         env:
           TSAN_OPTIONS: halt_on_error=1
-        run: ctest --test-dir build/tsan --output-on-failure --timeout 120 -R '^test_(worker|network_runtime)$'
+        run: ctest --test-dir build/tsan --output-on-failure --timeout 120 -R '^test_(worker|network_runtime|routing_media|sfu_session|peer|network_turn_(tcp|tls)|peer_turn_(tcp|tls))$'
 
   parser-fuzz:
     timeout-minutes: 10

@@ -166,6 +166,13 @@ Key functions: `rtc_packet_io_init_ex()`, `rtc_packet_io_drain()`,
 
 ### ICE / STUN
 
+Listener STUN timer creation/cancellation runs on its owning worker, including
+publication of zero-delay timer handles. Resolving a STUN hostname occurs on
+the configuring caller before the listener is activated, not inside the media
+loop. Worker-thread callers must supply numeric STUN addresses; an unsupported
+hostname is reported and host gathering remains available without claiming a
+server-reflexive candidate.
+
 The runtime transport implements the active logical ICE path. It
 registers listener demux routes by local ufrag, STUN transaction ID, and
 selected remote tuple.

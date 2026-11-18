@@ -41,6 +41,23 @@ TEST(peer_create_destroy) {
     printf("    create -> close -> destroy OK\n");
 }
 
+TEST(shared_runtime_has_room_for_eight_relay_sockets) {
+    rtc_config_t config = {.ice_server_count = 1};
+    config.ice_servers[0] = (rtc_ice_server_t){.urls = {"turn:127.0.0.1:9?transport=udp"},
+                                               .url_count = 1,
+                                               .username = "test",
+                                               .credential = "test"};
+    rtc_peer_connection_t *peers[8] = {0};
+    for (size_t i = 0; i < sizeof(peers) / sizeof(peers[0]); i++) {
+        peers[i] = rtc_peer_connection_create(&config);
+        ASSERT(peers[i] != NULL);
+    }
+    for (size_t i = 0; i < sizeof(peers) / sizeof(peers[0]); i++) {
+        rtc_peer_connection_close(peers[i]);
+        rtc_peer_connection_destroy(peers[i]);
+    }
+}
+
 TEST(peer_add_track) {
     rtc_config_t config;
     memset(&config, 0, sizeof(config));
@@ -696,6 +713,7 @@ int main(void) {
     rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(peer_create_destroy);
+    RUN_TEST(shared_runtime_has_room_for_eight_relay_sockets);
     RUN_TEST(peer_add_track);
     RUN_TEST(peer_create_offer);
     RUN_TEST(peer_signaling_states);
