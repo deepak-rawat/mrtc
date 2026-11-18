@@ -1,19 +1,18 @@
-# Production profile and release gates
+# Media and transport production-readiness plan
 
-This is the implementation and qualification contract for the first production
-profile. It is not a declaration that mrtc is production-ready. Existing
-educational mesh/AUTO behavior remains available and keeps its defaults.
+This plan focuses on the media and transport protocols needed for reliable
+production use. It is not a declaration that mrtc is production-ready or a
+production deployment mode. Existing mesh/AUTO/SFU behavior keeps its defaults.
 
 ## Supported target
 
 - Linux server behind a trusted HTTPS/WSS reverse proxy.
-- An opt-in fixed-SFU profile; at most eight participants per room, subject to
-  measured instance capacity.
+- Fixed SFU as the initial reference configuration (`--mode sfu`); at most
+  eight participants per room, subject to measured instance capacity.
 - One VP8 camera and one Opus microphone per participant, with standard SCTP
   chat. Audio-only, receive-only and data-only participants remain supported.
 - BUNDLE, RTP/RTCP multiplexing, trickle ICE, consent, fingerprint-verified DTLS,
   SRTP/SRTCP and active ICE restart.
-- Short-lived, room-scoped credentials issued by a trusted application backend.
 - Chrome, Firefox and actual Safari, plus Linux/macOS/Windows native clients,
   only after the release matrix below has been qualified.
 
@@ -21,6 +20,18 @@ This is a constrained application interoperability profile, not full W3C API
 or WebRTC standards certification. Unsupported changes must fail explicitly
 without changing a working call. The SFU terminates media encryption; this
 profile does not provide participant-to-participant E2EE.
+
+## Deferred application and deployment work
+
+Application authentication and authorization are deferred until their design
+is decided. There is no JWT/token login implementation, authenticated deployment
+profile or `--production` option. Deployment-profile metrics, admission/rate
+controls and graceful drain from that bundle have also been removed.
+
+DTLS fingerprint verification, SRTP authentication, ICE/STUN integrity and TURN
+credentials remain required transport-security behavior; they are not the
+application authentication being deferred. A publicly exposed service still
+needs a separate access-control and deployment design before release.
 
 ## Work order
 
@@ -30,12 +41,12 @@ profile does not provide participant-to-participant E2EE.
 | 1 | Negotiation | Browser/native offer/answer, payload mapping, directions, BUNDLE/MID and stale-generation rejection |
 | 2 | RTCP | Compound SR/RR + CNAME, report timing, source retirement and correct rewritten-stream feedback |
 | 3 | Loss/congestion | Both SFU legs recover; slow receivers do not cause unbounded queue delay |
-| 4 | Connectivity | UDP relay plus TCP/TLS TURN, credential refresh, path failure and supported dual-stack behavior |
+| 4 | Connectivity | UDP relay plus TCP/TLS TURN, allocation/permission/channel refresh, path failure and supported dual-stack behavior |
 | 5 | Safety | Malformed inputs, allocation/queue failure, concurrent teardown, sanitizers and fuzz regressions |
 | 6 | Qualification | Real decoded media/data across supported browsers/platforms, impairments, endurance and capacity |
 
-Authentication, authorization, quotas, observability and deployment operations
-are parallel release blockers, not substitutes for protocol correctness.
+Protocol qualification does not replace future application access controls,
+quotas, observability or deployment operations. Those are outside this phase.
 
 ## Required qualification
 
@@ -83,8 +94,8 @@ evidence that it passed.
   growth; use a 72-hour loaded soak before broad release.
 - No unresolved reproducible crashes, sanitizer findings or release-blocking
   independent security-review findings.
-- Demonstrated credential expiry/rotation, reverse-proxy restrictions, overload
-  rejection, graceful drain and version rollback.
+- Demonstrated TURN allocation/permission/channel refresh and explicit bounded
+  failure behavior when media/transport resources are exhausted.
 - Representative invite-only pilot meeting agreed call-establishment and
   media-quality SLOs before public availability.
 
@@ -116,7 +127,7 @@ Negotiated MID routing rejects unknown MIDs and ambiguous payload-type-only
 matches instead of binding a new source to the first stream. SR reception also
 dispatches its reception-report blocks to the sender feedback path.
 
-Local qualification so far:
+Historical qualification before removing the application/deployment bundle:
 
 - Warning-free Release build and all 58 headless Release CTests passed.
 - All 58 headless ASan/UBSan CTests passed.
@@ -134,3 +145,40 @@ Local qualification so far:
 CI now defines Debug/Release native matrices, combined ASan/UBSan, focused TSan,
 parser fuzzing and Chromium/Firefox jobs. Remote runs are not established by
 these local results.
+
+Later revalidation was not wholly green: the full Debug suite reported two
+timeouts (SCTP cleanup and desktop exit); both passed when rerun in isolation.
+A later Chromium rerun failed decoded-audio assertions. Diagnostics showed
+zero outbound audio packets and a synthetic AudioContext in `running` state
+whose clock remained near 0.005 seconds after a two-second wait. The media
+assertions and normal autoplay/privacy policy were retained; this source-clock
+failure remains a qualification blocker, not a passing test or an established
+protocol diagnosis.
+
+After removing the application authentication/deployment bundle, the native
+build is warning-free and all 14 targeted signaling/app/protocol CTests pass.
+The web build and four web contract tests pass, as do 15 controller tests.
+Real native mesh, SFU and AUTO 2-to-3-to-2 / 4-to-5-to-4 E2E scenarios pass
+with decoded media, SCTP, roster and lifecycle assertions. These checks do not
+re-qualify the browser audio or external-platform gates above.
+
+## Remaining protocol work
+
+The retained changes are a tested foundation, not completion of work items 0–6:
+
+1. Complete supported-profile negotiation validation, including feedback
+   capability intersection, rejected sections and browser-specific SDP shapes.
+2. Complete RTCP scheduling, source retirement/collisions and feedback packet
+   composition/negotiation. Periodic compound SR/RR is only one part.
+3. Implement downstream congestion-aware allocation/pacing on both SFU media
+   legs, then measure loss recovery and bounded delay under impairments.
+4. Add nonblocking stream I/O support (the worker poller currently monitors
+   read readiness), then TCP/TLS TURN with verified server certificates,
+   framing/partial writes, refresh and independent coturn tests. Do not add a
+   blocking TLS handshake to the media worker.
+5. Add broader allocation-failure/stateful fuzz/concurrency coverage, hostile
+   network fixtures and automated capacity/resource-growth measurements.
+
+Actual Safari, Firefox, Linux/Windows qualification, long soaks and independent
+protocol/security review remain open. No access-control scheme is selected by
+this plan.

@@ -3,9 +3,9 @@
 A small educational RTC stack, built to learn WebRTC internals and evaluate
 AI-assisted systems programming. It is not a production WebRTC service.
 
-The opt-in production-profile work and its unfulfilled release gates are tracked
-in [PRODUCTION.md](PRODUCTION.md). Passing the development tests is not a
-production-readiness claim.
+Media/transport hardening and its unfulfilled qualification gates are tracked
+in [PRODUCTION.md](PRODUCTION.md). Application authentication is deferred;
+passing the development tests is not a production-readiness claim.
 
 Native clients use a codec-agnostic C transport runtime, optional VP8/Opus
 media, and a WebRTC-style peer facade. The browser client uses the browser's

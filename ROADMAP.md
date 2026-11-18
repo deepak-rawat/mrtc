@@ -91,9 +91,10 @@ not be multiplexed over an indistinguishable five-tuple.
 
 ### 6. Treat production readiness as a separate project
 
-The first constrained production profile and ordered acceptance criteria are
+The media/transport hardening target and ordered acceptance criteria are
 defined in [PRODUCTION.md](PRODUCTION.md). Existing defaults stay compatible;
-the first production target is opt-in fixed SFU.
+fixed SFU is the initial reference configuration, not a deployment profile.
+Application authentication/authorization and deployment controls are deferred.
 
 Authentication/authorization, secure signaling deployment, quotas, abuse
 prevention, key lifecycle, operational tooling and independent security review
