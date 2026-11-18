@@ -449,9 +449,9 @@ int rtc_rtcp_parse(rtc_rtcp_packet_t *pkt, const uint8_t *data, size_t len) {
     }
 
     /* Copy raw data */
-    if (len <= sizeof(pkt->buf)) {
-        memcpy(pkt->buf, data, len);
-        pkt->buf_len = len;
+    if (expected_len <= sizeof(pkt->buf)) {
+        memcpy(pkt->buf, data, expected_len);
+        pkt->buf_len = expected_len;
     }
 
     return RTC_OK;

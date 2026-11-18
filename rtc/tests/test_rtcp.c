@@ -252,6 +252,15 @@ TEST(rtcp_parse_invalid) {
                              0x00, 0x00, 0x00, 0x00};
     ASSERT(rtc_rtcp_parse(&pkt, bad_length, sizeof(bad_length)) != RTC_OK);
 
+    uint8_t padded_rr[12] = {0xa0, RTCP_PT_RR, 0, 2, 0, 0, 0, 1, 0, 0, 0, 4};
+    ASSERT_EQ(rtc_rtcp_parse(&pkt, padded_rr, sizeof(padded_rr)), RTC_OK);
+    ASSERT_EQ(pkt.buf_len, sizeof(padded_rr));
+    ASSERT_MEM_EQ(pkt.buf, padded_rr, sizeof(padded_rr));
+    padded_rr[11] = 0;
+    ASSERT_EQ(rtc_rtcp_parse(&pkt, padded_rr, sizeof(padded_rr)), RTC_ERR_INVALID);
+    padded_rr[11] = 1;
+    ASSERT_EQ(rtc_rtcp_parse(&pkt, padded_rr, sizeof(padded_rr)), RTC_ERR_INVALID);
+
     printf("    correctly rejected invalid RTCP packets\n");
 }
 
