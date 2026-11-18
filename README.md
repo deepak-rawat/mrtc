@@ -234,8 +234,13 @@ management.
 STUN discovers addresses; TURN is an optional network relay, not the SFU.
 Native conference STUN accepts hostname/IP, `stun:` URL, or NULL/empty to disable.
 The SDL default is `stun:stun.l.google.com:19302`; `--stun ""` disables external
-discovery for a local test. The low-level client supports one authenticated UDP
-TURN URL/relay-only policy; TCP/TLS TURN remains unsupported.
+discovery for a local test. The low-level client supports one authenticated
+TURN URL with relay-only routing: `turn:relay.example:3478?transport=udp`,
+`turn:relay.example:3478?transport=tcp`, or
+`turns:relay.example:5349?transport=tcp`. TLS verifies the relay identity and
+trust chain; `rtc_config_t.turn_tls_ca_file` optionally supplies a CA file
+instead of OpenSSL's default trust store. Multiple-server/address failover
+remains unsupported.
 
 Normal browser privacy is supported without disabling mDNS: valid `.local`
 host candidates are retained and explicitly deferred to authenticated

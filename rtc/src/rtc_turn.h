@@ -9,6 +9,7 @@
 
 #include "rtc_common.h"
 #include "rtc_stun.h"
+#include "rtc/rtc_transport.h"
 
 /* Forward declarations */
 typedef struct rtc_packet_io rtc_packet_io_t;
@@ -21,6 +22,9 @@ typedef struct {
     uint16_t server_port; /* default 3478 */
     const char *username;
     const char *credential;
+    rtc_turn_protocol_t protocol;
+    const char *ca_file;
+    const rtc_addr_t *resolved_address;
 } rtc_turn_config_t;
 
 typedef struct {
@@ -75,5 +79,8 @@ rtc_err_t rtc_turn_send(rtc_turn_client_t *tc, uint16_t channel, const uint8_t *
 
 /* Send Refresh(lifetime=0) to deallocate, then cleanup */
 void rtc_turn_close(rtc_turn_client_t *tc);
+/* RTC_ERR_TIMEOUT means an incomplete stream frame; ChannelData includes
+ * mandatory TCP/TLS padding to a four-byte boundary. */
+int rtc_turn_stream_frame_length(const uint8_t *data, size_t available, size_t *length);
 
 #endif /* RTC_TURN_H */

@@ -19,7 +19,7 @@ changes there alone do not change client or SFU connectivity.
 | RFC 8445 — ICE | Full/lite operation, controlling/controlled roles, conflicts, nomination, consent and active restart on the runtime | Not a complete implementation of every checklist/dual-stack extension |
 | RFC 7675 — consent | Authenticated consent requests and expiration of an unresponsive selected path | Application reconnect policy remains application-owned |
 | RFC 8838 / RFC 8839 — trickle ICE and SDP | Asynchronous candidates, remote ingestion, end-of-candidates, ICE-lite signaling and retained browser candidate metadata | mDNS is deferred to authenticated peer-reflexive checks, not resolved by a multicast-DNS service |
-| RFC 8656 / RFC 5766 — TURN | Worker-owned UDP allocation, permissions/channels, refresh, cleanup and relay-only runtime connectivity | One authenticated UDP server; no TCP/TLS TURN or authentication v2 |
+| RFC 8656 / RFC 5766 — TURN | Worker-owned UDP relay allocation over UDP/TCP/verified TLS, permissions/channels, refresh and relay-only connectivity | One server/peer per logical transport; no server/address failover or authentication v2 |
 | RFC 6347 / RFC 9147 — DTLS | Minimum DTLS 1.2; newer versions negotiated when supported by OpenSSL; datagram-preserving BIOs on OpenSSL 3.2+ | Older OpenSSL uses the existing memory-BIO fallback |
 | RFC 5764 — DTLS-SRTP | Profile negotiation, key export and remote SHA-256 fingerprint pinning | Signaling authenticity is not provided by fingerprint pinning alone |
 | RFC 7983 — packet demultiplexing | Shared UDP classification and logical-transport routing | Distinct DTLS associations still require distinct network tuples |
@@ -99,14 +99,24 @@ because a TURN allocation is identified by its network tuple, not by a logical
 transport identifier behind a shared listener. Permission, channel and
 allocation refresh and cleanup are timer-driven.
 
-The client supports one authenticated UDP TURN URL and a relay-only policy.
-Unsupported TCP/TLS or multiple-server configurations fail explicitly.
+The client supports one authenticated `turn:` UDP/TCP or `turns:` TLS URL
+and a relay-only policy. TLS verifies the configured server name/IP and trust
+chain, using OpenSSL's default trust store or an explicit CA file. TCP/TLS is
+the client-to-server leg; relay candidates remain UDP. Stream I/O is nonblocking,
+framed and bounded (64 KiB send queue, 500 ms queued-write deadline after
+connection, five-second connect/TLS deadline). TCP_NODELAY prevents small
+control messages waiting behind Nagle/delayed acknowledgements. Multiple-server
+configurations fail explicitly; DNS currently selects one resolved address.
 Candidates and end-of-candidates can arrive after the initial SDP.
 
 **Validation:** [network runtime tests](rtc/tests/test_network_runtime.c),
 [local coturn fixture](rtc/tests/run_turn_runtime.sh), and
 [client negotiation/restart/relay integration](client/tests/test_peer_integration.c).
 Coturn-dependent CTests are `test_network_turn` and `test_peer_turn`.
+Their `_tcp` / `_tls` variants cover encrypted relay delivery, refresh and
+native SCTP/restart continuity. TLS negative tests reject an untrusted
+certificate and a trusted certificate with the wrong identity. Unit tests cover
+partial framing and ChannelData padding.
 
 ## Live Negotiation and Data Channels
 
@@ -160,7 +170,7 @@ success does not certify every SDL device/launch configuration.
 
 - Bandwidth-adaptive RTCP intervals, reduced-size feedback negotiation, BYE and collision handling.
 - FEC/RTX, simulcast/SVC and additional codecs.
-- TURN over TCP/TLS, dual-stack completeness and STUN authentication v2.
+- TURN server/address failover, dual-stack completeness and STUN authentication v2.
 - Full SDP/Unified Plan coverage and established codec changes.
 - Production authentication, authorization, HTTPS/WSS deployment, quotas,
   sophisticated per-subscriber bitrate allocation and independent security review.

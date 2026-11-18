@@ -172,13 +172,31 @@ The retained changes are a tested foundation, not completion of work items 0–6
    composition/negotiation. Periodic compound SR/RR is only one part.
 3. Implement downstream congestion-aware allocation/pacing on both SFU media
    legs, then measure loss recovery and bounded delay under impairments.
-4. Add nonblocking stream I/O support (the worker poller currently monitors
-   read readiness), then TCP/TLS TURN with verified server certificates,
-   framing/partial writes, refresh and independent coturn tests. Do not add a
-   blocking TLS handshake to the media worker.
+4. Qualify TURN under hostile networks and complete server/address failover and
+   dual-stack selection. Nonblocking read/write readiness and TCP/TLS TURN are
+   now implemented, with verified certificates, bounded framing/partial writes,
+   refresh and coturn runtime/client tests.
 5. Add broader allocation-failure/stateful fuzz/concurrency coverage, hostile
    network fixtures and automated capacity/resource-growth measurements.
 
 Actual Safari, Firefox, Linux/Windows qualification, long soaks and independent
 protocol/security review remain open. No access-control scheme is selected by
 this plan.
+
+## Latest transport implementation
+
+The project code is now MIT-licensed; dependencies retain their own licenses.
+The worker supports read/write readiness on epoll/kqueue/select. TURN supports
+UDP/TCP/TLS client-to-server legs without blocking the media worker; TLS has
+strict trust-chain and server-name/IP verification. Library users configure
+`rtc_transport_set_turn_server_ex()` or a single peer `turn:`/`turns:` URL.
+Stream sends are bounded to 64 KiB and 500 ms after connection; connection/TLS
+setup is bounded to five seconds. DNS uses the calling thread and selects one
+address. This is not server/address failover.
+
+Local UDP/TCP/TLS runtime and native peer tests pass, including real SRTP,
+DTLS data, SCTP, allocation refresh and ICE restart. Trusted-CA/wrong-identity
+and untrusted-CA tests fail closed. All ten targeted TURN/peer tests also pass
+under ASan/UBSan. A short-lifetime TLS refresh failure exposed Nagle/delayed-ACK
+latency; enabling TCP_NODELAY fixed it, and the focused TLS peer test passed
+three consecutive repetitions without changing its lifetime/deadlines.

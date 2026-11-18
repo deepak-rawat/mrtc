@@ -64,7 +64,7 @@ working NACK, PLI, RTP extensions or replay windows.
 
 ### 3. Expand hostile-network and deployment coverage
 
-- TURN-over-TCP/TLS and STUN long-term authentication v2.
+- TURN server/address failover and STUN long-term authentication v2.
 - IPv6/dual-stack relay and candidate selection.
 - Network changes and NAT behavior against independent implementations.
 - Fault injection across both SFU media legs, keeping queues and caches bounded.

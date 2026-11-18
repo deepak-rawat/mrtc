@@ -376,12 +376,21 @@ TEST(runtime_relay_only_coturn) {
         b.worker, &(rtc_transport_config_t){.listener = b.listener, .ice_mode = RTC_ICE_MODE_FULL});
     ASSERT(b.transport != NULL);
     rtc_transport_on_data(b.transport, received_data, &b);
-    ASSERT_EQ(rtc_transport_set_turn_server(a.transport, "127.0.0.1", port, "mrtc", "runtime"),
-              RTC_OK);
-    ASSERT_EQ(rtc_transport_set_turn_server(b.transport, "127.0.0.1", port, "mrtc", "runtime"),
-              RTC_OK);
+    const char *protocol = getenv("MRTC_TEST_TURN_TRANSPORT");
+    rtc_turn_server_t server = {.host = "127.0.0.1",
+                                .port = port,
+                                .username = "mrtc",
+                                .credential = "runtime",
+                                .protocol = protocol && !strcmp(protocol, "tls")   ? RTC_TURN_TLS
+                                            : protocol && !strcmp(protocol, "tcp") ? RTC_TURN_TCP
+                                                                                   : RTC_TURN_UDP,
+                                .ca_file = getenv("MRTC_TEST_TURN_CA")};
+    ASSERT_EQ(rtc_transport_set_turn_server_ex(a.transport, &server), RTC_OK);
+    ASSERT_EQ(rtc_transport_set_turn_server_ex(b.transport, &server), RTC_OK);
+    rtc_transport_on_rtp(b.transport, received_rtp, &b);
     rtc_transport_candidate_t ac, bc;
-    uint64_t deadline = rtc_time_ms() + 5000;
+    bool reject = getenv("MRTC_TEST_TURN_EXPECT_REJECT") != NULL;
+    uint64_t deadline = rtc_time_ms() + (reject ? 2000 : 5000);
     bool allocated = false;
     while (rtc_time_ms() < deadline) {
         if (rtc_transport_get_relay_candidate(a.transport, &ac) == RTC_OK &&
@@ -390,6 +399,12 @@ TEST(runtime_relay_only_coturn) {
             break;
         }
         SLEEP_MS(10);
+    }
+    if (reject) {
+        ASSERT(!allocated);
+        endpoint_close(&b);
+        endpoint_close(&a);
+        return;
     }
     ASSERT(allocated);
     ASSERT(ac.port != bc.port);
@@ -401,6 +416,15 @@ TEST(runtime_relay_only_coturn) {
     ASSERT_EQ(rtc_transport_start_dtls(a.transport), RTC_OK);
     ASSERT(wait_dtls(&a, RTC_TRANSPORT_DTLS_CONNECTED));
     ASSERT(wait_dtls(&b, RTC_TRANSPORT_DTLS_CONNECTED));
+    rtc_rtp_packet_t media;
+    ASSERT_EQ(rtc_rtp_build(&media, 96, 12345, 90000, 0x1234, true, (const uint8_t *)"rtp!", 4),
+              RTC_OK);
+    size_t wire_len = media.buf_len;
+    ASSERT_EQ(rtc_transport_send_rtp(a.transport, media.buf, &wire_len, sizeof(media.buf)), RTC_OK);
+    deadline = rtc_time_ms() + 1000;
+    while (!atomic_load(&b.rtp_count) && rtc_time_ms() < deadline)
+        SLEEP_MS(10);
+    ASSERT_EQ(atomic_load(&b.rtp_count), 1);
     ASSERT_EQ(rtc_transport_send_data(a.transport, (const uint8_t *)"test", 4), RTC_OK);
     deadline = rtc_time_ms() + 1000;
     while (!atomic_load(&b.data_count) && rtc_time_ms() < deadline)

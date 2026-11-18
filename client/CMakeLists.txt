@@ -36,6 +36,12 @@ if(MRTC_BUILD_TESTS)
                 COMMAND sh ${PROJECT_SOURCE_DIR}/rtc/tests/run_turn_runtime.sh
                     ${MRTC_CLIENT_TURNSERVER} $<TARGET_FILE:test_peer_integration>)
             set_tests_properties(test_peer_turn PROPERTIES TIMEOUT 60)
+            foreach(mode IN ITEMS tcp tls)
+                add_test(NAME test_peer_turn_${mode}
+                    COMMAND sh ${PROJECT_SOURCE_DIR}/rtc/tests/run_turn_runtime.sh
+                        ${MRTC_CLIENT_TURNSERVER} $<TARGET_FILE:test_peer_integration> ${mode})
+                set_tests_properties(test_peer_turn_${mode} PROPERTIES TIMEOUT 60)
+            endforeach()
         endif()
     endif()
 endif()

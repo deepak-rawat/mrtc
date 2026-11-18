@@ -222,7 +222,12 @@ requires numeric UDP inputs; browser connections use the active runtime path.
 - Each allocation has an isolated worker-owned UDP socket, avoiding allocation
   collisions between logical transports sharing the normal UDP listener
 - Allocation, permission, and channel refresh and cleanup are timer-driven
-- UDP TURN only; TCP/TLS TURN and RFC 8489 authentication v2 remain separate work
+- UDP/TCP/TLS client-to-server transport with UDP relay allocations.
+- TCP/TLS uses bounded framing/partial writes on the existing worker. TLS
+  verifies server identity and trust; no insecure certificate bypass exists.
+- Hostname resolution occurs on the configuring caller, never the media
+  worker. One resolved address is selected; address/server failover and RFC 8489
+  authentication v2 remain separate work.
 
 ### DTLS (`rtc_dtls.h/c`)
 
@@ -475,8 +480,9 @@ Client-facade tests (`test_peer`, `test_data_channel`,
 
 ## Known Limitations
 
-- TURN uses UDP and long-term credentials; TURN-over-TCP/TLS and authentication
-  v2 are not implemented.
-- No RTCP compound packets (single SR or RR per interval).
+- TURN uses long-term credentials over UDP/TCP/verified TLS; server/address
+  failover and authentication v2 are not implemented.
+- Periodic RTCP reports are compound SR/RR + SDES; full scheduling/source
+  lifecycle and feedback composition/negotiation remain incomplete.
 - Replay windows and fingerprint checks are implemented, but this educational
   stack has not undergone an independent production security audit.

@@ -972,13 +972,6 @@ int rtc_transport_set_ice_controlling(rtc_transport_t *transport, bool controlli
                      : RTC_ERR_INVALID;
 }
 
-typedef struct {
-    const char *host;
-    uint16_t port;
-    const char *username;
-    const char *credential;
-} tx_turn_args_t;
-
 static void transport_on_turn_packet(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                                      const rtc_addr_t *from, void *user) {
     rtc_transport_t *transport = user;
@@ -988,13 +981,12 @@ static void transport_on_turn_packet(rtc_pkt_type_t type, const uint8_t *data, s
 }
 
 static int tx_set_turn_impl(rtc_transport_t *transport, void *arg) {
-    tx_turn_args_t *a = arg;
+    const rtc_turn_config_t *cfg = arg;
     if (transport->turn || transport->ice_txn_registered ||
         atomic_load(&transport->selected_remote_valid) || atomic_load(&transport->closed))
         return RTC_ERR_INVALID;
-    rtc_turn_config_t cfg = {a->host, a->port, a->username, a->credential};
     transport->turn =
-        rtc_turn_runtime_create(transport->worker, &cfg, transport_on_turn_packet, transport);
+        rtc_turn_runtime_create(transport->worker, cfg, transport_on_turn_packet, transport);
     if (!transport->turn)
         return RTC_ERR_GENERIC;
     if (transport->remote_candidate_valid)
@@ -1004,10 +996,52 @@ static int tx_set_turn_impl(rtc_transport_t *transport, void *arg) {
 
 int rtc_transport_set_turn_server(rtc_transport_t *transport, const char *host, uint16_t port,
                                   const char *username, const char *credential) {
-    if (!transport || !host || !username || !credential)
+    rtc_turn_server_t server = {.host = host,
+                                .port = port,
+                                .username = username,
+                                .credential = credential,
+                                .protocol = RTC_TURN_UDP};
+    return rtc_transport_set_turn_server_ex(transport, &server);
+}
+
+int rtc_transport_set_turn_server_ex(rtc_transport_t *transport, const rtc_turn_server_t *server) {
+    if (!transport || !server || !server->host || !server->host[0] || !server->username ||
+        !server->credential || (unsigned)server->protocol > RTC_TURN_TLS ||
+        (server->ca_file && server->protocol != RTC_TURN_TLS))
         return RTC_ERR_INVALID;
-    tx_turn_args_t args = {host, port, username, credential};
-    return tx_op_invoke(transport, tx_set_turn_impl, &args);
+    uint16_t port = server->port ? server->port : server->protocol == RTC_TURN_TLS ? 5349 : 3478;
+    rtc_addr_t resolved;
+    if (rtc_addr_from_string(&resolved, server->host, port) != RTC_OK) {
+        if (rtc_worker_on_loop_thread(transport->worker)) {
+            RTC_LOG_ERR("TURN hostname resolution must occur outside the media worker");
+            return RTC_ERR_INVALID;
+        }
+        struct addrinfo hints = {0}, *addresses = NULL;
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = server->protocol == RTC_TURN_UDP ? SOCK_DGRAM : SOCK_STREAM;
+        char service[8];
+        snprintf(service, sizeof(service), "%u", port);
+        if (getaddrinfo(server->host, service, &hints, &addresses) != 0 || !addresses) {
+            RTC_LOG_ERR("TURN server DNS resolution failed");
+            return RTC_ERR_SOCKET;
+        }
+        if (addresses->ai_addrlen > sizeof(resolved.addr)) {
+            freeaddrinfo(addresses);
+            return RTC_ERR_INVALID;
+        }
+        memset(&resolved, 0, sizeof(resolved));
+        memcpy(&resolved.addr, addresses->ai_addr, addresses->ai_addrlen);
+        resolved.len = (socklen_t)addresses->ai_addrlen;
+        freeaddrinfo(addresses);
+    }
+    rtc_turn_config_t cfg = {.server_host = server->host,
+                             .server_port = port,
+                             .username = server->username,
+                             .credential = server->credential,
+                             .protocol = server->protocol,
+                             .ca_file = server->ca_file,
+                             .resolved_address = &resolved};
+    return tx_op_invoke(transport, tx_set_turn_impl, &cfg);
 }
 
 static int tx_get_relay_impl(rtc_transport_t *transport, void *arg) {

@@ -4,8 +4,29 @@
  */
 #include "test_harness.h"
 #include "rtc_stun.h"
+#include "rtc_turn.h"
 #include "rtc/rtc_common.h"
 #include <string.h>
+
+TEST(turn_stream_fragmentation_padding_and_bounds) {
+    uint8_t data[32] = {0x40, 0x01, 0, 1, 0x55, 0, 0, 0};
+    size_t length;
+    for (size_t size = 0; size < 8; size++)
+        ASSERT_EQ(rtc_turn_stream_frame_length(data, size, &length), RTC_ERR_TIMEOUT);
+    ASSERT_EQ(rtc_turn_stream_frame_length(data, sizeof(data), &length), RTC_OK);
+    ASSERT_EQ(length, 8);
+    data[8] = 0x01;
+    data[9] = 0x01;
+    ASSERT_EQ(rtc_turn_stream_frame_length(data + 8, 19, &length), RTC_ERR_TIMEOUT);
+    ASSERT_EQ(rtc_turn_stream_frame_length(data + 8, 20, &length), RTC_OK);
+    ASSERT_EQ(length, 20);
+    data[0] = 0x80;
+    ASSERT_EQ(rtc_turn_stream_frame_length(data, sizeof(data), &length), RTC_ERR_INVALID);
+    data[0] = 0x40;
+    data[2] = 0xff;
+    data[3] = 0xff;
+    ASSERT_EQ(rtc_turn_stream_frame_length(data, sizeof(data), &length), RTC_ERR_INVALID);
+}
 
 TEST(turn_allocate_request) {
     rtc_stun_msg_t msg;
@@ -196,6 +217,7 @@ int main(void) {
     rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(turn_allocate_request);
+    RUN_TEST(turn_stream_fragmentation_padding_and_bounds);
     RUN_TEST(turn_channel_bind_request);
     RUN_TEST(turn_channel_data_frame);
     RUN_TEST(turn_channel_data_invalid);

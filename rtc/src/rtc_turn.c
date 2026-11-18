@@ -10,6 +10,24 @@
 #include <string.h>
 #include <stdio.h>
 
+int rtc_turn_stream_frame_length(const uint8_t *data, size_t available, size_t *length) {
+    if (!data || !length)
+        return RTC_ERR_INVALID;
+    if (available < 4)
+        return RTC_ERR_TIMEOUT;
+    size_t payload = ((size_t)data[2] << 8) | data[3];
+    bool channel = data[0] >= 0x40 && data[0] <= 0x7f;
+    if (!channel && (data[0] > 3 || payload % 4))
+        return RTC_ERR_INVALID;
+    size_t size = channel ? (payload + 7) & ~(size_t)3 : payload + STUN_HEADER_SIZE;
+    if (size > RTC_PACKET_IO_BUF_SIZE)
+        return RTC_ERR_INVALID;
+    if (available < size)
+        return RTC_ERR_TIMEOUT;
+    *length = size;
+    return RTC_OK;
+}
+
 /* Send a STUN message to the TURN server and wait for response */
 static int turn_transaction(rtc_turn_client_t *tc, rtc_stun_msg_t *req, rtc_stun_msg_t *resp) {
     ssize_t sent = sendto(tc->transport->sock, (const char *)req->buf, (int)req->buf_len, 0,
@@ -77,7 +95,11 @@ rtc_err_t rtc_turn_init(rtc_turn_client_t *tc, rtc_packet_io_t *transport,
     tc->transport = transport;
 
     /* Resolve server address */
-    int rc = rtc_addr_from_string(&tc->server_addr, cfg->server_host, cfg->server_port);
+    int rc = RTC_OK;
+    if (cfg->resolved_address)
+        tc->server_addr = *cfg->resolved_address;
+    else
+        rc = rtc_addr_from_string(&tc->server_addr, cfg->server_host, cfg->server_port);
     if (rc != RTC_OK) {
         RTC_LOG_ERR("TURN: failed to resolve server %s:%d", cfg->server_host, cfg->server_port);
         return rc;

@@ -116,6 +116,19 @@ int rtc_transport_set_ice_controlling(rtc_transport_t *transport, bool controlli
  * Allocation is asynchronous; poll get_relay_candidate until RTC_OK. */
 int rtc_transport_set_turn_server(rtc_transport_t *transport, const char *host, uint16_t port,
                                   const char *username, const char *credential);
+typedef enum { RTC_TURN_UDP, RTC_TURN_TCP, RTC_TURN_TLS } rtc_turn_protocol_t;
+typedef struct {
+    const char *host;
+    uint16_t port; /* zero: 3478, or 5349 for TLS */
+    const char *username;
+    const char *credential;
+    rtc_turn_protocol_t protocol;
+    const char *ca_file; /* NULL: OpenSSL's default trust store; TLS only */
+} rtc_turn_server_t;
+/* DNS resolution occurs on the calling thread, before worker configuration.
+ * Hostname configuration must therefore be called outside worker callbacks.
+ * TCP/TLS is the client-to-relay leg; the allocated relay is still UDP. */
+int rtc_transport_set_turn_server_ex(rtc_transport_t *transport, const rtc_turn_server_t *server);
 int rtc_transport_get_relay_candidate(rtc_transport_t *transport,
                                       rtc_transport_candidate_t *candidate);
 typedef void (*rtc_transport_task_fn)(void *user);

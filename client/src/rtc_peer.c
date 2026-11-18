@@ -159,33 +159,60 @@ static int peer_runtime_init(rtc_peer_connection_t *pc, const rtc_config_t *conf
                 goto invalid_config;
             for (int j = 0; j < server->url_count; j++) {
                 const char *url = server->urls[j];
-                if (!url || strncmp(url, "stuns:", 6) == 0 || strncmp(url, "turns:", 6) == 0)
+                if (!url || strncmp(url, "stuns:", 6) == 0)
                     goto invalid_config;
                 if (strncmp(url, "stun:", 5) == 0)
                     continue;
-                if (strncmp(url, "turn:", 5) != 0 || configured_turn || !server->username ||
-                    !server->credential)
+                bool tls = strncmp(url, "turns:", 6) == 0;
+                if ((!tls && strncmp(url, "turn:", 5) != 0) || configured_turn ||
+                    !server->username || !server->credential)
                     goto invalid_config;
                 char host[256];
-                copy_string(host, sizeof(host), url + 5);
+                const char *authority = url + (tls ? 6 : 5);
+                if (strlen(authority) >= sizeof(host))
+                    goto invalid_config;
+                copy_string(host, sizeof(host), authority);
+                rtc_turn_protocol_t protocol = tls ? RTC_TURN_TLS : RTC_TURN_UDP;
                 char *query = strchr(host, '?');
                 if (query) {
-                    if (strcmp(query, "?transport=udp") != 0)
+                    if (!strcmp(query, "?transport=tcp"))
+                        protocol = tls ? RTC_TURN_TLS : RTC_TURN_TCP;
+                    else if (tls || strcmp(query, "?transport=udp"))
                         goto invalid_config;
                     *query = '\0';
                 }
-                unsigned long port = 3478;
-                char *colon = strrchr(host, ':');
+                unsigned long port = tls ? 5349 : 3478;
+                char *name = host;
+                char *colon;
+                if (host[0] == '[') {
+                    char *bracket = strchr(host + 1, ']');
+                    if (!bracket || (bracket[1] && bracket[1] != ':'))
+                        goto invalid_config;
+                    colon = bracket[1] == ':' ? bracket + 1 : NULL;
+                    *bracket = '\0';
+                    name++;
+                } else {
+                    colon = strchr(host, ':');
+                    if (colon && strchr(colon + 1, ':'))
+                        goto invalid_config;
+                }
                 if (colon) {
                     char *end = NULL;
+                    if (colon[1] < '0' || colon[1] > '9')
+                        goto invalid_config;
                     port = strtoul(colon + 1, &end, 10);
                     if (!end || *end || !port || port > 65535)
                         goto invalid_config;
                     *colon = '\0';
                 }
-                if (!host[0] ||
-                    rtc_transport_set_turn_server(pc->runtime_transport, host, (uint16_t)port,
-                                                  server->username, server->credential) != RTC_OK)
+                rtc_turn_server_t relay = {.host = name,
+                                           .port = (uint16_t)port,
+                                           .username = server->username,
+                                           .credential = server->credential,
+                                           .protocol = protocol,
+                                           .ca_file = tls ? config->turn_tls_ca_file : NULL};
+                if (!name[0] ||
+                    rtc_transport_set_turn_server_ex(pc->runtime_transport, &relay) != RTC_OK)
                     goto invalid_config;
                 configured_turn = true;
                 pc->relay_only = true;
@@ -215,8 +242,8 @@ static int peer_runtime_init(rtc_peer_connection_t *pc, const rtc_config_t *conf
     pc->runtime_registered = true;
     return RTC_OK;
 invalid_config:
-    RTC_LOG_ERR("Unsupported ICE server configuration (supported: STUN, one authenticated UDP "
-                "TURN)");
+    RTC_LOG_ERR("Unsupported ICE server configuration (supported: STUN, one authenticated "
+                "UDP/TCP/TLS TURN server)");
     peer_runtime_close(pc);
     return RTC_ERR_INVALID;
 }

@@ -235,8 +235,12 @@ TEST(peer_turn_relay_sctp_refresh_and_restart) {
     const char *port = getenv("MRTC_TEST_TURN_PORT");
     ASSERT(port && port[0]);
     char url[128];
-    snprintf(url, sizeof(url), "turn:127.0.0.1:%s?transport=udp", port);
+    const char *transport = getenv("MRTC_TEST_TURN_TRANSPORT");
+    bool tls = transport && !strcmp(transport, "tls");
+    snprintf(url, sizeof(url), "%s:127.0.0.1:%s?transport=%s", tls ? "turns" : "turn", port,
+             tls || (transport && !strcmp(transport, "tcp")) ? "tcp" : "udp");
     rtc_config_t ac = {.ice_server_count = 1};
+    ac.turn_tls_ca_file = getenv("MRTC_TEST_TURN_CA");
     ac.ice_servers[0] = (rtc_ice_server_t){
         .urls = {url}, .url_count = 1, .username = "mrtc", .credential = "runtime"};
     rtc_config_t bc = {.stun_server = "127.0.0.1", .stun_port = 9};
@@ -276,6 +280,7 @@ TEST(peer_turn_relay_sctp_refresh_and_restart) {
 }
 
 int main(int argc, char **argv) {
+    rtc_set_log_level(RTC_LOG_DEBUG);
     if (rtc_client_init() != RTC_OK)
         return 1;
     if (argc > 1 && strcmp(argv[1], "--turn") == 0) {

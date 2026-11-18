@@ -3,13 +3,14 @@
 #include "rtc/rtc_rtp_ext.h"
 #include "rtc/rtc_sdp.h"
 #include "rtc_stun.h"
+#include "rtc_turn.h"
 
 #include <string.h>
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if (!size || size > SDP_MAX_SIZE)
         return 0;
-    uint8_t parser = data[0] % 5;
+    uint8_t parser = data[0] % 6;
     data++;
     size--;
     if (parser == 0) {
@@ -40,6 +41,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         (void)rtc_rtcp_parse_pli(&pli, data, size);
         (void)rtc_rtcp_parse_fir(&fir, data, size);
         (void)rtc_rtcp_parse_twcc(&twcc, data, size);
+    } else if (parser == 5) {
+        size_t length;
+        (void)rtc_turn_stream_frame_length(data, size, &length);
     } else {
         char text[SDP_MAX_SIZE];
         if (size >= sizeof(text))

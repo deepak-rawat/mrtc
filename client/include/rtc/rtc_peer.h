@@ -42,13 +42,14 @@ typedef struct {
 } rtc_ice_server_t;
 
 typedef struct {
-    /* STUN and one authenticated turn: URL (UDP only) are supported.
+    /* STUN and one authenticated turn:/turns: URL are supported.
      * Configuring TURN enforces relay-only routing; unsupported URLs,
      * transports and multiple TURN URLs fail creation explicitly. */
     rtc_ice_server_t ice_servers[4];
     int ice_server_count;
     const char *stun_server;
     uint16_t stun_port;
+    const char *turn_tls_ca_file; /* NULL: OpenSSL default trust store */
 } rtc_config_t;
 
 typedef enum {

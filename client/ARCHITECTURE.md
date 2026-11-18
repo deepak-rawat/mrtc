@@ -209,9 +209,10 @@ without changing the current descriptions.
 application exchanges the new ICE credentials through another offer/answer
 cycle; a successful restart preserves the SCTP association and RTP streams.
 
-The client supports one authenticated UDP TURN URL, including relay-only
-gathering and asynchronous candidate/end-of-candidates callbacks. TURN over
-TCP/TLS and multiple TURN URLs are rejected rather than silently ignored.
+The client supports one authenticated UDP/TCP `turn:` or TLS `turns:` URL,
+including relay-only gathering and asynchronous candidate/end-of-candidates
+callbacks. TLS uses verified server identity and the default trust store or
+`rtc_config_t.turn_tls_ca_file`. Multiple TURN URLs remain rejected.
 
 ### Stats Reporting (`rtc_stats.h`, `rtc_peer.c`)
 
@@ -285,6 +286,6 @@ the scaffolding touches runtime internals.
   transport's `rtc_transport_get_stats()` and per-channel byte counters.
 - Established codec/payload-type changes are rejected; live track and
   direction changes are supported.
-- TURN supports one authenticated UDP URL, not TCP/TLS or multiple servers.
+- TURN supports one authenticated UDP/TCP/TLS URL, without server/address failover.
 - Multiple peer connections share one default runtime; per-peer worker
   isolation is not a public knob.
