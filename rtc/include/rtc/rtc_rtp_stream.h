@@ -45,6 +45,9 @@ void rtc_rtp_send_stream_destroy(rtc_rtp_send_stream_t *stream);
 
 rtc_rtp_recv_stream_t *rtc_rtp_recv_stream_create(const rtc_rtp_recv_stream_config_t *cfg);
 void rtc_rtp_recv_stream_destroy(rtc_rtp_recv_stream_t *stream);
+/* Initial negotiation only; cannot change payload type after media starts. */
+int rtc_rtp_send_stream_set_payload_type(rtc_rtp_send_stream_t *stream, uint8_t payload_type);
+int rtc_rtp_recv_stream_set_payload_type(rtc_rtp_recv_stream_t *stream, uint8_t payload_type);
 
 void rtc_rtp_send_stream_set_active(rtc_rtp_send_stream_t *stream, bool active);
 bool rtc_rtp_send_stream_is_active(const rtc_rtp_send_stream_t *stream);
@@ -100,6 +103,7 @@ void rtc_rtp_recv_stream_attach_transport(rtc_rtp_recv_stream_t *stream,
                                           rtc_transport_t *transport);
 void rtc_rtp_recv_stream_on_feedback(rtc_rtp_recv_stream_t *stream,
                                      rtc_rtp_recv_stream_feedback_fn fn, void *user);
+void rtc_rtp_recv_stream_set_feedback(rtc_rtp_recv_stream_t *stream, uint8_t feedback);
 void rtc_rtp_recv_stream_tick(rtc_rtp_recv_stream_t *stream, uint64_t now_ms);
 int rtc_rtp_recv_stream_request_keyframe(rtc_rtp_recv_stream_t *stream);
 

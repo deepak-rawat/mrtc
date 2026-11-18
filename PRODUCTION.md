@@ -120,8 +120,8 @@ Implemented: native and SFU periodic reports include SDES with the same random
 process-local CNAME advertised in SDP. Report parsing respects sub-packet
 boundaries; loss fractions use report intervals, and late pre-rollover packets
 do not create a false cycle. Focused RTCP/SDP/media/routing/peer/SFU tests pass
-locally. Adaptive scheduling, reduced-size feedback negotiation and source
-retirement remain required work; compound reports alone do not complete RTCP.
+locally. Adaptive scheduling and source retirement remain required work;
+compound reports alone do not complete RTCP.
 
 Negotiated MID routing rejects unknown MIDs and ambiguous payload-type-only
 matches instead of binding a new source to the first stream. SR reception also
@@ -168,8 +168,8 @@ The retained changes are a tested foundation, not completion of work items 0–6
 
 1. Complete supported-profile negotiation validation, including feedback
    capability intersection, rejected sections and browser-specific SDP shapes.
-2. Complete RTCP scheduling, source retirement/collisions and feedback packet
-   composition/negotiation. Periodic compound SR/RR is only one part.
+2. Complete RTCP scheduling and source retirement/collisions. Compound feedback
+   composition and supported feedback/extension intersection are now implemented.
 3. Implement downstream congestion-aware allocation/pacing on both SFU media
    legs, then measure loss recovery and bounded delay under impairments.
 4. Qualify TURN under hostile networks and complete server/address failover and
@@ -200,3 +200,11 @@ and untrusted-CA tests fail closed. All ten targeted TURN/peer tests also pass
 under ASan/UBSan. A short-lifetime TLS refresh failure exposed Nagle/delayed-ACK
 latency; enabling TCP_NODELAY fixed it, and the focused TLS peer test passed
 three consecutive repetitions without changing its lifetime/deadlines.
+
+Feedback is now compound without relying on unnegotiated reduced-size RTCP.
+SDP retains payload-specific/wildcard feedback and rejected RTP sections;
+native/SFU answers negotiate supported capabilities rather than splicing raw
+SDP. Native answers can adopt an initially offered dynamic payload type while
+established mappings remain immutable. Receivers gate NACK/PLI/FIR on negotiated
+support. Targeted protocol tests and their ASan/UBSan counterparts pass, as do
+the four native mesh/SFU/AUTO decoded-media/SCTP E2E scenarios.

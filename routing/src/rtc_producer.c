@@ -136,7 +136,7 @@ int rtc_producer_request_keyframe(rtc_producer_t *producer) {
         return RTC_OK;
     if (!atomic_compare_exchange_strong(&producer->last_keyframe_request_ms, &previous, now))
         return RTC_OK;
-    uint8_t packet[64];
+    uint8_t packet[64 + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
     size_t len = 0;
     int rc = rtc_rtcp_build_pli(packet, sizeof(packet), &len, 1, producer->rtp.ssrc);
     if (rc != RTC_OK)

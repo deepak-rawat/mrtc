@@ -7,6 +7,7 @@
 #include "rtc_dtls.h"
 #include "rtc/rtc_rtp.h"
 #include "rtc/rtc_sdp.h"
+#include "rtc/rtc_rtcp.h"
 #include "rtc_rtp_demux.h"
 #ifdef MRTC_ENABLE_TWCC
 #  include "rtc/rtc_rtcp.h"
@@ -1308,13 +1309,15 @@ static void transport_twcc_fb_timer(void *user) {
         uint8_t fb[RTCP_MAX_PACKET];
         size_t fb_len = 0;
         if (rtc_twcc_receiver_build_feedback(&transport->twcc_receiver, transport->twcc_local_ssrc,
-                                             transport->twcc_remote_ssrc, fb, sizeof(fb),
+                                             transport->twcc_remote_ssrc, fb, sizeof(fb) - 64,
                                              &fb_len) == RTC_OK) {
             uint8_t out[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
             if (fb_len <= sizeof(out)) {
                 memcpy(out, fb, fb_len);
                 size_t out_len = fb_len;
-                (void)rtc_transport_send_rtcp(transport, out, &out_len, sizeof(out));
+                int rc = rtc_transport_send_rtcp(transport, out, &out_len, sizeof(out));
+                if (rc != RTC_OK)
+                    RTC_LOG_WARN("Transport-wide feedback send failed: %d", rc);
             }
         }
         transport->twcc_have_packets = false;
@@ -1471,13 +1474,15 @@ int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len
 }
 
 int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap) {
-    if (!transport || !buf || !len)
+    if (!transport || !buf || !len || buf_cap < 20)
         return RTC_ERR_INVALID;
     rtc_mutex_lock(&transport->send_mutex);
     int rc = RTC_ERR_INVALID;
     if (!atomic_load(&transport->closed) && atomic_load(&transport->srtp_ready) &&
         atomic_load(&transport->selected_remote_valid)) {
-        rc = rtc_srtp_protect_rtcp(&transport->srtp_send, buf, len, buf_cap);
+        rc = rtc_rtcp_compound_feedback(buf, len, buf_cap - 20);
+        if (rc == RTC_OK)
+            rc = rtc_srtp_protect_rtcp(&transport->srtp_send, buf, len, buf_cap);
         if (rc == RTC_OK)
             rc = transport_send_raw_locked(transport, buf, *len);
     }

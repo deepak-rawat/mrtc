@@ -281,6 +281,29 @@ TEST(sdp_multi_media_roundtrip) {
     rtc_sdp_close(&parsed);
 }
 
+TEST(sdp_feedback_is_payload_scoped_and_rejection_survives) {
+    const char text[] = "v=0\r\nm=video 0 UDP/TLS/RTP/SAVPF 96 97\r\n"
+                        "a=mid:0\r\na=sendrecv\r\na=rtcp-mux\r\n"
+                        "a=rtcp-fb:* nack\r\na=rtcp-fb:96 nack pli\r\n"
+                        "a=rtcp-fb:97 transport-cc\r\n"
+                        "a=rtpmap:96 H264/90000\r\na=rtpmap:97 VP8/90000\r\n";
+    rtc_sdp_t parsed = {0}, roundtrip = {0};
+    ASSERT_EQ(rtc_sdp_parse(&parsed, text, sizeof(text) - 1), RTC_OK);
+    ASSERT(parsed.media[0].rejected);
+    ASSERT(parsed.media[0].rtcp_mux);
+    ASSERT_EQ(parsed.media[0].direction, 3);
+    ASSERT_EQ(parsed.media[0].rtcp_feedback, RTC_SDP_FB_NACK | RTC_SDP_FB_TRANSPORT_CC);
+    ASSERT_EQ(rtc_sdp_generate(&parsed), RTC_OK);
+    ASSERT(strstr(parsed.raw, "m=video 0 ") != NULL);
+    ASSERT(strstr(parsed.raw, "a=rtcp-fb:97 nack\r\n") != NULL);
+    ASSERT(strstr(parsed.raw, "nack pli") == NULL);
+    ASSERT_EQ(rtc_sdp_parse(&roundtrip, parsed.raw, parsed.raw_len), RTC_OK);
+    ASSERT(roundtrip.media[0].rejected);
+    ASSERT_EQ(roundtrip.media[0].rtcp_feedback, parsed.media[0].rtcp_feedback);
+    rtc_sdp_close(&parsed);
+    rtc_sdp_close(&roundtrip);
+}
+
 TEST(sdp_video_h264) {
     rtc_sdp_t sdp;
     memset(&sdp, 0, sizeof(sdp));
@@ -329,6 +352,7 @@ int main(void) {
     RUN_TEST(sdp_parse_multi_media);
     RUN_TEST(sdp_multi_media_roundtrip);
     RUN_TEST(sdp_video_h264);
+    RUN_TEST(sdp_feedback_is_payload_scoped_and_rejection_survives);
 
     rtc_cleanup();
     TEST_SUMMARY();

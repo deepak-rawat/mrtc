@@ -139,6 +139,9 @@ const char *rtc_rtcp_cname(void);
 /* Build SR/RR followed by an SDES CNAME chunk (RFC 3550 section 6.1). */
 int rtc_rtcp_build_report(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats, bool sender);
 void rtc_rtcp_stats_report_sent(rtc_rtcp_stats_t *stats);
+/* Prefix standalone feedback/BYE with RR + SDES; reduced-size RTCP is not
+ * advertised. Existing SR/RR compounds are left unchanged. */
+int rtc_rtcp_compound_feedback(uint8_t *buf, size_t *len, size_t capacity);
 
 /* Parse an RTCP packet from raw bytes */
 int rtc_rtcp_parse(rtc_rtcp_packet_t *pkt, const uint8_t *data, size_t len);

@@ -122,6 +122,36 @@ static bool wait_count(_Atomic unsigned *count, unsigned target, int timeout_ms)
     return false;
 }
 
+TEST(peer_answer_adopts_offered_payload_type_before_media) {
+    rtc_config_t ac = {.stun_server = "127.0.0.1", .stun_port = 9};
+    rtc_config_t bc = {.stun_server = "127.0.0.1", .stun_port = 10};
+    endpoint_t a = {.peer = rtc_peer_connection_create(&ac)};
+    endpoint_t b = {.peer = rtc_peer_connection_create(&bc)};
+    ASSERT(a.peer && b.peer);
+    rtc_peer_connection_on_track(a.peer, received_track, &a);
+    rtc_peer_connection_on_track(b.peer, received_track, &b);
+    rtc_codec_t offered = {
+        .payload_type = 109, .mime_type = "audio/opus", .clock_rate = 48000, .channels = 2};
+    rtc_codec_t preferred = offered;
+    preferred.payload_type = 111;
+    rtc_rtp_sender_t *as = rtc_peer_connection_add_track(a.peer, RTC_KIND_AUDIO, &offered);
+    rtc_rtp_sender_t *bs = rtc_peer_connection_add_track(b.peer, RTC_KIND_AUDIO, &preferred);
+    ASSERT(as && bs);
+    ASSERT(exchange(a.peer, b.peer));
+    ASSERT(strstr(rtc_peer_connection_local_desc(b.peer)->sdp, "a=rtpmap:109 opus/48000/2") !=
+           NULL);
+    ASSERT(wait_connected(&a, &b, NULL));
+    const uint8_t audio[] = {0xf8, 0xff, 0xfe};
+    ASSERT_EQ(rtc_rtp_sender_send(as, audio, sizeof(audio), 960, true), RTC_OK);
+    ASSERT_EQ(rtc_rtp_sender_send(bs, audio, sizeof(audio), 960, true), RTC_OK);
+    ASSERT(wait_count(&a.frames, 1, 3000));
+    ASSERT(wait_count(&b.frames, 1, 3000));
+    rtc_peer_connection_close(a.peer);
+    rtc_peer_connection_close(b.peer);
+    rtc_peer_connection_destroy(a.peer);
+    rtc_peer_connection_destroy(b.peer);
+}
+
 TEST(peer_sctp_live_renegotiation_glare_and_ice_restart) {
     /* Different STUN contexts allocate independent shared UDP listeners.
      * No STUN server is required: host candidates carry this local exchange. */
@@ -286,6 +316,7 @@ int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--turn") == 0) {
         RUN_TEST(peer_turn_relay_sctp_refresh_and_restart);
     } else {
+        RUN_TEST(peer_answer_adopts_offered_payload_type_before_media);
         RUN_TEST(peer_sctp_live_renegotiation_glare_and_ice_restart);
         RUN_TEST(peer_adds_sctp_after_media_connection);
     }

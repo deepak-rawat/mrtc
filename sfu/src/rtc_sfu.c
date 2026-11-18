@@ -258,29 +258,7 @@ static int fill_local(rtc_sfu_t *sfu, sfu_session_t *session, rtc_sdp_type_t typ
     rtc_vec_clear(&sdp->candidates);
     if (rtc_listener_fill_sdp_candidates(session->listener, sdp) != RTC_OK)
         return RTC_ERR_GENERIC;
-    int rc = rtc_sdp_generate(sdp);
-    if (rc != RTC_OK || !session->publishing)
-        return rc;
-    char *section = sdp->raw;
-    for (int i = 0; i < sdp->media_count; i++) {
-        section = strstr(section, "m=");
-        if (!section)
-            return RTC_ERR_SDP;
-        if (sdp->media[i].extmap_count) {
-            char *extension = strstr(section, "a=extmap:");
-            char feedback[64];
-            int len = snprintf(feedback, sizeof(feedback), "a=rtcp-fb:%d transport-cc\r\n",
-                               sdp->media[i].payload_type);
-            if (!extension || len < 0 || (size_t)len >= sizeof(feedback) ||
-                sdp->raw_len + (size_t)len >= sizeof(sdp->raw))
-                return RTC_ERR_SDP;
-            memmove(extension + len, extension, strlen(extension) + 1);
-            memcpy(extension, feedback, (size_t)len);
-            sdp->raw_len += (size_t)len;
-        }
-        section += 2;
-    }
-    return RTC_OK;
+    return rtc_sdp_generate(sdp);
 }
 
 static int apply_remote(sfu_session_t *session, const rtc_sdp_t *remote) {
@@ -363,6 +341,10 @@ static int subscribe(rtc_sfu_t *sfu, const char *subscriber, sfu_session_t *publ
         bool sending = media_sending(&publisher->remote.media[i]);
         s->description.media[index].direction = sending ? 1 : 3;
         s->description.media[index].extmap_count = 0;
+        s->description.media[index].rtcp_feedback =
+            s->description.media[index].media_type == RTC_MEDIA_VIDEO
+                ? RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR
+                : 0;
         if (s->subscriptions[index] != publisher->producers[i]) {
             rtc_consumer_destroy(s->consumers[index]);
             s->consumers[index] = NULL;
@@ -443,6 +425,8 @@ static int validate_publisher(sfu_session_t *session, const rtc_sdp_t *remote, u
             continue;
         }
         bool video = media->media_type == RTC_MEDIA_VIDEO;
+        if (!media->rejected && !media->rtcp_mux)
+            return RTC_ERR_SDP;
         if (strcmp(media->codec_name, video ? "VP8" : "opus") != 0 || media->payload_type < 0 ||
             media->payload_type > 127 || media->clockrate != (video ? 90000 : 48000) ||
             (media_sending(media) && !media->ssrc) ||
@@ -451,7 +435,7 @@ static int validate_publisher(sfu_session_t *session, const rtc_sdp_t *remote, u
                      old->clockrate != media->clockrate || old->channels != media->channels)))
             return RTC_ERR_SDP;
 #ifdef MRTC_ENABLE_TWCC
-        if (video && !*twcc_id)
+        if (video && !*twcc_id && (media->rtcp_feedback & RTC_SDP_FB_TRANSPORT_CC))
             *twcc_id = rtc_sdp_media_find_extmap_id(media, RTC_EXT_URI_TRANSPORT_CC);
 #endif
     }
@@ -559,9 +543,14 @@ static int publish(rtc_sfu_t *sfu, const rtc_sfu_command_t *command) {
             continue;
         }
         s->description.media[i].direction = media_sending(m) ? 2 : 3;
+        s->description.media[i].rtcp_feedback &=
+            m->media_type == RTC_MEDIA_VIDEO ? RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR
+                                             : 0;
         s->description.media[i].extmap_count = 0;
-        if (twcc_id && rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC) == twcc_id)
+        if (twcc_id && rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC) == twcc_id) {
             rtc_sdp_media_add_extmap(&s->description.media[i], twcc_id, RTC_EXT_URI_TRANSPORT_CC);
+            s->description.media[i].rtcp_feedback |= RTC_SDP_FB_TRANSPORT_CC;
+        }
         s->description.media[i].ssrc = 0;
     }
     if (twcc_id)

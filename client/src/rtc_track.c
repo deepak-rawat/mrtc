@@ -201,6 +201,8 @@ void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc
     m->mid_index = t->mid_index;
     m->ssrc = rtc_rtp_send_stream_ssrc(t->sender.stream);
     m->direction = t->direction;
+    if (m->media_type == RTC_MEDIA_VIDEO)
+        m->rtcp_feedback = RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR;
 
     /* Advertise the MID extension so the peer tags inbound RTP with its MID,
      * letting us route bundled m-sections that share a payload type. */
@@ -211,6 +213,7 @@ void rtc_rtp_transceiver_fill_sdp_media(const struct rtc_rtp_transceiver *t, rtc
 #ifdef MRTC_ENABLE_TWCC
     if (m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) {
         rtc_sdp_media_add_extmap(m, 5, RTC_EXT_URI_TRANSPORT_CC);
+        m->rtcp_feedback |= RTC_SDP_FB_TRANSPORT_CC;
     }
 #endif
 }

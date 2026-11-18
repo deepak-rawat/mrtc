@@ -81,6 +81,23 @@ TEST(rtcp_build_sr) {
            pkt.sr.sender_oct_count);
 }
 
+TEST(rtcp_feedback_is_compound_without_reduced_size) {
+    uint8_t wire[256], original[64];
+    size_t length;
+    ASSERT_EQ(rtc_rtcp_build_pli(wire, sizeof(wire), &length, 0x11223344, 0x55667788), RTC_OK);
+    size_t feedback_length = length;
+    memcpy(original, wire, length);
+    ASSERT_EQ(rtc_rtcp_compound_feedback(wire, &length, feedback_length), RTC_ERR_NOMEM);
+    ASSERT_MEM_EQ(wire, original, feedback_length);
+    ASSERT_EQ(rtc_rtcp_compound_feedback(wire, &length, sizeof(wire)), RTC_OK);
+    ASSERT_EQ(wire[1], RTCP_PT_RR);
+    ASSERT_EQ(wire[9], RTCP_PT_SDES);
+    ASSERT_MEM_EQ(wire + length - feedback_length, original, feedback_length);
+    size_t compound_length = length;
+    ASSERT_EQ(rtc_rtcp_compound_feedback(wire, &length, sizeof(wire)), RTC_OK);
+    ASSERT_EQ(length, compound_length);
+}
+
 TEST(rtcp_build_rr) {
     rtc_rtcp_stats_t stats;
     rtc_rtcp_stats_init(&stats, 0x11111111);
@@ -325,6 +342,7 @@ int main(void) {
     rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(rtcp_build_sr);
+    RUN_TEST(rtcp_feedback_is_compound_without_reduced_size);
     RUN_TEST(rtcp_compound_cname_and_report_boundaries);
     RUN_TEST(rtcp_interval_loss_and_late_rollover);
     RUN_TEST(rtcp_build_rr);

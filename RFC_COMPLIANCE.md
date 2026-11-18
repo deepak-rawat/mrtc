@@ -12,7 +12,7 @@ changes there alone do not change client or SFU connectivity.
 
 | Standard | Implemented behavior | Remaining boundary |
 |---|---|---|
-| RFC 3550 — RTP/RTCP | RTP headers, sequence/timestamp tracking, compound SR/RR + random shared SDES/CNAME, interval loss/jitter statistics, incoming compound RTCP dispatch | Adaptive intervals, reduced-size feedback negotiation, BYE and collision handling are incomplete |
+| RFC 3550 — RTP/RTCP | RTP headers, sequence/timestamp tracking, compound reports/feedback + shared SDES/CNAME, interval loss/jitter statistics, incoming compound RTCP dispatch | Adaptive intervals, BYE and collision handling are incomplete; reduced-size RTCP is not advertised |
 | RFC 3711 — SRTP/SRTCP | AES-128-CM/HMAC-SHA1-80, per-SSRC rollover/replay state, authenticated replay rejection, capacity checks | No MKI/rekeying API or independent hardening audit |
 | RFC 7714 — SRTP AEAD | AES-128-GCM and AES-256-GCM; RTP/SRTCP protection and DTLS profile negotiation | Not every optional cipher/profile is offered |
 | RFC 8489 / RFC 5389 — STUN | UDP messages, integrity/fingerprint, address validation, ICE checks and credential-based TURN authentication | Authentication v2, alternate servers and TCP/TLS STUN are not implemented |
@@ -23,7 +23,7 @@ changes there alone do not change client or SFU connectivity.
 | RFC 6347 / RFC 9147 — DTLS | Minimum DTLS 1.2; newer versions negotiated when supported by OpenSSL; datagram-preserving BIOs on OpenSSL 3.2+ | Older OpenSSL uses the existing memory-BIO fallback |
 | RFC 5764 — DTLS-SRTP | Profile negotiation, key export and remote SHA-256 fingerprint pinning | Signaling authenticity is not provided by fingerprint pinning alone |
 | RFC 7983 — packet demultiplexing | Shared UDP classification and logical-transport routing | Distinct DTLS associations still require distinct network tuples |
-| RFC 8866 / RFC 3264 / RFC 8829 — SDP/JSEP | Multi-media SDP, repeated offer/answer, track/direction changes, explicit glare rejection/rollback and ICE restart | Established codec/payload-type mutation and full Unified Plan are not supported |
+| RFC 8866 / RFC 3264 / RFC 8829 — SDP/JSEP | Multi-media SDP, initial dynamic PT mapping, RTP rejection/rtcp-mux validation, feedback/extension intersection, repeated offer/answer, glare rejection/rollback and ICE restart | Established codec/payload-type mutation and full Unified Plan are not supported |
 | RFC 8285 — RTP extensions | One-byte extension form, MID and transport-cc negotiation | Two-byte form and encrypted extensions are not implemented |
 | RFC 4585 / RFC 5104 — feedback | NACK, PLI and FIR build/parse/routing; receiver loss feedback and bounded retransmission history | No RTX/FEC implementation |
 | Transport-wide CC draft / GCC | Transport-wide sequence numbers, arrival feedback and delay/loss estimation | This is not a claim to implement the different RFC 8888 wire format |
@@ -51,6 +51,13 @@ a fresh keyframe instead of starting from an arbitrary reference-dependent frame
 The SFU rewrites consumer SSRC/sequence spaces and maintains bounded
 retransmission state. Upstream and downstream feedback must be interpreted in
 their respective sequence spaces, not blindly relayed.
+
+Standalone NACK/PLI/FIR/TWCC is prefixed with RR + SDES before SRTCP protection.
+Reduced-size RTCP is not advertised, so its optional negotiation is unnecessary
+for this profile. Callers reserve `RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD` for the
+compound prefix and crypto trailer. SDP feedback is payload-scoped (including
+wildcards), answers intersect capabilities and RTP extension IDs with the
+offer, and native recovery respects negotiated NACK/PLI/FIR support.
 
 **Validation:** [VP8 tests](media/tests/test_vp8.c),
 [media pipeline tests](media/tests/test_media_pipeline.c),
@@ -168,7 +175,7 @@ success does not certify every SDL device/launch configuration.
 
 ## Deferred Work and Deployment Limits
 
-- Bandwidth-adaptive RTCP intervals, reduced-size feedback negotiation, BYE and collision handling.
+- Bandwidth-adaptive RTCP intervals, BYE and collision handling.
 - FEC/RTX, simulcast/SVC and additional codecs.
 - TURN server/address failover, dual-stack completeness and STUN authentication v2.
 - Full SDP/Unified Plan coverage and established codec changes.

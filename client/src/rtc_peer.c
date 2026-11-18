@@ -645,6 +645,19 @@ static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
                 const rtc_sdp_media_t *r = &pc->remote_sdp.media[j];
                 if (r->mid_index != m->mid_index)
                     continue;
+                m->rtcp_feedback &= r->rtcp_feedback;
+                m->rejected = r->rejected;
+                rtc_sdp_extmap_t supported[SDP_MAX_EXTMAP];
+                int count = m->extmap_count;
+                memcpy(supported, m->extmaps, sizeof(supported));
+                m->extmap_count = 0;
+                for (int k = 0; k < count; k++) {
+                    uint8_t id = rtc_sdp_media_find_extmap_id(r, supported[k].uri);
+                    if (id)
+                        rtc_sdp_media_add_extmap(m, id, supported[k].uri);
+                }
+                if (!rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC))
+                    m->rtcp_feedback &= (uint8_t)~RTC_SDP_FB_TRANSPORT_CC;
                 bool send =
                     (m->direction == RTC_DIR_SENDRECV || m->direction == RTC_DIR_SENDONLY) &&
                     (r->direction == RTC_DIR_SENDRECV || r->direction == RTC_DIR_RECVONLY);
@@ -1120,13 +1133,22 @@ static bool peer_validate_remote_media(rtc_peer_connection_t *pc, const rtc_sdp_
             continue;
         }
         bool found = false;
+        if (m->payload_type < 0 || m->payload_type > 127 ||
+            (m->payload_type >= 64 && m->payload_type <= 95))
+            return false;
+        if (!m->rejected && !m->rtcp_mux)
+            return false;
+        if (type == RTC_SDP_ANSWER &&
+            (m->rtcp_feedback & (uint8_t)~pc->local_sdp.media[i].rtcp_feedback))
+            return false;
         for (int j = 0; j < pc->transceiver_count; j++) {
             const struct rtc_rtp_transceiver *t = &pc->transceivers[j];
             if (t->mid_index != m->mid_index)
                 continue;
             const char *name = strchr(t->sender.codec.mime_type, '/');
             if (!name || !peer_codec_name_equal(name + 1, m->codec_name) ||
-                t->sender.codec.payload_type != m->payload_type ||
+                ((type != RTC_SDP_OFFER || pc->runtime_connected) &&
+                 t->sender.codec.payload_type != m->payload_type) ||
                 t->sender.codec.clock_rate != (uint32_t)m->clockrate ||
                 (t->sender.kind == RTC_KIND_AUDIO) != (m->media_type == RTC_MEDIA_AUDIO))
                 return false;
@@ -1188,8 +1210,23 @@ static int peer_set_remote_desc(rtc_peer_connection_t *pc, const rtc_desc_t *des
             continue;
         }
         bool found = false;
-        for (int j = 0; j < pc->transceiver_count; j++)
-            found |= pc->transceivers[j].mid_index == m->mid_index;
+        for (int j = 0; j < pc->transceiver_count; j++) {
+            struct rtc_rtp_transceiver *t = &pc->transceivers[j];
+            if (t->mid_index != m->mid_index)
+                continue;
+            found = true;
+            if (!pc->runtime_connected && desc->type == RTC_SDP_OFFER) {
+                if (rtc_rtp_send_stream_set_payload_type(t->sender.stream,
+                                                         (uint8_t)m->payload_type) != RTC_OK ||
+                    rtc_rtp_recv_stream_set_payload_type(t->receiver.stream,
+                                                         (uint8_t)m->payload_type) != RTC_OK) {
+                    peer_set_connection(pc, RTC_CONNECTION_FAILED);
+                    return RTC_ERR_SDP;
+                }
+                t->sender.codec.payload_type = (uint8_t)m->payload_type;
+                t->receiver.codec.payload_type = (uint8_t)m->payload_type;
+            }
+        }
         if (!found && desc->type == RTC_SDP_OFFER) {
             rtc_codec_t codec = {.payload_type = (uint8_t)m->payload_type,
                                  .clock_rate = (uint32_t)m->clockrate,
@@ -1225,12 +1262,13 @@ static int peer_set_remote_desc(rtc_peer_connection_t *pc, const rtc_desc_t *des
      * a=ssrc lines. */
     for (int i = 0; i < pc->remote_sdp.media_count; i++) {
         const rtc_sdp_media_t *m = &pc->remote_sdp.media[i];
-        if (m->ssrc == 0)
-            continue;
         for (int j = 0; j < pc->transceiver_count; j++) {
             struct rtc_rtp_transceiver *t = &pc->transceivers[j];
             if (t->mid_index == m->mid_index) {
-                rtc_media_session_bind_receiver(&pc->media_session, t->receiver.stream, m->ssrc);
+                rtc_rtp_recv_stream_set_feedback(t->receiver.stream, m->rtcp_feedback);
+                if (m->ssrc)
+                    rtc_media_session_bind_receiver(&pc->media_session, t->receiver.stream,
+                                                    m->ssrc);
                 break;
             }
         }
@@ -1261,7 +1299,9 @@ static int peer_set_remote_desc(rtc_peer_connection_t *pc, const rtc_desc_t *des
         const rtc_sdp_media_t *m = &pc->remote_sdp.media[i];
         if (m->media_type != RTC_MEDIA_AUDIO && m->media_type != RTC_MEDIA_VIDEO)
             continue;
-        uint8_t id = rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC);
+        uint8_t id = (m->rtcp_feedback & RTC_SDP_FB_TRANSPORT_CC)
+                         ? rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC)
+                         : 0;
         if (id != 0) {
             uint32_t local_ssrc = 0;
             for (int k = 0; k < pc->transceiver_count; k++) {

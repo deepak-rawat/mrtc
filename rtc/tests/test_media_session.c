@@ -296,6 +296,7 @@ TEST(resolve_falls_back_to_payload_type) {
 
 typedef struct {
     int nack_count, pli_count;
+    uint8_t last_keyframe_fmt;
     rtc_rtcp_nack_t nack;
 } recv_fb_t;
 
@@ -307,8 +308,31 @@ static int capture_feedback(const uint8_t *data, size_t len, void *user) {
             return RTC_ERR_INVALID;
     } else if (data[1] == RTCP_PT_PSFB) {
         fb->pli_count++;
+        fb->last_keyframe_fmt = data[0] & 31;
     }
     return RTC_OK;
+}
+
+TEST(receiver_feedback_respects_negotiated_capabilities) {
+    rtc_rtp_recv_stream_t *stream = make_recv(96, NULL);
+    recv_fb_t feedback = {0};
+    rtc_rtp_recv_stream_on_feedback(stream, capture_feedback, &feedback);
+    rtc_rtp_recv_stream_set_feedback(stream, 0);
+    uint8_t payload[] = {0x10, 1};
+    rtc_rtp_packet_t packet;
+    ASSERT_EQ(rtc_rtp_build(&packet, 96, 1, 100, 0x4321, true, payload, sizeof(payload)), RTC_OK);
+    rtc_rtp_recv_stream_on_packet(stream, &packet);
+    ASSERT_EQ(rtc_rtp_build(&packet, 96, 3, 200, 0x4321, true, payload, sizeof(payload)), RTC_OK);
+    rtc_rtp_recv_stream_on_packet(stream, &packet);
+    rtc_rtp_recv_stream_tick(stream, rtc_time_ms() + 250);
+    ASSERT_EQ(feedback.nack_count, 0);
+    ASSERT_EQ(feedback.pli_count, 0);
+    ASSERT_EQ(rtc_rtp_recv_stream_request_keyframe(stream), RTC_ERR_INVALID);
+    rtc_rtp_recv_stream_set_feedback(stream, RTC_SDP_FB_FIR);
+    ASSERT_EQ(rtc_rtp_recv_stream_request_keyframe(stream), RTC_OK);
+    ASSERT_EQ(feedback.pli_count, 1);
+    ASSERT_EQ(feedback.last_keyframe_fmt, RTCP_FMT_FIR);
+    rtc_rtp_recv_stream_destroy(stream);
 }
 
 TEST(receiver_originates_nack_and_limited_pli) {
@@ -370,5 +394,6 @@ int main(void) {
     RUN_TEST(resolve_routes_same_pt_by_mid);
     RUN_TEST(resolve_falls_back_to_payload_type);
     RUN_TEST(receiver_originates_nack_and_limited_pli);
+    RUN_TEST(receiver_feedback_respects_negotiated_capabilities);
     TEST_SUMMARY();
 }

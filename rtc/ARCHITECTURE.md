@@ -482,7 +482,7 @@ Client-facade tests (`test_peer`, `test_data_channel`,
 
 - TURN uses long-term credentials over UDP/TCP/verified TLS; server/address
   failover and authentication v2 are not implemented.
-- Periodic RTCP reports are compound SR/RR + SDES; full scheduling/source
-  lifecycle and feedback composition/negotiation remain incomplete.
+- Reports and feedback are compound SR/RR + SDES, with feedback capability
+  intersection in SDP. Full scheduling/source lifecycle remain incomplete.
 - Replay windows and fingerprint checks are implemented, but this educational
   stack has not undergone an independent production security audit.

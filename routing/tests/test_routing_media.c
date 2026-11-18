@@ -286,9 +286,17 @@ static void routed_feedback(const uint8_t *data, size_t len, void *user) {
 
 static void routed_upstream_feedback(const uint8_t *data, size_t len, void *user) {
     routed_receiver_t *receiver = user;
-    rtc_rtcp_pli_t pli;
-    if (rtc_rtcp_parse_pli(&pli, data, len) == RTC_OK && data[1] == RTCP_PT_PSFB)
-        atomic_fetch_add(&receiver->plis, 1);
+    size_t offset = 0;
+    while (len - offset >= 4) {
+        size_t size = (((size_t)data[offset + 2] << 8) | data[offset + 3]) * 4 + 4;
+        if (size > len - offset)
+            break;
+        rtc_rtcp_pli_t pli;
+        if (data[offset + 1] == RTCP_PT_PSFB &&
+            rtc_rtcp_parse_pli(&pli, data + offset, size) == RTC_OK)
+            atomic_fetch_add(&receiver->plis, 1);
+        offset += size;
+    }
 }
 
 static bool wait_count(_Atomic int *value, int expected) {
@@ -352,7 +360,7 @@ static int routed_send(rtc_transport_t *publisher, uint16_t seq, uint32_t timest
 }
 
 static int routed_nack(rtc_transport_t *subscriber, uint32_t ssrc, uint16_t seq) {
-    uint8_t wire[64];
+    uint8_t wire[64 + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
     size_t len;
     int rc = rtc_rtcp_build_nack(wire, sizeof(wire), &len, 1, ssrc, &seq, 1);
     return rc == RTC_OK ? rtc_transport_send_rtcp(subscriber, wire, &len, sizeof(wire)) : rc;

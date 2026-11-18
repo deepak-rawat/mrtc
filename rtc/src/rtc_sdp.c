@@ -47,9 +47,11 @@ static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media
                                    const rtc_sdp_t *sdp) {
     /* Media line */
     if (m->media_type == RTC_MEDIA_AUDIO) {
-        SDP_WRITE(p, remain, "m=audio 9 UDP/TLS/RTP/SAVPF %d\r\n", m->payload_type);
+        SDP_WRITE(p, remain, "m=audio %d UDP/TLS/RTP/SAVPF %d\r\n", m->rejected ? 0 : 9,
+                  m->payload_type);
     } else if (m->media_type == RTC_MEDIA_VIDEO) {
-        SDP_WRITE(p, remain, "m=video 9 UDP/TLS/RTP/SAVPF %d\r\n", m->payload_type);
+        SDP_WRITE(p, remain, "m=video %d UDP/TLS/RTP/SAVPF %d\r\n", m->rejected ? 0 : 9,
+                  m->payload_type);
     } else {
         SDP_WRITE(p, remain, "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n");
     }
@@ -97,6 +99,16 @@ static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media
 
     /* RTP header extensions (RFC 8285 a=extmap) — audio/video only */
     if (m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) {
+        static const struct {
+            uint8_t bit;
+            const char *name;
+        } feedback[] = {{RTC_SDP_FB_NACK, "nack"},
+                        {RTC_SDP_FB_PLI, "nack pli"},
+                        {RTC_SDP_FB_FIR, "ccm fir"},
+                        {RTC_SDP_FB_TRANSPORT_CC, "transport-cc"}};
+        for (size_t i = 0; i < sizeof(feedback) / sizeof(feedback[0]); i++)
+            if (m->rtcp_feedback & feedback[i].bit)
+                SDP_WRITE(p, remain, "a=rtcp-fb:%d %s\r\n", m->payload_type, feedback[i].name);
         for (int i = 0; i < m->extmap_count; i++) {
             if (m->extmaps[i].id == 0 || m->extmaps[i].uri[0] == '\0')
                 continue;
@@ -499,6 +511,8 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
 
     /* Index of the current m= section being parsed (-1 = session level) */
     int current_media = -1;
+    uint8_t feedback[SDP_MAX_MEDIA][128] = {{0}};
+    uint8_t wildcard[SDP_MAX_MEDIA] = {0};
 
     while (p < end) {
         const char *line = p;
@@ -525,6 +539,10 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
                 memset(m, 0, sizeof(*m));
                 m->media_type = RTC_MEDIA_AUDIO;
                 m->payload_type = pt;
+                int port;
+                if (sscanf(line, "m=audio %d", &port) != 1 || port < 0 || port > 65535)
+                    return RTC_ERR_SDP;
+                m->rejected = port == 0;
                 m->mid_index = current_media;
                 sdp->media_count++;
             }
@@ -540,6 +558,10 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
                 memset(m, 0, sizeof(*m));
                 m->media_type = RTC_MEDIA_VIDEO;
                 m->payload_type = pt;
+                int port;
+                if (sscanf(line, "m=video %d", &port) != 1 || port < 0 || port > 65535)
+                    return RTC_ERR_SDP;
+                m->rejected = port == 0;
                 m->mid_index = current_media;
                 sdp->media_count++;
             }
@@ -558,6 +580,29 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
 
         if (current_media >= 0 && current_media < sdp->media_count) {
             rtc_sdp_media_t *m = &sdp->media[current_media];
+            if (line_len == 10 && !memcmp(line, "a=rtcp-mux", 10))
+                m->rtcp_mux = true;
+            if (sdp_line_starts_n(line, line_len, "a=rtcp-fb:")) {
+                char copy[256], pt[8], kind[64];
+                if (line_len >= sizeof(copy))
+                    return RTC_ERR_SDP;
+                memcpy(copy, line, line_len);
+                copy[line_len] = '\0';
+                if (sscanf(copy, "a=rtcp-fb:%7s %63[^\r\n]", pt, kind) != 2)
+                    return RTC_ERR_SDP;
+                uint8_t bit = !strcmp(kind, "nack")           ? RTC_SDP_FB_NACK
+                              : !strcmp(kind, "nack pli")     ? RTC_SDP_FB_PLI
+                              : !strcmp(kind, "ccm fir")      ? RTC_SDP_FB_FIR
+                              : !strcmp(kind, "transport-cc") ? RTC_SDP_FB_TRANSPORT_CC
+                                                              : 0;
+                uint32_t payload;
+                if (!strcmp(pt, "*"))
+                    wildcard[current_media] |= bit;
+                else if (candidate_uint(pt, 127, &payload))
+                    feedback[current_media][payload] |= bit;
+                else
+                    return RTC_ERR_SDP;
+            }
             if (sdp_line_starts_n(line, line_len, "a=sendrecv"))
                 m->direction = 0;
             else if (sdp_line_starts_n(line, line_len, "a=sendonly"))
@@ -723,6 +768,13 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
         p = sdp_next_line(p, end);
     }
 
+    for (int i = 0; i < sdp->media_count; i++) {
+        rtc_sdp_media_t *media = &sdp->media[i];
+        if (media->rejected)
+            media->direction = 3;
+        if (media->payload_type >= 0 && media->payload_type < 128)
+            media->rtcp_feedback = feedback[i][media->payload_type] | wildcard[i];
+    }
     return RTC_OK;
 }
 

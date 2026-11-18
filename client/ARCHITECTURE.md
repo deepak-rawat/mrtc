@@ -205,6 +205,13 @@ Glare is rejected explicitly; applications can call
 Changing an established codec or payload type is not supported and is rejected
 without changing the current descriptions.
 
+Before media starts, an answerer can adopt the offered payload type for a
+matching configured codec (for example Opus 109 instead of local preference
+111). Sender/receiver stream mappings and the answer change together.
+Established mappings remain immutable. Active RTP sections require rtcp-mux;
+rejected RTP sections remain rejected/inactive. Feedback and RTP extension IDs
+in answers are intersected with the offer rather than independently assigned.
+
 `rtc_peer_connection_restart_ice()` supports an active connection. The
 application exchanges the new ICE credentials through another offer/answer
 cycle; a successful restart preserves the SCTP association and RTP streams.

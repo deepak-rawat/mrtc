@@ -70,6 +70,8 @@ struct rtc_rtp_recv_stream {
     uint32_t frame_timestamp;
     uint64_t last_packet_ms;
     uint64_t last_pli_ms;
+    uint8_t feedback;
+    uint8_t fir_sequence;
 };
 
 rtc_rtp_send_stream_t *rtc_rtp_send_stream_create(const rtc_rtp_send_stream_config_t *cfg) {
@@ -109,6 +111,7 @@ rtc_rtp_recv_stream_t *rtc_rtp_recv_stream_create(const rtc_rtp_recv_stream_conf
         return NULL;
     stream->payload_type = cfg->payload_type;
     stream->clock_rate = cfg->clock_rate;
+    stream->feedback = RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR;
     if (rtc_rtcp_stats_init(&stream->rtcp_stats, cfg->local_ssrc) != RTC_OK) {
         free(stream);
         return NULL;
@@ -118,6 +121,22 @@ rtc_rtp_recv_stream_t *rtc_rtp_recv_stream_create(const rtc_rtp_recv_stream_conf
 
 void rtc_rtp_recv_stream_destroy(rtc_rtp_recv_stream_t *stream) {
     free(stream);
+}
+
+int rtc_rtp_send_stream_set_payload_type(rtc_rtp_send_stream_t *stream, uint8_t payload_type) {
+    if (!stream || payload_type > 127 ||
+        (stream->rtcp_stats.packets_sent && stream->rtp_session.payload_type != payload_type))
+        return RTC_ERR_INVALID;
+    stream->rtp_session.payload_type = payload_type;
+    return RTC_OK;
+}
+
+int rtc_rtp_recv_stream_set_payload_type(rtc_rtp_recv_stream_t *stream, uint8_t payload_type) {
+    if (!stream || payload_type > 127 ||
+        (stream->rtcp_stats.packets_received && stream->payload_type != payload_type))
+        return RTC_ERR_INVALID;
+    stream->payload_type = payload_type;
+    return RTC_OK;
 }
 
 void rtc_rtp_send_stream_set_active(rtc_rtp_send_stream_t *stream, bool active) {
@@ -573,6 +592,11 @@ void rtc_rtp_recv_stream_on_feedback(rtc_rtp_recv_stream_t *stream,
     }
 }
 
+void rtc_rtp_recv_stream_set_feedback(rtc_rtp_recv_stream_t *stream, uint8_t feedback) {
+    if (stream)
+        stream->feedback = feedback & (RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR);
+}
+
 static int recv_send_feedback(rtc_rtp_recv_stream_t *stream, uint8_t *buf, size_t len, size_t cap) {
     int rc = stream->on_feedback ? stream->on_feedback(buf, len, stream->feedback_user)
              : stream->transport ? rtc_transport_send_rtcp(stream->transport, buf, &len, cap)
@@ -585,6 +609,10 @@ static int recv_send_feedback(rtc_rtp_recv_stream_t *stream, uint8_t *buf, size_
 static int recv_stream_request_keyframe(rtc_rtp_recv_stream_t *stream, uint64_t now) {
     if (!stream || !stream->active)
         return RTC_ERR_INVALID;
+    if (!(stream->feedback & (RTC_SDP_FB_PLI | RTC_SDP_FB_FIR))) {
+        RTC_LOG_WARN("Keyframe feedback was not negotiated");
+        return RTC_ERR_INVALID;
+    }
     stream->recovery = true;
     if (stream->last_pli_ms &&
         (now < stream->last_pli_ms || now - stream->last_pli_ms < RTC_PLI_MIN_INTERVAL_MS))
@@ -592,7 +620,10 @@ static int recv_stream_request_keyframe(rtc_rtp_recv_stream_t *stream, uint64_t 
     stream->last_pli_ms = now;
     uint8_t buf[64 + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
     size_t len;
-    int rc = rtc_rtcp_build_pli(buf, sizeof(buf), &len, stream->rtcp_stats.ssrc, stream->ssrc);
+    int rc = stream->feedback & RTC_SDP_FB_PLI
+                 ? rtc_rtcp_build_pli(buf, sizeof(buf), &len, stream->rtcp_stats.ssrc, stream->ssrc)
+                 : rtc_rtcp_build_fir(buf, sizeof(buf), &len, stream->rtcp_stats.ssrc, stream->ssrc,
+                                      ++stream->fir_sequence);
     if (rc == RTC_OK)
         rc = recv_send_feedback(stream, buf, len, sizeof(buf));
     return rc;
@@ -636,7 +667,7 @@ void rtc_rtp_recv_stream_tick(rtc_rtp_recv_stream_t *stream, uint64_t now_ms) {
             stream->missing[i].last_ms = now_ms;
         }
     }
-    if (count) {
+    if (count && (stream->feedback & RTC_SDP_FB_NACK)) {
         uint8_t buf[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
         size_t len;
         if (rtc_rtcp_build_nack(buf, sizeof(buf), &len, stream->rtcp_stats.ssrc, stream->ssrc, lost,
@@ -645,7 +676,7 @@ void rtc_rtp_recv_stream_tick(rtc_rtp_recv_stream_t *stream, uint64_t now_ms) {
     }
     if (stream->frame_open && now_ms - stream->last_packet_ms >= 200)
         stream->recovery = true;
-    if (stream->recovery)
+    if (stream->recovery && (stream->feedback & (RTC_SDP_FB_PLI | RTC_SDP_FB_FIR)))
         (void)recv_stream_request_keyframe(stream, now_ms);
 }
 

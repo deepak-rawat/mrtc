@@ -41,9 +41,13 @@ typedef struct {
     char username_fragment[ICE_UFRAG_LEN];
 } rtc_ice_candidate_t;
 
-#define SDP_MAX_MEDIA      16
-#define SDP_MAX_EXTMAP     6
-#define SDP_EXTMAP_URI_LEN 96
+#define SDP_MAX_MEDIA           16
+#define SDP_MAX_EXTMAP          6
+#define SDP_EXTMAP_URI_LEN      96
+#define RTC_SDP_FB_NACK         0x01
+#define RTC_SDP_FB_PLI          0x02
+#define RTC_SDP_FB_FIR          0x04
+#define RTC_SDP_FB_TRANSPORT_CC 0x08
 
 typedef struct {
     uint8_t id; /* 1..14 */
@@ -72,6 +76,9 @@ typedef struct {
     int mid_index;       /* m= line index (0, 1, 2, ...) */
     uint32_t ssrc;       /* a=ssrc:<NNN> ... 0 means not present */
     int direction;       /* 0: sendrecv, 1: sendonly, 2: recvonly, 3: inactive */
+    bool rejected;
+    bool rtcp_mux;
+    uint8_t rtcp_feedback;
     uint16_t sctp_port;
     uint32_t max_message_size;
 

@@ -359,6 +359,35 @@ void rtc_rtcp_stats_report_sent(rtc_rtcp_stats_t *stats) {
     }
 }
 
+int rtc_rtcp_compound_feedback(uint8_t *buf, size_t *len, size_t capacity) {
+    if (!buf || !len || *len < 8 || *len > capacity || (buf[0] >> 6) != 2)
+        return RTC_ERR_INVALID;
+    if (buf[1] == RTCP_PT_SR || buf[1] == RTCP_PT_RR)
+        return RTC_OK;
+    if (buf[1] != RTCP_PT_RTPFB && buf[1] != RTCP_PT_PSFB && buf[1] != RTCP_PT_BYE)
+        return RTC_ERR_INVALID;
+    size_t offset = 0;
+    while (offset < *len) {
+        if (*len - offset < 4 || (buf[offset] >> 6) != 2)
+            return RTC_ERR_INVALID;
+        size_t size = ((size_t)read_u16(buf + offset + 2) + 1) * 4;
+        if (size > *len - offset)
+            return RTC_ERR_INVALID;
+        offset += size;
+    }
+    rtc_rtcp_stats_t stats = {.ssrc = read_u32(buf + 4), .first_packet = true};
+    rtc_rtcp_packet_t prefix;
+    int rc = rtc_rtcp_build_report(&prefix, &stats, false);
+    if (rc != RTC_OK)
+        return rc;
+    if (prefix.buf_len > capacity - *len || prefix.buf_len + *len > RTCP_MAX_PACKET)
+        return RTC_ERR_NOMEM;
+    memmove(buf + prefix.buf_len, buf, *len);
+    memcpy(buf, prefix.buf, prefix.buf_len);
+    *len += prefix.buf_len;
+    return RTC_OK;
+}
+
 int rtc_rtcp_parse(rtc_rtcp_packet_t *pkt, const uint8_t *data, size_t len) {
     if (!pkt || !data)
         return RTC_ERR_INVALID;

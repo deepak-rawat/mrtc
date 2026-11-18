@@ -13,7 +13,7 @@
 #define RTC_ICE_PWD_MAX                     257
 #define RTC_DTLS_FINGERPRINT_MAX            96
 #define RTC_TRANSPORT_RTP_PROTECT_OVERHEAD  16 /* AES-GCM tag (RFC 7714) */
-#define RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD 20 /* GCM tag (16) + SRTCP index (4) */
+#define RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD 84 /* SRTCP (20) + compound feedback prefix (<=64) */
 
 typedef struct rtc_transport rtc_transport_t;
 typedef struct rtc_listener rtc_listener_t;
@@ -181,6 +181,8 @@ int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len
 /* Resend cached wire bytes from a successful send_rtp on this transport.
  * Runs on the worker, checks readiness/consent, and does not change SRTP state. */
 int rtc_transport_retransmit_rtp(rtc_transport_t *transport, const uint8_t *wire, size_t len);
+/* Standalone feedback is prefixed with RR/SDES before encryption. Reserve
+ * RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD beyond the original packet length. */
 int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap);
 void rtc_transport_close(rtc_transport_t *transport);
 void rtc_transport_destroy(rtc_transport_t *transport);

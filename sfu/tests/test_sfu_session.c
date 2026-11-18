@@ -145,15 +145,23 @@ static void bitrate_estimate(uint32_t bitrate, void *user) {
 
 static void received_feedback(const uint8_t *data, size_t len, void *user) {
     endpoint_t *endpoint = user;
-    uint8_t pt, fmt;
-    if (rtc_rtcp_get_pt_fmt(data, len, &pt, &fmt) && pt == RTCP_PT_RTPFB && fmt == 15) {
-        rtc_rtcp_twcc_t feedback;
-        if (rtc_rtcp_parse_twcc(&feedback, data, len) != RTC_OK)
+    size_t offset = 0;
+    while (len - offset >= 4) {
+        size_t size = (((size_t)data[offset + 2] << 8) | data[offset + 3]) * 4 + 4;
+        if (size > len - offset)
             return;
-        atomic_fetch_add(&endpoint->feedback, 1);
-        for (int i = 0; i < feedback.item_count; i++)
-            if (feedback.items[i].received)
-                atomic_fetch_add(&endpoint->acknowledged, 1);
+        uint8_t pt, fmt;
+        if (rtc_rtcp_get_pt_fmt(data + offset, size, &pt, &fmt) && pt == RTCP_PT_RTPFB &&
+            fmt == 15) {
+            rtc_rtcp_twcc_t feedback;
+            if (rtc_rtcp_parse_twcc(&feedback, data + offset, size) != RTC_OK)
+                return;
+            atomic_fetch_add(&endpoint->feedback, 1);
+            for (int i = 0; i < feedback.item_count; i++)
+                if (feedback.items[i].received)
+                    atomic_fetch_add(&endpoint->acknowledged, 1);
+        }
+        offset += size;
     }
 }
 
