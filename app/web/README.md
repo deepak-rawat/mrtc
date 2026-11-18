@@ -4,6 +4,10 @@ The browser uses built-in WebRTC (VP8, Opus and SCTP), not native/WASM codecs.
 Capture starts only after **Join**. The explicitly selected synthetic option
 uses a changing canvas and a Web Audio oscillator; it never replaces failed
 camera/microphone permissions silently.
+Where the AudioContext silent-sink API is available, synthetic tone generation
+uses it so the source clock does not depend on a working speaker device.
+Capture still starts through Join and normal autoplay/privacy policy applies;
+real microphone/camera capture is unchanged.
 
 ```sh
 cd app/web

@@ -21,8 +21,10 @@ export async function capture(synthetic: boolean): Promise<Capture> {
     paint.fillText(`mrtc ${frame}`, 20, 90);
   };
   draw();
-  const timer = window.setInterval(draw, 50);
-  const audio = new AudioContext({ sampleRate: 48000 });
+  // Synthetic media must not depend on a working speaker device.
+  const options: AudioContextOptions & { sinkId?: { type: 'none' } } = { sampleRate: 48000 };
+  if ('setSinkId' in AudioContext.prototype) options.sinkId = { type: 'none' };
+  const audio = new AudioContext(options);
   const oscillator = audio.createOscillator();
   const gain = audio.createGain();
   const output = audio.createMediaStreamDestination();
@@ -30,6 +32,7 @@ export async function capture(synthetic: boolean): Promise<Capture> {
   gain.gain.value = 0.08;
   oscillator.connect(gain).connect(output);
   oscillator.start();
+  const timer = window.setInterval(draw, 50);
   try { await audio.resume(); }
   catch (error) { window.clearInterval(timer); oscillator.stop(); await audio.close(); throw error; }
   const stream = new MediaStream([...canvas.captureStream(15).getVideoTracks(), ...output.stream.getAudioTracks()]);
