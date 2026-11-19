@@ -363,6 +363,39 @@ TEST(runtime_rejects_unauthenticated_nomination) {
     endpoint_close(&a);
 }
 
+static void destroy_transport_on_rtp(const rtc_rtp_packet_t *packet, void *user) {
+    (void)packet;
+    endpoint_t *endpoint = user;
+    rtc_transport_t *transport = endpoint->transport;
+    endpoint->transport = NULL;
+    rtc_transport_destroy(transport);
+    atomic_fetch_add(&endpoint->rtp_count, 1);
+}
+
+TEST(runtime_destroy_during_packet_callback) {
+    endpoint_t a, b;
+    ASSERT(endpoint_create(&a, RTC_ICE_MODE_FULL, 0));
+    ASSERT(endpoint_create(&b, RTC_ICE_MODE_LITE, 0));
+    ASSERT(exchange_ice(&a, &b, false));
+    ASSERT(exchange_dtls(&a, &b, false));
+    ASSERT_EQ(rtc_transport_start_ice(a.transport), RTC_OK);
+    ASSERT(wait_selected(&a, &b));
+    ASSERT_EQ(rtc_transport_start_dtls(a.transport), RTC_OK);
+    ASSERT(wait_dtls(&a, RTC_TRANSPORT_DTLS_CONNECTED));
+    ASSERT(wait_dtls(&b, RTC_TRANSPORT_DTLS_CONNECTED));
+    rtc_transport_on_rtp(b.transport, destroy_transport_on_rtp, &b);
+    rtc_rtp_packet_t packet;
+    ASSERT_EQ(rtc_rtp_build(&packet, 96, 1, 90000, 123, true, (const uint8_t *)"rtp!", 4), RTC_OK);
+    size_t len = packet.buf_len;
+    ASSERT_EQ(rtc_transport_send_rtp(a.transport, packet.buf, &len, sizeof(packet.buf)), RTC_OK);
+    uint64_t deadline = rtc_time_ms() + 1000;
+    while (!atomic_load(&b.rtp_count) && rtc_time_ms() < deadline)
+        SLEEP_MS(1);
+    ASSERT_EQ(atomic_load(&b.rtp_count), 1);
+    endpoint_close(&b);
+    endpoint_close(&a);
+}
+
 TEST(runtime_rejects_invalid_turn_address_lists) {
     endpoint_t endpoint;
     ASSERT(endpoint_create(&endpoint, RTC_ICE_MODE_FULL, 0));
@@ -577,6 +610,15 @@ TEST(runtime_relay_only_coturn) {
     ASSERT_EQ(atomic_load(&b.data_count), 2);
     ASSERT_EQ(rtc_transport_get_stats(a.transport, &state), RTC_OK);
     ASSERT_EQ(state.turn_address_attempts, attempts);
+    rtc_transport_on_rtp(b.transport, destroy_transport_on_rtp, &b);
+    ASSERT_EQ(rtc_rtp_build(&media, 96, 12346, 93000, 0x1234, true, (const uint8_t *)"rtp!", 4),
+              RTC_OK);
+    wire_len = media.buf_len;
+    ASSERT_EQ(rtc_transport_send_rtp(a.transport, media.buf, &wire_len, sizeof(media.buf)), RTC_OK);
+    deadline = rtc_time_ms() + 1000;
+    while (atomic_load(&b.rtp_count) < 2 && rtc_time_ms() < deadline)
+        SLEEP_MS(1);
+    ASSERT_EQ(atomic_load(&b.rtp_count), 2);
     endpoint_close(&b);
     endpoint_close(&a);
 }
@@ -634,6 +676,7 @@ int main(int argc, char **argv) {
         RUN_TEST(runtime_rejects_unauthenticated_nomination);
         RUN_TEST(runtime_sdp_negotiation_fields);
         RUN_TEST(runtime_rejects_invalid_turn_address_lists);
+        RUN_TEST(runtime_destroy_during_packet_callback);
     }
     rtc_cleanup();
     TEST_SUMMARY();

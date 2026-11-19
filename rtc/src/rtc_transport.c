@@ -32,6 +32,7 @@
 #define RTC_TURN_RETRY_POLL_MS      100
 
 struct rtc_transport {
+    _Atomic unsigned refs;
     rtc_worker_t *worker;
     rtc_listener_t *listener;
     char ice_ufrag[RTC_ICE_UFRAG_MAX];
@@ -111,6 +112,19 @@ struct rtc_transport {
     void *on_bitrate_user;
 #endif
 };
+
+void rtc_transport_retain(rtc_transport_t *transport) {
+    if (transport)
+        atomic_fetch_add_explicit(&transport->refs, 1, memory_order_relaxed);
+}
+
+void rtc_transport_release(rtc_transport_t *transport) {
+    if (transport && atomic_fetch_sub_explicit(&transport->refs, 1, memory_order_acq_rel) == 1) {
+        rtc_mutex_destroy(&transport->send_mutex);
+        free(transport->app_buf);
+        free(transport);
+    }
+}
 
 static void transport_expire_members_locked(rtc_transport_t *transport, uint64_t now) {
     if (now < transport->rtcp_next_membership_check)
@@ -539,8 +553,8 @@ static void transport_binding_reply(rtc_transport_t *transport, const rtc_stun_m
         (void)transport_send_to(transport, reply.buf, reply.buf_len, from);
 }
 
-static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t len,
-                                const rtc_addr_t *from, void *user) {
+static void transport_handle_packet(rtc_pkt_type_t type, const uint8_t *data, size_t len,
+                                    const rtc_addr_t *from, void *user) {
     rtc_transport_t *transport = (rtc_transport_t *)user;
     if (transport->turn && !transport->receiving_turn)
         return;
@@ -658,6 +672,14 @@ maybe_dtls:
     }
 }
 
+static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t len,
+                                const rtc_addr_t *from, void *user) {
+    rtc_transport_t *transport = user;
+    rtc_transport_retain(transport);
+    transport_handle_packet(type, data, len, from, user);
+    rtc_transport_release(transport);
+}
+
 static void transport_copy_ice_parameters(rtc_transport_t *transport, rtc_ice_parameters_t *out) {
     memset(out, 0, sizeof(*out));
     memcpy(out->username_fragment, transport->ice_ufrag, sizeof(out->username_fragment));
@@ -674,6 +696,7 @@ rtc_transport_t *rtc_transport_create(rtc_worker_t *worker, const rtc_transport_
         return NULL;
 
     transport->worker = worker;
+    atomic_init(&transport->refs, 1);
     transport->listener = cfg->listener;
     transport->dtls_timer = RTC_WORKER_TIMER_INVALID;
     transport->ice_timer = RTC_WORKER_TIMER_INVALID;
@@ -1033,9 +1056,11 @@ int rtc_transport_set_ice_controlling(rtc_transport_t *transport, bool controlli
 static void transport_on_turn_packet(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                                      const rtc_addr_t *from, void *user) {
     rtc_transport_t *transport = user;
+    rtc_transport_retain(transport);
     transport->receiving_turn = true;
-    transport_on_packet(type, data, len, from, user);
+    transport_handle_packet(type, data, len, from, user);
     transport->receiving_turn = false;
+    rtc_transport_release(transport);
 }
 
 typedef struct {
@@ -1378,9 +1403,8 @@ void rtc_transport_close(rtc_transport_t *transport) {
     bool was_closed = atomic_exchange_explicit(&transport->closed, true, memory_order_acq_rel);
     if (was_closed)
         return;
-    /* Run teardown on the worker thread so it cannot race packet dispatch
-     * or timer callbacks. Once this returns, no worker-thread code touches
-     * the transport, so the caller may safely free it. */
+    /* Serialize teardown with packet/timer dispatch. Retained work can then
+     * only observe closure and release its reference. */
     tx_op_invoke(transport, tx_close_impl, NULL);
 }
 
@@ -1388,9 +1412,7 @@ void rtc_transport_destroy(rtc_transport_t *transport) {
     if (!transport)
         return;
     rtc_transport_close(transport);
-    rtc_mutex_destroy(&transport->send_mutex);
-    free(transport->app_buf);
-    free(transport);
+    rtc_transport_release(transport);
 }
 
 static int tx_set_dtls_role_impl(rtc_transport_t *transport, void *arg) {

@@ -446,7 +446,8 @@ static int stream_read(rtc_turn_runtime_t *turn) {
         turn->read_wants_write = false;
         turn->input_len += received;
         if (stream_parse(turn) != RTC_OK) {
-            turn_fail(turn, "invalid TURN stream framing");
+            if (!atomic_load(&turn->closed))
+                turn_fail(turn, "invalid TURN stream framing");
             return -1;
         }
     }

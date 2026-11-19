@@ -545,6 +545,13 @@ Client-facade tests (`test_peer`, `test_data_channel`,
 `test_rtp_sender_loopback`) live in
 [`client/tests/`](../client/ARCHITECTURE.md#tests).
 
+## Transport lifetime
+
+Transport packet dispatch and queued work retain the logical transport until
+their callbacks finish. `close()` serializes resource teardown with its worker;
+`destroy()` releases ownership rather than freeing memory still used by a
+callback. Core RTP callback teardown is covered by the network-runtime tests.
+
 ## Known Limitations
 
 - TURN supports bounded pre-allocation address failover for one identity over
