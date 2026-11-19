@@ -36,6 +36,7 @@
 #define RTCP_MAX_PACKET      1400
 #define RTC_RTCP_MAX_MEMBERS 128
 #define RTC_RTCP_RECONSIDER_POLL_MS 100
+#define RTC_RTCP_SR_HISTORY         8
 
 typedef struct {
     uint32_t ssrc;
@@ -133,6 +134,16 @@ typedef struct {
     bool report_we_sent, report_initial;
     double report_previous_ms;
     double report_average_size;
+    char cname[33];
+    bool source_clock_valid;
+    rtc_rtcp_sr_t source_clock;
+    uint64_t source_clock_ms;
+    struct {
+        uint32_t lsr;
+        uint64_t sent_ms;
+        bool used;
+    } sr_history[RTC_RTCP_SR_HISTORY];
+    unsigned sr_history_next;
 } rtc_rtcp_stats_t;
 
 /* Initialize RTCP statistics context */
@@ -155,6 +166,9 @@ void rtc_rtcp_stats_on_sr_recv(rtc_rtcp_stats_t *stats, const rtc_rtcp_sr_t *sr)
 
 /* Compute RTT in milliseconds from an RR block (RFC 3550 section 6.4.1). */
 int rtc_rtcp_rtt_from_rr(const rtc_rtcp_rr_block_t *rr);
+void rtc_rtcp_stats_record_sr(rtc_rtcp_stats_t *stats, const rtc_rtcp_sr_t *sr, uint64_t now_ms);
+int rtc_rtcp_stats_rtt_from_rr(const rtc_rtcp_stats_t *stats, const rtc_rtcp_rr_block_t *rr,
+                               uint64_t now_ms);
 
 /* Build a Sender Report */
 int rtc_rtcp_build_sr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats);
@@ -205,6 +219,7 @@ uint64_t rtc_rtcp_source_timeout_ms(const rtc_rtcp_stats_t *stats);
 /* Prefix standalone feedback/BYE with RR + SDES; reduced-size RTCP is not
  * advertised. Existing SR/RR compounds are left unchanged. */
 int rtc_rtcp_compound_feedback(uint8_t *buf, size_t *len, size_t capacity);
+int rtc_rtcp_compound_feedback_named(uint8_t *buf, size_t *len, size_t capacity, const char *cname);
 
 /* Parse an RTCP packet from raw bytes */
 int rtc_rtcp_parse(rtc_rtcp_packet_t *pkt, const uint8_t *data, size_t len);

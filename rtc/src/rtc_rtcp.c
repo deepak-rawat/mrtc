@@ -5,6 +5,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <limits.h>
 #include <openssl/crypto.h>
 
 static CRYPTO_ONCE cname_once = CRYPTO_ONCE_STATIC_INIT;
@@ -76,28 +77,19 @@ int rtc_rtcp_stats_init(rtc_rtcp_stats_t *stats, uint32_t ssrc) {
 int rtc_rtcp_stats_reset_source(rtc_rtcp_stats_t *stats) {
     if (!stats)
         return RTC_ERR_INVALID;
-    rtc_rtcp_stats_t reset = {
-        .ssrc = stats->ssrc,
-        .packets_sent = stats->packets_sent,
-        .octets_sent = stats->octets_sent,
-        .rtp_timestamp = stats->rtp_timestamp,
-        .send_clock_rate = stats->send_clock_rate,
-        .send_time_ms = stats->send_time_ms,
-        .send_clock_valid = stats->send_clock_valid,
-        .last_report_time = stats->last_report_time,
-        .next_report_time = stats->next_report_time,
-        .report_target_bps = stats->report_target_bps,
-        .last_report_size = stats->last_report_size,
-        .report_members = stats->report_members,
-        .report_senders = stats->report_senders,
-        .report_pmembers = stats->report_pmembers,
-        .report_we_sent = stats->report_we_sent,
-        .report_initial = stats->report_initial,
-        .report_previous_ms = stats->report_previous_ms,
-        .report_average_size = stats->report_average_size,
-        .first_packet = true,
-    };
-    *stats = reset;
+    stats->remote_ssrc = 0;
+    stats->packets_received = 0;
+    stats->packets_expected = 0;
+    stats->packets_lost = 0;
+    stats->expected_prior = 0;
+    stats->received_prior = 0;
+    stats->base_seq = 0;
+    stats->highest_seq = 0;
+    stats->jitter = 0;
+    stats->last_transit = 0;
+    stats->first_packet = true;
+    stats->last_sr_ntp = 0;
+    stats->last_sr_recv_time = 0;
     return RTC_OK;
 }
 
@@ -196,6 +188,33 @@ int rtc_rtcp_rtt_from_rr(const rtc_rtcp_rr_block_t *rr) {
     return rtt_ms < 0 ? 0 : rtt_ms;
 }
 
+void rtc_rtcp_stats_record_sr(rtc_rtcp_stats_t *stats, const rtc_rtcp_sr_t *sr, uint64_t now_ms) {
+    if (!stats || !sr)
+        return;
+    unsigned index = stats->sr_history_next++ % RTC_RTCP_SR_HISTORY;
+    stats->sr_history[index].lsr = (sr->ntp_sec << 16) | (sr->ntp_frac >> 16);
+    stats->sr_history[index].sent_ms = now_ms;
+    stats->sr_history[index].used = true;
+}
+
+int rtc_rtcp_stats_rtt_from_rr(const rtc_rtcp_stats_t *stats, const rtc_rtcp_rr_block_t *rr,
+                               uint64_t now_ms) {
+    if (!stats || !rr || !rr->last_sr)
+        return 0;
+    for (unsigned i = 0; i < RTC_RTCP_SR_HISTORY; i++) {
+        unsigned index = (stats->sr_history_next - 1 - i) % RTC_RTCP_SR_HISTORY;
+        if (!stats->sr_history[index].used || stats->sr_history[index].lsr != rr->last_sr)
+            continue;
+        uint64_t sent = stats->sr_history[index].sent_ms;
+        uint64_t delay = (uint64_t)rr->delay_since_sr * 1000 / 65536;
+        if (now_ms < sent || now_ms - sent < delay)
+            return 0;
+        uint64_t rtt = now_ms - sent - delay;
+        return rtt > INT_MAX ? INT_MAX : (int)rtt;
+    }
+    return 0;
+}
+
 int rtc_rtcp_build_sr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats) {
     uint64_t monotonic_ms = rtc_time_ms();
     return rtc_rtcp_build_sr_at(pkt, stats, monotonic_ms, rtc_time_unix_ms());
@@ -219,9 +238,19 @@ int rtc_rtcp_build_sr_at(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats,
     /* Sender info */
     pkt->sr.ssrc = stats->ssrc;
     get_ntp_time(unix_ms, &pkt->sr.ntp_sec, &pkt->sr.ntp_frac);
-    pkt->sr.rtp_timestamp = stats->rtp_timestamp;
-    if (stats->send_clock_valid && stats->send_clock_rate && monotonic_ms >= stats->send_time_ms) {
-        uint64_t elapsed = monotonic_ms - stats->send_time_ms;
+    if (stats->source_clock_valid && !stats->send_clock_rate)
+        return RTC_ERR_INVALID;
+    uint64_t anchor = stats->source_clock_valid ? stats->source_clock_ms : stats->send_time_ms;
+    uint64_t elapsed = monotonic_ms >= anchor ? monotonic_ms - anchor : 0;
+    pkt->sr.rtp_timestamp =
+        stats->source_clock_valid ? stats->source_clock.rtp_timestamp : stats->rtp_timestamp;
+    if (stats->source_clock_valid) {
+        uint64_t ntp = ((uint64_t)stats->source_clock.ntp_sec << 32) | stats->source_clock.ntp_frac;
+        ntp += ((elapsed / 1000) << 32) + ((elapsed % 1000) << 32) / 1000;
+        pkt->sr.ntp_sec = (uint32_t)(ntp >> 32);
+        pkt->sr.ntp_frac = (uint32_t)ntp;
+    }
+    if ((stats->send_clock_valid || stats->source_clock_valid) && stats->send_clock_rate) {
         uint32_t seconds = (uint32_t)(elapsed / 1000);
         pkt->sr.rtp_timestamp += (uint32_t)((uint64_t)seconds * stats->send_clock_rate +
                                             (elapsed % 1000) * stats->send_clock_rate / 1000);
@@ -381,7 +410,11 @@ int rtc_rtcp_build_rr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats) {
 }
 
 int rtc_rtcp_build_report(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats, bool sender) {
-    const char *cname = rtc_rtcp_cname();
+    if (!pkt || !stats)
+        return RTC_ERR_INVALID;
+    if (stats->cname[0] && !memchr(stats->cname, '\0', sizeof(stats->cname)))
+        return RTC_ERR_INVALID;
+    const char *cname = stats->cname[0] ? stats->cname : rtc_rtcp_cname();
     if (!cname)
         return RTC_ERR_SSL;
     int rc = sender ? rtc_rtcp_build_sr(pkt, stats) : rtc_rtcp_build_rr(pkt, stats);
@@ -788,6 +821,11 @@ int rtc_rtcp_validate_compound(const uint8_t *data, size_t len) {
 }
 
 int rtc_rtcp_compound_feedback(uint8_t *buf, size_t *len, size_t capacity) {
+    return rtc_rtcp_compound_feedback_named(buf, len, capacity, NULL);
+}
+
+int rtc_rtcp_compound_feedback_named(uint8_t *buf, size_t *len, size_t capacity,
+                                     const char *cname) {
     if (!buf || !len || *len < 8 || *len > capacity || (buf[0] >> 6) != 2)
         return RTC_ERR_INVALID;
     if (buf[1] == RTCP_PT_SR || buf[1] == RTCP_PT_RR)
@@ -804,6 +842,11 @@ int rtc_rtcp_compound_feedback(uint8_t *buf, size_t *len, size_t capacity) {
         offset += size;
     }
     rtc_rtcp_stats_t stats = {.ssrc = read_u32(buf + 4), .first_packet = true};
+    if (cname) {
+        if (strlen(cname) >= sizeof(stats.cname))
+            return RTC_ERR_INVALID;
+        memcpy(stats.cname, cname, strlen(cname) + 1);
+    }
     rtc_rtcp_packet_t prefix;
     int rc = rtc_rtcp_build_report(&prefix, &stats, false);
     if (rc != RTC_OK)

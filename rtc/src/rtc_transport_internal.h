@@ -12,6 +12,7 @@
 
 int rtc_transport_send_raw(rtc_transport_t *transport, const uint8_t *data, size_t len);
 rtc_worker_t *rtc_transport_worker(rtc_transport_t *transport);
+const char *rtc_transport_cname(const rtc_transport_t *transport);
 
 #ifdef MRTC_ENABLE_TWCC
 /* TWCC sender history for outbound RTP tagging, or NULL when TWCC is not

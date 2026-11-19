@@ -26,6 +26,7 @@ typedef struct {
     int codec_count;
     uint32_t ssrc;
     char mid[32];
+    char rtcp_cname[33];
 } rtc_rtp_parameters_t;
 
 #endif /* RTC_RTP_PARAMS_H */

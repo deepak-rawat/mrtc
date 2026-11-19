@@ -109,11 +109,13 @@ does not add a media queue and is not per-subscriber layer selection, pacing or
 allocation across all of a subscriber's connections. Bounds are exposed in
 producer/consumer statistics for qualification.
 
-Consumer SR timestamps advance at the negotiated clock rate from the newest
-transmitted media timestamp, including when media becomes idle. Late reordered
-packets and equal-timestamp fragments do not rebase this anchor. This is a
-send-time approximation, not preservation of the publisher's original
-capture-clock/NTP correlation across legs.
+Consumer SR timestamps use the publisher's RTP/NTP mapping once received,
+advancing both clocks at the negotiated rate without substituting the SFU wall
+clock. Consumers created after a publisher SR are seeded with that mapping.
+Audio/video from one publisher share a random synchronization CNAME; different
+publishers do not. SDP, regular reports and BYE compounds keep it consistent.
+Before a publisher SR arrives, the newest send anchor is used provisionally.
+RTT uses bounded local monotonic SR history, not the foreign NTP wall epoch.
 
 ## Tests
 

@@ -34,6 +34,9 @@ struct rtc_producer {
     _Atomic uint64_t bytes_received;
     _Atomic uint64_t last_keyframe_request_ms;
     rtc_rtcp_stats_t rtcp;
+    rtc_rtcp_sr_t sender_report;
+    uint64_t sender_report_ms;
+    bool sender_report_valid;
     _Atomic uint8_t feedback;
     uint32_t last_bitrate_limit;
     uint64_t last_bitrate_feedback_ms;
@@ -151,6 +154,8 @@ rtc_producer_t *rtc_transport_produce(rtc_transport_t *transport,
     producer->report_timer = RTC_WORKER_TIMER_INVALID;
     producer->kind = opts->kind;
     producer->rtp = opts->rtp;
+    copy_label(producer->rtp.rtcp_cname, sizeof(producer->rtp.rtcp_cname),
+               rtc_transport_cname(transport));
     copy_label(producer->label, sizeof(producer->label), opts->label);
     producer->app_data = opts->app_data;
     atomic_init(&producer->feedback, RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR);
@@ -208,8 +213,19 @@ int rtc_producer_handle_rtcp(rtc_producer_t *producer, const uint8_t *data, size
                 return RTC_ERR_INVALID;
             if (report.sender_ssrc == producer->rtp.ssrc) {
                 producer_note_activity(producer);
-                if (data[offset + 1] == RTCP_PT_SR)
+                if (data[offset + 1] == RTCP_PT_SR) {
                     rtc_rtcp_stats_on_sr_recv(&producer->rtcp, &report.sr);
+                    rtc_mutex_lock(&producer->consumers_mutex);
+                    producer->sender_report = report.sr;
+                    producer->sender_report_ms = rtc_time_ms();
+                    producer->sender_report_valid = true;
+                    for (size_t i = 0; i < rtc_vec_len(&producer->consumers); i++) {
+                        rtc_consumer_t **slot = rtc_vec_at(&producer->consumers, i);
+                        rtc_consumer_set_source_clock(*slot, &report.sr,
+                                                      producer->sender_report_ms);
+                    }
+                    rtc_mutex_unlock(&producer->consumers_mutex);
+                }
             }
         }
         offset += size;
@@ -359,6 +375,9 @@ int rtc_producer_add_consumer(rtc_producer_t *producer, rtc_consumer_t *consumer
 
     rtc_mutex_lock(&producer->consumers_mutex);
     int rc = rtc_vec_push(&producer->consumers, &consumer);
+    if (rc == RTC_OK && producer->sender_report_valid)
+        rtc_consumer_set_source_clock(consumer, &producer->sender_report,
+                                      producer->sender_report_ms);
     rtc_mutex_unlock(&producer->consumers_mutex);
     return rc;
 }

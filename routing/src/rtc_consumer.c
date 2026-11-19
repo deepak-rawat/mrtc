@@ -81,7 +81,8 @@ static void consumer_retire_on_worker(void *user) {
         consumer->report_timer = RTC_WORKER_TIMER_INVALID;
     }
     if (!atomic_load(&consumer->source_ended) && atomic_load(&consumer->packets_sent) &&
-        rtc_transport_send_bye(consumer->transport, consumer->rtp.ssrc) != RTC_OK)
+        rtc_transport_send_bye_named(consumer->transport, consumer->rtp.ssrc,
+                                     consumer->rtp.rtcp_cname) != RTC_OK)
         RTC_LOG_DBG("RTCP BYE unavailable on retiring consumer");
 }
 
@@ -148,6 +149,7 @@ rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
 #endif
     rtc_rtcp_stats_init(&consumer->rtcp, consumer->rtp.ssrc);
     consumer->rtcp.send_clock_rate = consumer->rtp.codecs[0].clock_rate;
+    snprintf(consumer->rtcp.cname, sizeof(consumer->rtcp.cname), "%s", consumer->rtp.rtcp_cname);
     atomic_store_explicit(&consumer->paused, opts->paused, memory_order_release);
     if (rtc_producer_add_consumer(opts->producer, consumer) != RTC_OK) {
         rtc_rate_control_destroy(consumer->rate_controller);
@@ -191,6 +193,21 @@ void rtc_consumer_resume(rtc_consumer_t *consumer) {
     rtc_producer_request_keyframe(consumer->producer);
 }
 
+void rtc_consumer_set_source_clock(rtc_consumer_t *consumer, const rtc_rtcp_sr_t *sr,
+                                   uint64_t now_ms) {
+    if (!consumer || !sr || atomic_load(&consumer->closed) || atomic_load(&consumer->source_ended))
+        return;
+    rtc_mutex_lock(&consumer->media_mutex);
+    if (consumer->rtcp.send_clock_rate) {
+        consumer->rtcp.source_clock = *sr;
+        consumer->rtcp.source_clock_ms = now_ms;
+        consumer->rtcp.source_clock_valid = true;
+    } else {
+        RTC_LOG_WARN("Cannot preserve publisher clock without a codec clock rate");
+    }
+    rtc_mutex_unlock(&consumer->media_mutex);
+}
+
 void rtc_consumer_source_ended(rtc_consumer_t *consumer) {
     if (!consumer)
         return;
@@ -200,7 +217,8 @@ void rtc_consumer_source_ended(rtc_consumer_t *consumer) {
         atomic_store(&consumer->bitrate_feedback_ms, 0);
         memset(consumer->history, 0, sizeof(consumer->history));
         if (atomic_load(&consumer->packets_sent)) {
-            int rc = rtc_transport_send_bye(consumer->transport, consumer->rtp.ssrc);
+            int rc = rtc_transport_send_bye_named(consumer->transport, consumer->rtp.ssrc,
+                                                  consumer->rtp.rtcp_cname);
             if (rc != RTC_OK)
                 RTC_LOG_DBG("RTCP BYE unavailable on ended consumer: %d", rc);
         }
@@ -354,10 +372,10 @@ int rtc_consumer_handle_rtcp(rtc_consumer_t *consumer, const uint8_t *data, size
             for (int i = 0; i < report.report_count; i++) {
                 if (report.reports[i].ssrc != consumer->rtp.ssrc)
                     continue;
-                rtc_rate_control_on_rtcp_rr(consumer->rate_controller,
-                                            report.reports[i].fraction_lost,
-                                            rtc_rtcp_rtt_from_rr(&report.reports[i]),
-                                            (int)report.reports[i].jitter);
+                rtc_rate_control_on_rtcp_rr(
+                    consumer->rate_controller, report.reports[i].fraction_lost,
+                    rtc_rtcp_stats_rtt_from_rr(&consumer->rtcp, &report.reports[i], rtc_time_ms()),
+                    (int)report.reports[i].jitter);
                 atomic_store(&consumer->estimated_bitrate_bps,
                              (uint32_t)rtc_rate_control_get_bitrate(consumer->rate_controller) *
                                  1000);

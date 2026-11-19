@@ -126,7 +126,7 @@ static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media
     }
 
     if ((m->media_type == RTC_MEDIA_AUDIO || m->media_type == RTC_MEDIA_VIDEO) && m->ssrc != 0) {
-        const char *cname = rtc_rtcp_cname();
+        const char *cname = m->rtcp_cname[0] ? m->rtcp_cname : rtc_rtcp_cname();
         if (!cname)
             return RTC_ERR_SSL;
         SDP_WRITE(p, remain, "a=ssrc:%u cname:%s\r\n", m->ssrc, cname);

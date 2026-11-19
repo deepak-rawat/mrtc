@@ -393,6 +393,8 @@ static int subscribe(rtc_sfu_t *sfu, const char *subscriber, sfu_session_t *publ
             if (rtc_consumer_get_rtp_parameters(s->consumers[index], &rtp) != RTC_OK)
                 return RTC_ERR_GENERIC;
             s->description.media[index].ssrc = rtp.ssrc;
+            snprintf(s->description.media[index].rtcp_cname,
+                     sizeof(s->description.media[index].rtcp_cname), "%s", rtp.rtcp_cname);
             if (!sending)
                 rtc_consumer_pause(s->consumers[index]);
         }

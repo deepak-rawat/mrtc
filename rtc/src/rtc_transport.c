@@ -46,6 +46,7 @@ struct rtc_transport {
     rtc_srtp_ctx_t srtp_send;
     rtc_srtp_ctx_t srtp_recv;
     rtc_rtcp_membership_t rtcp_membership; /* guarded by send_mutex */
+    char rtcp_cname[33];
     uint64_t rtcp_next_membership_check;
     uint32_t rtcp_target_bps;
     rtc_transport_rtp_fn on_rtp;
@@ -695,7 +696,8 @@ rtc_transport_t *rtc_transport_create(rtc_worker_t *worker, const rtc_transport_
         transport->ice_mode = RTC_ICE_MODE_LITE;
 
     if (rtc_random_string(transport->ice_ufrag, 8) != RTC_OK ||
-        rtc_random_string(transport->ice_pwd, 24) != RTC_OK) {
+        rtc_random_string(transport->ice_pwd, 24) != RTC_OK ||
+        rtc_random_string(transport->rtcp_cname, sizeof(transport->rtcp_cname)) != RTC_OK) {
         free(transport);
         return NULL;
     }
@@ -1314,6 +1316,10 @@ static int tx_get_stats_impl(rtc_transport_t *transport, void *arg) {
     return RTC_OK;
 }
 
+const char *rtc_transport_cname(const rtc_transport_t *transport) {
+    return transport ? transport->rtcp_cname : NULL;
+}
+
 rtc_worker_t *rtc_transport_worker(rtc_transport_t *transport) {
     return transport ? transport->worker : NULL;
 }
@@ -1774,6 +1780,8 @@ int rtc_transport_send_report(rtc_transport_t *transport, rtc_rtcp_stats_t *stat
     size_t length = packet.buf_len;
     rc = rtc_transport_send_rtcp(transport, wire, &length, sizeof(wire));
     if (rc == RTC_OK) {
+        if (packet.header.packet_type == RTCP_PT_SR)
+            rtc_rtcp_stats_record_sr(stats, &packet.sr, rtc_time_ms());
         stats->last_report_size = length + 48;
         rtc_mutex_lock(&transport->send_mutex);
         rtc_rtcp_stats_set_membership(stats, &transport->rtcp_membership, rtc_time_ms());
@@ -1784,8 +1792,14 @@ int rtc_transport_send_report(rtc_transport_t *transport, rtc_rtcp_stats_t *stat
 }
 
 int rtc_transport_send_bye(rtc_transport_t *transport, uint32_t ssrc) {
+    return rtc_transport_send_bye_named(transport, ssrc, NULL);
+}
+
+int rtc_transport_send_bye_named(rtc_transport_t *transport, uint32_t ssrc, const char *cname) {
     uint8_t wire[8 + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
     size_t length;
     int rc = rtc_rtcp_build_bye(wire, sizeof(wire), &length, ssrc);
+    if (rc == RTC_OK && cname)
+        rc = rtc_rtcp_compound_feedback_named(wire, &length, sizeof(wire) - 20, cname);
     return rc == RTC_OK ? rtc_transport_send_rtcp(transport, wire, &length, sizeof(wire)) : rc;
 }

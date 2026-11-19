@@ -391,8 +391,11 @@ SR RTP/NTP pairs advance from the newest transmitted RTP timestamp and its
 monotonic anchor at the configured codec clock rate. Equal-timestamp fragments
 and reordered packets do not rebase that anchor. Explicit clock/random-draw
 primitives support deterministic rollover, idle and reconsideration tests.
-Original publisher capture-clock correlation across SFU legs is not yet
-preserved by this send-anchor approximation.
+SFU consumers instead retain the publisher's full RTP/NTP correlation and
+advance both clocks from its local receive epoch. Outgoing SR history maps
+compact NTP references to local monotonic send times, so RTT does not depend on
+the publisher and SFU wall clocks agreeing. Consumer SDES and SDP use a stable
+per-publisher synchronization CNAME, including departure compounds.
 
 SRTP retains up to 64 SSRC contexts in each send-RTP, receive-RTP and
 receive-SRTCP table for the entire key lifetime. It never evicts replay windows
@@ -551,7 +554,7 @@ Client-facade tests (`test_peer`, `test_data_channel`,
   intersection in SDP. Reports use bounded live membership, sender expiry and
   timer/reverse reconsideration for the supported unicast profile.
   Incoming/outgoing BYE and inactivity expiry are implemented; SSRC collision
-  recovery, original publisher capture-clock correlation across SFU legs and
-  large-group BYE backoff remain incomplete.
+  recovery and large-group BYE backoff remain incomplete. Impaired-network
+  synchronized playout needs broader qualification.
 - Replay windows and fingerprint checks are implemented, but this educational
   stack has not undergone an independent production security audit.

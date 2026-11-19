@@ -388,6 +388,8 @@ typedef struct {
     media_recv_stream_t *stream;
     _Atomic int packets, frames, plis, feedback, feedback_errors, receiver_reports;
     _Atomic bool receiver_report_has_sr;
+    _Atomic bool downstream_clock_ok, downstream_cname_ok;
+    char cname[33];
     _Atomic uint16_t last_seq;
     rtc_consumer_t *consumer;
     rtc_producer_t *producer;
@@ -422,6 +424,34 @@ static void routed_publisher_reports(const uint8_t *data, size_t len, void *user
     routed_receiver_t *receiver = user;
     if (rtc_producer_handle_rtcp(receiver->producer, data, len) != RTC_OK)
         atomic_fetch_add(&receiver->feedback_errors, 1);
+}
+
+static void routed_downstream_reports(const uint8_t *data, size_t len, void *user) {
+    routed_receiver_t *receiver = user;
+    for (size_t offset = 0; offset + 4 <= len;) {
+        size_t size = (((size_t)data[offset + 2] << 8) | data[offset + 3]) * 4 + 4;
+        if (size > len - offset)
+            break;
+        if (data[offset + 1] == RTCP_PT_SR) {
+            rtc_rtcp_packet_t report;
+            if (rtc_rtcp_parse(&report, data + offset, size) == RTC_OK && report.sr.ntp_sec >= 42 &&
+                report.sr.ntp_sec < 60) {
+                uint64_t ntp = ((uint64_t)report.sr.ntp_sec << 32) | report.sr.ntp_frac;
+                uint64_t delta = ntp - (((uint64_t)42 << 32) | 0x80000000u);
+                uint32_t expected = 19001 + (uint32_t)((delta >> 32) * 90000 +
+                                                       ((delta & UINT32_MAX) * 90000 >> 32));
+                int32_t difference = (int32_t)(report.sr.rtp_timestamp - expected);
+                if (difference >= -1 && difference <= 1)
+                    atomic_store(&receiver->downstream_clock_ok, true);
+            }
+        } else if (data[offset + 1] == RTCP_PT_SDES && size >= 10) {
+            size_t name_len = data[offset + 9];
+            if (name_len == strlen(receiver->cname) && name_len <= size - 10 &&
+                memcmp(data + offset + 10, receiver->cname, name_len) == 0)
+                atomic_store(&receiver->downstream_cname_ok, true);
+        }
+        offset += size;
+    }
 }
 
 static void routed_upstream_feedback(const uint8_t *data, size_t len, void *user) {
@@ -563,6 +593,7 @@ TEST(routed_loss_wrap_and_bounded_retransmission) {
     rtc_rtp_parameters_t params;
     ASSERT_EQ(rtc_consumer_get_rtp_parameters(consumer, &params), RTC_OK);
     routed_receiver_t receiver = {.consumer = consumer, .producer = producer};
+    memcpy(receiver.cname, params.rtcp_cname, sizeof(receiver.cname));
     media_renderer_t renderer = {.on_video_frame = routed_video, .user = &receiver};
     receiver.pipeline = media_pipeline_create(&(media_pipeline_config_t){.renderer = &renderer});
     ASSERT(receiver.pipeline != NULL);
@@ -573,6 +604,7 @@ TEST(routed_loss_wrap_and_bounded_retransmission) {
     rtc_transport_on_rtcp(outbound, routed_feedback, &receiver);
     rtc_transport_on_rtcp(publisher, routed_upstream_feedback, &receiver);
     rtc_transport_on_rtcp(sfu.transport, routed_publisher_reports, &receiver);
+    rtc_transport_on_rtcp(subscriber, routed_downstream_reports, &receiver);
 
     rtc_vp8_payload_t orphan = {.data = {0, 1}, .len = 2, .marker = false};
     uint16_t source_seq = 1000;
@@ -690,6 +722,11 @@ TEST(routed_loss_wrap_and_bounded_retransmission) {
     rtc_rtcp_stats_t sender_stats;
     ASSERT_EQ(rtc_rtcp_stats_init(&sender_stats, options.rtp.ssrc), RTC_OK);
     rtc_rtcp_stats_on_rtp_send(&sender_stats, 19001, 2);
+    sender_stats.send_clock_rate = 90000;
+    sender_stats.source_clock_valid = true;
+    sender_stats.source_clock_ms = rtc_time_ms();
+    sender_stats.source_clock =
+        (rtc_rtcp_sr_t){.ntp_sec = 42, .ntp_frac = 0x80000000u, .rtp_timestamp = 19001};
     rtc_rtcp_packet_t sender_report;
     ASSERT_EQ(rtc_rtcp_build_report(&sender_report, &sender_stats, true), RTC_OK);
     uint8_t sender_report_wire[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
@@ -700,11 +737,14 @@ TEST(routed_loss_wrap_and_bounded_retransmission) {
               RTC_OK);
     int reports_before_idle = atomic_load(&receiver.receiver_reports);
     uint64_t idle_deadline = rtc_time_ms() + 8000;
-    while (atomic_load(&receiver.receiver_reports) == reports_before_idle &&
+    while ((atomic_load(&receiver.receiver_reports) == reports_before_idle ||
+            !atomic_load(&receiver.downstream_clock_ok)) &&
            rtc_time_ms() < idle_deadline)
         pause_ms(5);
     ASSERT(atomic_load(&receiver.receiver_reports) > reports_before_idle);
     ASSERT(atomic_load(&receiver.receiver_report_has_sr));
+    ASSERT(atomic_load(&receiver.downstream_clock_ok));
+    ASSERT(atomic_load(&receiver.downstream_cname_ok));
 
     rtc_transport_close(outbound);
     uint16_t failed_seq = (uint16_t)(source_seq + offset);
@@ -729,6 +769,7 @@ TEST(routed_loss_wrap_and_bounded_retransmission) {
 
     rtc_transport_on_rtcp(outbound, NULL, NULL);
     rtc_transport_on_rtcp(sfu.transport, NULL, NULL);
+    rtc_transport_on_rtcp(subscriber, NULL, NULL);
     rtc_consumer_destroy(consumer);
     rtc_producer_destroy(producer);
     atomic_store(&upstream.running, false);

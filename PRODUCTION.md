@@ -170,8 +170,10 @@ The retained changes are a tested foundation, not completion of work items 0–6
 
 1. Complete supported-profile negotiation validation, including feedback
    capability intersection, rejected sections and browser-specific SDP shapes.
-2. Complete SSRC collision recovery and qualify sender-clock synchronization
-   across media legs. Dynamic member/sender tracking, timer/reverse
+2. Complete SSRC collision recovery and qualify synchronized playout under
+   impairments. Publisher RTP/NTP correlation, per-publisher synchronization
+   CNAME and monotonic RTT history now cross the SFU legs. Dynamic
+   member/sender tracking, timer/reverse
    reconsideration, incoming/outgoing BYE and source inactivity expiry are
    implemented for the supported unicast profile. Duplicate remote-SSRC SDP
    rejection is validation, not automatic collision recovery. Large-group BYE
@@ -279,9 +281,12 @@ and pair it with the current NTP wall-clock timestamp. Reordered packets and
 equal-timestamp fragments do not move the clock anchor backwards; RTP wrapping
 and exact NTP fractions are covered by deterministic wire-format tests. Native
 senders and SFU consumers supply the negotiated clock rate. This uses the
-latest transmitted media anchor; preserving original publisher capture-clock
-correlation across SFU legs and lip-sync under impairments still need work and
-qualification.
+latest transmitted media anchor until a publisher SR is available. SFU
+consumers then preserve and advance the publisher's RTP/NTP pair, including
+NTP-era/RTP rollover, rather than substituting the SFU's wall epoch. A stable
+per-publisher CNAME is shared by audio/video and kept in SDP, SDES and BYE.
+Outgoing SR history calculates RTT on the local monotonic clock. Synchronized
+playout and lip-sync under impairments still require qualification.
 
 Local validation of these changes:
 

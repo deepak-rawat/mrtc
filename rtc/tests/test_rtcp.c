@@ -18,6 +18,7 @@ TEST(rtcp_compound_cname_and_report_boundaries) {
     rtc_rtcp_stats_t stats;
     ASSERT_EQ(rtc_rtcp_stats_init(&stats, 0x11223344), RTC_OK);
     rtc_rtcp_packet_t packet, parsed;
+    ASSERT_EQ(rtc_rtcp_build_report(&packet, NULL, false), RTC_ERR_INVALID);
     ASSERT_EQ(rtc_rtcp_build_report(&packet, &stats, false), RTC_OK);
     ASSERT_EQ(rtc_rtcp_parse(&parsed, packet.buf, packet.buf_len), RTC_OK);
     ASSERT_EQ(parsed.report_count, 0);
@@ -568,6 +569,51 @@ TEST(rtcp_sender_clock_idle_reordering_and_wrap) {
     ASSERT_EQ(packet.sr.rtp_timestamp, 45000);
 }
 
+TEST(rtcp_forwarded_clock_and_monotonic_rtt_history) {
+    rtc_rtcp_stats_t stats;
+    rtc_rtcp_stats_init(&stats, 99);
+    stats.send_clock_rate = 90000;
+    stats.source_clock_valid = true;
+    stats.source_clock_ms = 1000;
+    stats.source_clock = (rtc_rtcp_sr_t){.ssrc = 11,
+                                         .ntp_sec = UINT32_MAX - 1,
+                                         .ntp_frac = 0x80000000u,
+                                         .rtp_timestamp = UINT32_MAX - 44999};
+    memcpy(stats.cname, "publisher-sync", sizeof("publisher-sync"));
+    rtc_rtcp_stats_on_rtp_send_at(&stats, 123, 10, 2900);
+    rtc_rtcp_packet_t packet, parsed;
+    ASSERT_EQ(rtc_rtcp_build_sr_at(&packet, &stats, 3000, 1700000000000ULL), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_parse(&parsed, packet.buf, packet.buf_len), RTC_OK);
+    ASSERT_EQ(parsed.sr.ssrc, 99);
+    ASSERT_EQ(parsed.sr.rtp_timestamp, 135000);
+    ASSERT_EQ(parsed.sr.ntp_sec, 0);
+    ASSERT_EQ(parsed.sr.ntp_frac, 0x80000000u);
+    ASSERT_EQ(parsed.sr.sender_pkt_count, 1);
+    rtc_rtcp_stats_record_sr(&stats, &parsed.sr, 3000);
+    rtc_rtcp_rr_block_t rr = {.last_sr = 0x8000, .delay_since_sr = 8192};
+    ASSERT_EQ(rtc_rtcp_stats_rtt_from_rr(&stats, &rr, 3375), 250);
+    ASSERT_EQ(rtc_rtcp_stats_rtt_from_rr(&stats, &rr, 3100), 0);
+    ASSERT_EQ(rtc_rtcp_stats_rtt_from_rr(&stats, &rr, 2999), 0);
+    ASSERT_EQ(rtc_rtcp_stats_reset_source(&stats), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_stats_rtt_from_rr(&stats, &rr, 3375), 250);
+    ASSERT_EQ(rtc_rtcp_build_report(&packet, &stats, true), RTC_OK);
+    ASSERT_EQ(packet.buf[37], strlen(stats.cname));
+    ASSERT_MEM_EQ(packet.buf + 38, stats.cname, strlen(stats.cname));
+    for (unsigned i = 0; i < RTC_RTCP_SR_HISTORY; i++) {
+        rtc_rtcp_sr_t newer = {.ntp_sec = 10 + i};
+        rtc_rtcp_stats_record_sr(&stats, &newer, 4000 + i);
+    }
+    ASSERT_EQ(rtc_rtcp_stats_rtt_from_rr(&stats, &rr, 5000), 0);
+    uint8_t bye[128];
+    size_t len;
+    ASSERT_EQ(rtc_rtcp_build_bye(bye, sizeof(bye), &len, 99), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_compound_feedback_named(bye, &len, sizeof(bye), stats.cname), RTC_OK);
+    ASSERT_EQ(bye[17], strlen(stats.cname));
+    ASSERT_MEM_EQ(bye + 18, stats.cname, strlen(stats.cname));
+    stats.send_clock_rate = 0;
+    ASSERT_EQ(rtc_rtcp_build_sr_at(&packet, &stats, 3000, 0), RTC_ERR_INVALID);
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  RTCP Component Tests\n");
@@ -586,6 +632,7 @@ int main(void) {
     RUN_TEST(rtcp_membership_activity_bye_and_atomic_sdes);
     RUN_TEST(rtcp_membership_reconsideration_and_capacity);
     RUN_TEST(rtcp_sender_clock_idle_reordering_and_wrap);
+    RUN_TEST(rtcp_forwarded_clock_and_monotonic_rtt_history);
     RUN_TEST(rtcp_build_rr);
     RUN_TEST(rtcp_sr_roundtrip);
     RUN_TEST(rtcp_rr_roundtrip);

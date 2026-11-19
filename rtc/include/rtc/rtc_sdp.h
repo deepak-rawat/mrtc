@@ -76,6 +76,7 @@ typedef struct {
     char codec_name[32]; /* e.g. "opus", "VP8", "H264" */
     int mid_index;       /* m= line index (0, 1, 2, ...) */
     uint32_t ssrc;       /* a=ssrc:<NNN> ... 0 means not present */
+    char rtcp_cname[33]; /* optional local generation override */
     int direction;       /* 0: sendrecv, 1: sendonly, 2: recvonly, 3: inactive */
     bool rejected;
     bool rtcp_mux;

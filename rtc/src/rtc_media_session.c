@@ -171,7 +171,9 @@ static void session_handle_rr(rtc_media_session_t *s, const uint8_t *buf, size_t
         const rtc_rtcp_rr_block_t *rr = &rtcp.reports[i];
         rtc_rtp_send_stream_t *ss = session_sender(s, rr->ssrc);
         if (ss)
-            (void)rtc_rtp_send_stream_on_rr(ss, rr, rtc_rtcp_rtt_from_rr(rr));
+            (void)rtc_rtp_send_stream_on_rr(
+                ss, rr,
+                rtc_rtcp_stats_rtt_from_rr(rtc_rtp_send_stream_stats(ss), rr, rtc_time_ms()));
     }
 }
 

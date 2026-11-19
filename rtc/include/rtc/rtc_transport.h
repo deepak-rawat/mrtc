@@ -201,6 +201,7 @@ int rtc_transport_retransmit_rtp(rtc_transport_t *transport, const uint8_t *wire
 int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap);
 int rtc_transport_send_report(rtc_transport_t *transport, rtc_rtcp_stats_t *stats, bool sender);
 int rtc_transport_send_bye(rtc_transport_t *transport, uint32_t ssrc);
+int rtc_transport_send_bye_named(rtc_transport_t *transport, uint32_t ssrc, const char *cname);
 void rtc_transport_close(rtc_transport_t *transport);
 void rtc_transport_destroy(rtc_transport_t *transport);
 
