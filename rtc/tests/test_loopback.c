@@ -12,6 +12,7 @@
 #include "test_harness.h"
 
 #include <string.h>
+#include <stdatomic.h>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -334,6 +335,100 @@ static bool setup_media(loop_endpoint_t *endpoint, uint8_t send_pt, uint8_t recv
            rtc_media_session_add_receiver(&endpoint->media, endpoint->recv_stream) == RTC_OK;
 }
 
+typedef struct {
+    _Atomic unsigned ended;
+    _Atomic uint32_t previous;
+} source_rec_t;
+
+static void received_source_change(uint32_t previous, uint32_t current, void *user) {
+    source_rec_t *record = user;
+    if (previous && !current) {
+        atomic_store(&record->previous, previous);
+        atomic_fetch_add(&record->ended, 1);
+    }
+}
+
+static bool wait_for_source_end(source_rec_t *record, unsigned target) {
+    uint64_t deadline = rtc_time_ms() + 1000;
+    while (atomic_load(&record->ended) < target && rtc_time_ms() < deadline)
+        SLEEP_MS(1);
+    return atomic_load(&record->ended) >= target;
+}
+
+static int frame_count(frame_rec_t *record) {
+    rtc_mutex_lock(&record->mutex);
+    int count = record->count;
+    rtc_mutex_unlock(&record->mutex);
+    return count;
+}
+
+static void expire_received_source(void *user) {
+    loop_endpoint_t *endpoint = user;
+    uint64_t timeout = rtc_rtcp_source_timeout_ms(rtc_rtp_recv_stream_stats(endpoint->recv_stream));
+    rtc_rtp_recv_stream_tick(endpoint->recv_stream, rtc_time_ms() + timeout + 1);
+}
+
+TEST(loopback_bye_expiry_and_replay_preserve_source_isolation) {
+    frame_rec_t frames, unused_frames;
+    data_rec_t data;
+    ASSERT(frame_rec_init(&frames));
+    ASSERT(frame_rec_init(&unused_frames));
+    ASSERT(data_rec_init(&data));
+    loop_endpoint_t full, lite;
+    ASSERT(make_endpoint(&full, RTC_ICE_MODE_FULL));
+    ASSERT(make_endpoint(&lite, RTC_ICE_MODE_LITE));
+    ASSERT(setup_media(&full, 96, 97, 1, &unused_frames, NULL));
+    ASSERT(setup_media(&lite, 97, 96, 2, &frames, NULL));
+    source_rec_t source = {0};
+    rtc_rtp_recv_stream_on_source_change(lite.recv_stream, received_source_change, &source);
+    rtc_transport_on_data(lite.transport, data_callback, &data);
+    ASSERT(connect_endpoints(&full, &lite));
+    const uint8_t payload[] = {0x10, 0};
+    ASSERT_EQ(rtc_rtp_send_stream_send(full.send_stream, payload, sizeof(payload), 3000, true),
+              RTC_OK);
+    ASSERT(wait_for_frame(&frames, 1, 1000));
+    uint32_t original = rtc_rtp_send_stream_ssrc(full.send_stream);
+    ASSERT_EQ(rtc_transport_send_bye(full.transport, original), RTC_OK);
+    ASSERT(wait_for_source_end(&source, 1));
+    ASSERT_EQ(atomic_load(&source.previous), original);
+    for (unsigned i = 0; i < 10; i++)
+        ASSERT_EQ(rtc_rtp_send_stream_send(full.send_stream, payload, sizeof(payload), 3000, true),
+                  RTC_OK);
+    ASSERT_EQ(rtc_transport_send_data(full.transport, (const uint8_t *)"barrier", 7), RTC_OK);
+    ASSERT(wait_for_data(&data, 1, 1000));
+    ASSERT_EQ(frame_count(&frames), 1);
+
+    uint32_t replacement = original == UINT32_MAX ? original - 1 : original + 1;
+    rtc_rtp_packet_t packet;
+    ASSERT_EQ(rtc_rtp_build(&packet, 96, 700, 12, replacement, true, payload, sizeof(payload)),
+              RTC_OK);
+    size_t wire_len = packet.buf_len;
+    ASSERT_EQ(rtc_transport_send_rtp(full.transport, packet.buf, &wire_len, sizeof(packet.buf)),
+              RTC_OK);
+    ASSERT(wait_for_frame(&frames, 2, 1000));
+    ASSERT_EQ(frames.ssrc, replacement);
+    ASSERT_EQ(rtc_transport_invoke(lite.transport, expire_received_source, &lite), RTC_OK);
+    ASSERT(wait_for_source_end(&source, 2));
+    ASSERT_EQ(atomic_load(&source.previous), replacement);
+    ASSERT_EQ(rtc_transport_retransmit_rtp(full.transport, packet.buf, wire_len), RTC_OK);
+    ASSERT_EQ(rtc_transport_send_data(full.transport, (const uint8_t *)"barrier", 7), RTC_OK);
+    ASSERT(wait_for_data(&data, 2, 1000));
+    ASSERT_EQ(frame_count(&frames), 2);
+    ASSERT_EQ(rtc_rtp_build(&packet, 96, 701, 3012, replacement, true, payload, sizeof(payload)),
+              RTC_OK);
+    wire_len = packet.buf_len;
+    ASSERT_EQ(rtc_transport_send_rtp(full.transport, packet.buf, &wire_len, sizeof(packet.buf)),
+              RTC_OK);
+    ASSERT(wait_for_frame(&frames, 3, 1000));
+    ASSERT_EQ(frame_count(&frames), 3);
+    ASSERT_EQ(frames.ssrc, replacement);
+    close_endpoint(&full);
+    close_endpoint(&lite);
+    data_rec_destroy(&data);
+    frame_rec_destroy(&frames);
+    frame_rec_destroy(&unused_frames);
+}
+
 TEST(loopback_full_to_lite_media_feedback_and_data) {
     frame_rec_t full_frames;
     frame_rec_t lite_frames;
@@ -350,10 +445,9 @@ TEST(loopback_full_to_lite_media_feedback_and_data) {
     loop_endpoint_t lite;
     ASSERT(make_endpoint(&full, RTC_ICE_MODE_FULL));
     ASSERT(make_endpoint(&lite, RTC_ICE_MODE_LITE));
-    ASSERT(connect_endpoints(&full, &lite));
-
     ASSERT(setup_media(&full, 96, 97, 0xF0F0F0F0u, &full_frames, &full_feedback));
     ASSERT(setup_media(&lite, 97, 96, 0xB0B0B0B0u, &lite_frames, NULL));
+    ASSERT(connect_endpoints(&full, &lite));
 
     const uint8_t payload_full_to_lite[] = {0xFE, 0xED, 0xFA, 0xCE};
     ASSERT_EQ(rtc_rtp_send_stream_send(full.send_stream, payload_full_to_lite,
@@ -455,6 +549,7 @@ TEST(loopback_full_to_lite_media_feedback_and_data) {
 int main(void) {
     rtc_init();
     RUN_TEST(loopback_full_to_lite_media_feedback_and_data);
+    RUN_TEST(loopback_bye_expiry_and_replay_preserve_source_isolation);
     rtc_cleanup();
     TEST_SUMMARY();
 }

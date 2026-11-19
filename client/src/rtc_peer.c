@@ -27,7 +27,7 @@ static void peer_health_timer(void *user) {
     rtc_transport_stats_t stats;
     if (pc->connection_state == RTC_CONNECTION_CLOSED)
         return;
-    if (rtc_transport_get_stats(pc->runtime_transport, &stats) != RTC_OK ||
+    if (rtc_transport_get_stats(pc->runtime_transport, &stats) != RTC_OK || stats.closed ||
         stats.dtls_state == RTC_TRANSPORT_DTLS_FAILED) {
         peer_set_connection(pc, RTC_CONNECTION_FAILED);
         return;
@@ -577,6 +577,8 @@ static void peer_runtime_complete_connection(rtc_peer_connection_t *pc) {
 
     rtc_media_session_start(&pc->media_session);
     peer_health_timer(pc);
+    if (pc->connection_state == RTC_CONNECTION_FAILED)
+        return;
 
     peer_set_ice_connection(pc, RTC_ICE_CONNECTION_CONNECTED);
     peer_set_connection(pc, RTC_CONNECTION_CONNECTED);
@@ -1121,7 +1123,8 @@ static bool peer_validate_remote_media(rtc_peer_connection_t *pc, const rtc_sdp_
     for (int i = 0; i < sdp->media_count; i++) {
         const rtc_sdp_media_t *m = &sdp->media[i];
         for (int j = 0; j < i; j++)
-            if (sdp->media[j].mid_index == m->mid_index)
+            if (sdp->media[j].mid_index == m->mid_index ||
+                (m->ssrc && sdp->media[j].ssrc == m->ssrc))
                 return false;
         if (m->media_type == RTC_MEDIA_APPLICATION) {
             if (++applications > 1 || !m->sctp_port ||
@@ -1699,6 +1702,7 @@ static int peer_get_stats(const rtc_peer_connection_t *pc, rtc_stats_report_t *r
         if (rtc_rtp_recv_stream_is_active(t->receiver.stream)) {
             const rtc_rtcp_stats_t *receiver_stats = rtc_rtp_recv_stream_stats(t->receiver.stream);
             s->in_ssrc = rtc_rtp_recv_stream_ssrc(t->receiver.stream);
+            s->in_source_generation = rtc_rtp_recv_stream_source_generation(t->receiver.stream);
             s->in_packets_received = receiver_stats->packets_received;
             s->in_packets_lost = receiver_stats->packets_lost;
             s->in_jitter_q16 = receiver_stats->jitter;

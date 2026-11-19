@@ -259,6 +259,129 @@ static rtc_rtp_recv_stream_t *make_recv(uint8_t pt, const char *mid) {
     return r;
 }
 
+typedef struct {
+    unsigned changes;
+    unsigned ended;
+    uint32_t current;
+} source_record_t;
+
+static void source_changed(uint32_t previous, uint32_t current, void *user) {
+    source_record_t *record = user;
+    record->changes++;
+    record->ended += previous != 0 && current == 0;
+    record->current = current;
+}
+
+TEST(bye_retires_only_validated_sources_and_blocks_late_media) {
+    rtc_media_session_t session;
+    ASSERT_EQ(rtc_media_session_init(&session, NULL, NULL), RTC_OK);
+    rtc_rtp_recv_stream_t *stream = make_recv(96, NULL);
+    ASSERT(stream != NULL);
+    source_record_t record = {0};
+    rtc_rtp_recv_stream_on_source_change(stream, source_changed, &record);
+    ASSERT_EQ(rtc_media_session_add_receiver(&session, stream), RTC_OK);
+    rtc_media_session_bind_receiver(&session, stream, 0x1111);
+    const uint8_t payload[] = {0x10, 0};
+    rtc_rtp_packet_t packet;
+    ASSERT_EQ(rtc_rtp_build(&packet, 96, 100, 90000, 0x1111, true, payload, sizeof(payload)),
+              RTC_OK);
+    rtc_rtp_recv_stream_on_packet(stream, &packet);
+    uint8_t wire[32];
+    size_t length;
+    ASSERT_EQ(rtc_rtcp_build_bye(wire, sizeof(wire), &length, 0x9999), RTC_OK);
+    rtc_media_session_handle_rtcp(&session, wire, length);
+    ASSERT_EQ(rtc_rtp_recv_stream_ssrc(stream), 0x1111);
+    ASSERT_EQ(rtc_rtcp_build_bye(wire, sizeof(wire), &length, 0x1111), RTC_OK);
+    const uint8_t malformed_tail[] = {0x81, RTCP_PT_BYE, 0, 0};
+    memcpy(wire + length, malformed_tail, sizeof(malformed_tail));
+    rtc_media_session_handle_rtcp(&session, wire, length + sizeof(malformed_tail));
+    ASSERT_EQ(rtc_rtp_recv_stream_ssrc(stream), 0x1111);
+    ASSERT_EQ(record.ended, 0);
+    rtc_media_session_handle_rtcp(&session, wire, length);
+    ASSERT_EQ(rtc_rtp_recv_stream_ssrc(stream), 0);
+    ASSERT_EQ(record.ended, 1);
+    ASSERT_EQ(rtc_rtp_recv_stream_stats(stream)->packets_received, 0);
+    ASSERT(rtc_media_session_resolve(&session, &packet) == NULL);
+    rtc_media_session_bind_receiver(&session, stream, 0x2222);
+    ASSERT_EQ(rtc_rtp_build(&packet, 96, 7, 100, 0x2222, true, payload, sizeof(payload)), RTC_OK);
+    ASSERT(rtc_media_session_resolve(&session, &packet) == stream);
+    rtc_rtp_recv_stream_on_packet(stream, &packet);
+    ASSERT_EQ(rtc_rtp_recv_stream_stats(stream)->remote_ssrc, 0x2222);
+    ASSERT_EQ(rtc_rtp_recv_stream_stats(stream)->packets_expected, 1);
+    ASSERT_EQ(rtc_rtp_build(&packet, 97, 8, 3100, 0x2222, true, payload, sizeof(payload)), RTC_OK);
+    rtc_rtp_recv_stream_on_packet(stream, &packet);
+    ASSERT_EQ(rtc_rtp_recv_stream_stats(stream)->packets_received, 1);
+    rtc_media_session_bind_receiver(&session, stream, 0x1111);
+    ASSERT_EQ(rtc_rtp_build(&packet, 96, 101, 93000, 0x1111, true, payload, sizeof(payload)),
+              RTC_OK);
+    ASSERT(rtc_media_session_resolve(&session, &packet) == stream);
+    ASSERT_EQ(rtc_rtp_build(&packet, 96, 2, 200, 0x3333, true, payload, sizeof(payload)), RTC_OK);
+    ASSERT(rtc_media_session_resolve(&session, &packet) == stream);
+    ASSERT_EQ(rtc_rtp_recv_stream_ssrc(stream), 0x3333);
+    ASSERT_EQ(rtc_rtp_build(&packet, 96, 102, 96000, 0x1111, true, payload, sizeof(payload)),
+              RTC_OK);
+    ASSERT(rtc_media_session_resolve(&session, &packet) == NULL);
+    rtc_media_session_close(&session);
+    rtc_rtp_recv_stream_destroy(stream);
+}
+
+TEST(source_expiry_respects_control_activity_and_allows_fresh_resume) {
+    rtc_media_session_t session;
+    ASSERT_EQ(rtc_media_session_init(&session, NULL, NULL), RTC_OK);
+    rtc_rtp_recv_stream_t *stream = make_recv(96, NULL);
+    source_record_t record = {0};
+    rtc_rtp_recv_stream_on_source_change(stream, source_changed, &record);
+    ASSERT_EQ(rtc_media_session_add_receiver(&session, stream), RTC_OK);
+    rtc_media_session_bind_receiver(&session, stream, 0x1111);
+    const uint8_t payload[] = {0x10, 0};
+    rtc_rtp_packet_t packet;
+    ASSERT_EQ(rtc_rtp_build(&packet, 96, 100, 90000, 0x1111, true, payload, sizeof(payload)),
+              RTC_OK);
+    rtc_rtp_recv_stream_on_packet(stream, &packet);
+    uint64_t generation = rtc_rtp_recv_stream_source_generation(stream);
+    uint64_t now = rtc_time_ms();
+    uint64_t timeout = rtc_rtcp_source_timeout_ms(rtc_rtp_recv_stream_stats(stream));
+    ASSERT_EQ(timeout, 25000);
+    rtc_rtp_recv_stream_on_rtcp_activity(stream, now + 20000);
+    rtc_rtp_recv_stream_tick(stream, now + timeout);
+    ASSERT_EQ(rtc_rtp_recv_stream_ssrc(stream), 0x1111);
+    rtc_rtp_recv_stream_tick(stream, now + 20000 + timeout);
+    ASSERT_EQ(rtc_rtp_recv_stream_ssrc(stream), 0);
+    ASSERT_EQ(record.ended, 1);
+    ASSERT_EQ(rtc_rtp_build(&packet, 96, 101, 93000, 0x1111, true, payload, sizeof(payload)),
+              RTC_OK);
+    ASSERT(rtc_media_session_resolve(&session, &packet) == stream);
+    rtc_rtp_recv_stream_on_packet(stream, &packet);
+    const rtc_rtcp_stats_t *stats = rtc_rtp_recv_stream_stats(stream);
+    ASSERT_EQ(stats->ssrc, 1);
+    ASSERT_EQ(stats->remote_ssrc, 0x1111);
+    ASSERT_EQ(stats->packets_received, 1);
+    ASSERT_EQ(stats->base_seq, 101);
+    ASSERT(rtc_rtp_recv_stream_source_generation(stream) > generation);
+    rtc_media_session_close(&session);
+    rtc_rtp_recv_stream_destroy(stream);
+}
+
+TEST(retired_source_history_exhaustion_fails_closed) {
+    rtc_media_session_t session;
+    ASSERT_EQ(rtc_media_session_init(&session, NULL, NULL), RTC_OK);
+    rtc_rtp_recv_stream_t *stream = make_recv(96, NULL);
+    ASSERT_EQ(rtc_media_session_add_receiver(&session, stream), RTC_OK);
+    uint8_t bye[8];
+    size_t length;
+    for (unsigned i = 0; i <= RTC_MEDIA_SESSION_RETIRED_MAX; i++) {
+        rtc_media_session_bind_receiver(&session, stream, i + 1);
+        ASSERT_EQ(rtc_rtcp_build_bye(bye, sizeof(bye), &length, i + 1), RTC_OK);
+        rtc_media_session_handle_rtcp(&session, bye, length);
+    }
+    rtc_rtp_packet_t packet;
+    ASSERT_EQ(rtc_rtp_build(&packet, 96, 1, 0, 0x1234, true, NULL, 0), RTC_OK);
+    ASSERT(session.retirement_overflow);
+    ASSERT(rtc_media_session_resolve(&session, &packet) == NULL);
+    rtc_media_session_close(&session);
+    rtc_rtp_recv_stream_destroy(stream);
+}
+
 TEST(resolve_routes_same_pt_by_mid) {
     rtc_media_session_t session;
     ASSERT_EQ(rtc_media_session_init(&session, NULL, NULL), RTC_OK);
@@ -418,6 +541,9 @@ int main(void) {
     RUN_TEST(compound_rtcp_dispatches_all_subpackets);
     RUN_TEST(custom_interceptor_sees_rtcp_and_is_freed);
     RUN_TEST(resolve_routes_same_pt_by_mid);
+    RUN_TEST(bye_retires_only_validated_sources_and_blocks_late_media);
+    RUN_TEST(source_expiry_respects_control_activity_and_allows_fresh_resume);
+    RUN_TEST(retired_source_history_exhaustion_fails_closed);
     RUN_TEST(resolve_falls_back_to_payload_type);
     RUN_TEST(receiver_originates_nack_and_limited_pli);
     RUN_TEST(receiver_feedback_respects_negotiated_capabilities);

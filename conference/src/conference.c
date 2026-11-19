@@ -425,6 +425,29 @@ static void on_recv_audio_rtp(const uint8_t *payload, size_t len, uint16_t seq, 
                             false);
 }
 
+static void forget_received_source(conf_peer_t *peer, uint32_t previous_ssrc, bool video) {
+    if (!previous_ssrc || !peer->active || !peer->receive_pipeline)
+        return;
+    media_pipeline_remove_recv_stream(peer->receive_pipeline, previous_ssrc);
+    if (video) {
+        peer->recv_video = NULL;
+        atomic_store(&peer->last_video_ms, 0);
+    } else {
+        peer->recv_audio = NULL;
+        atomic_store(&peer->last_audio_ms, 0);
+    }
+}
+
+static void on_video_source_change(uint32_t previous_ssrc, uint32_t current_ssrc, void *user) {
+    (void)current_ssrc;
+    forget_received_source(user, previous_ssrc, true);
+}
+
+static void on_audio_source_change(uint32_t previous_ssrc, uint32_t current_ssrc, void *user) {
+    (void)current_ssrc;
+    forget_received_source(user, previous_ssrc, false);
+}
+
 static void on_remote_track(rtc_rtp_receiver_t *receiver, void *user) {
     conf_peer_t *cp = (conf_peer_t *)user;
     if (!cp->conf || !cp->conf->pipeline)
@@ -439,9 +462,11 @@ static void on_remote_track(rtc_rtp_receiver_t *receiver, void *user) {
         return;
     if (kind == RTC_KIND_VIDEO) {
         cp->video_receiver = receiver;
+        rtc_rtp_receiver_on_source_change(receiver, on_video_source_change, cp);
         rtc_rtp_receiver_on_frame(receiver, on_recv_video_rtp, cp);
         RTC_LOG_INFO("Conference: receiving video from %s", cp->peer_id);
     } else {
+        rtc_rtp_receiver_on_source_change(receiver, on_audio_source_change, cp);
         rtc_rtp_receiver_on_frame(receiver, on_recv_audio_rtp, cp);
         RTC_LOG_INFO("Conference: receiving audio from %s", cp->peer_id);
     }

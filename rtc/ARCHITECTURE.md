@@ -346,6 +346,28 @@ Recv: packets_received, jitter, last_transit, last_sr_ntp
   on the right receive stream. This is the reusable glue that previously
   lived hand-written in the client.
 
+Receive-source lifetime is independent of track/session lifetime. Compound
+framing and SR/RR/BYE bodies are validated before dispatch. Known-source BYE
+unbinds the receiver; replacement retires the old SSRC before binding the new
+one. A bounded 32-entry history suppresses late retired-source RTP for five
+deterministic report intervals, normally 25 seconds; overflow closes the
+transport with an error. Explicit binding clears the matching retirement.
+SR/RR source lookup scans the bounded receiver list; bound RTP remains O(1).
+
+Known RTP/SR/RR activity refreshes the same five-interval inactivity lease.
+Expiry unbinds the source but permits fresh same-SSRC resumption. Source change
+resets receive statistics/recovery and notifies the owning-worker callback;
+each nonzero binding advances a source generation. Neither retirement nor
+expiry resets SRTP replay/nonce state. Session start/stop and report timer
+publication/cancellation are serialized on the owning worker.
+
+SRTP retains up to 64 SSRC contexts in each send-RTP, receive-RTP and
+receive-SRTCP table for the entire key lifetime. It never evicts replay windows
+or rollover counters. Receive entries are allocated only after authentication;
+capacity exhaustion closes the receiving transport, while send exhaustion
+returns `RTC_ERR_NOMEM`. A new keyed transport is required to reclaim capacity,
+not ICE restart or source expiry.
+
 ### SDP (`rtc_sdp.h/c`)
 
 Offer / Answer generation and parsing (RFC 4566 WebRTC subset).
@@ -494,7 +516,7 @@ Client-facade tests (`test_peer`, `test_data_channel`,
 - Reports and feedback are compound SR/RR + SDES, with feedback capability
   intersection in SDP. Reports use randomized bandwidth-aware scheduling for
   the four-SSRC one-camera/one-microphone connection, not full dynamic RTP-group
-  reconsideration. Outgoing source retirement emits BYE; incoming BYE/source
-  expiry and SSRC collision recovery remain incomplete.
+  reconsideration. Incoming/outgoing BYE and inactivity expiry are implemented;
+  SSRC collision recovery remains incomplete.
 - Replay windows and fingerprint checks are implemented, but this educational
   stack has not undergone an independent production security audit.

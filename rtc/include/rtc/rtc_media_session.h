@@ -29,6 +29,8 @@
 
 #include <stdatomic.h>
 
+#define RTC_MEDIA_SESSION_RETIRED_MAX 32
+
 typedef struct {
     rtc_transport_t *transport;
     rtc_worker_t *worker;
@@ -37,6 +39,11 @@ typedef struct {
     rtc_interceptor_chain_t chain; /* RTCP handling: report, NACK, PLI + custom */
     rtc_worker_timer_t report_timer;
     uint8_t mid_ext_id; /* negotiated MID header-extension id (0 = none) */
+    struct {
+        uint32_t ssrc;
+        uint64_t until_ms;
+    } retired[RTC_MEDIA_SESSION_RETIRED_MAX];
+    bool retirement_overflow;
     _Atomic bool running;
     bool ready;
 } rtc_media_session_t;
@@ -55,8 +62,8 @@ rtc_err_t rtc_media_session_add_sender(rtc_media_session_t *s, rtc_rtp_send_stre
 /* Register a receive stream for payload-type resolution and RR emission. */
 rtc_err_t rtc_media_session_add_receiver(rtc_media_session_t *s, rtc_rtp_recv_stream_t *stream);
 
-/* Bind a receive stream to a signalled SSRC (from a=ssrc) so inbound RTP and SR
- * dispatch in O(1) without the resolver. */
+/* Bind a receive stream to a signalled SSRC (from a=ssrc) for O(1) RTP dispatch.
+ * Reports match the current source through the bounded receiver list. */
 void rtc_media_session_bind_receiver(rtc_media_session_t *s, rtc_rtp_recv_stream_t *stream,
                                      uint32_t ssrc);
 

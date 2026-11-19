@@ -11,6 +11,7 @@
  */
 #include <rtc/rtc_client.h>
 #include <rtc/rtc_listener.h>
+#include <rtc/rtc_media_session.h>
 #include <rtc/rtc_transport.h>
 #include <rtc/rtc_worker.h>
 #include <rtc/rtc_sdp.h>
@@ -56,6 +57,34 @@ TEST(shared_runtime_has_room_for_eight_relay_sockets) {
         rtc_peer_connection_close(peers[i]);
         rtc_peer_connection_destroy(peers[i]);
     }
+}
+
+TEST(peer_rejects_duplicate_remote_sources_without_mutation) {
+    rtc_peer_connection_t *offerer = rtc_peer_connection_create(NULL);
+    rtc_peer_connection_t *answerer = rtc_peer_connection_create(NULL);
+    ASSERT(offerer && answerer);
+    rtc_codec_t opus = {
+        .payload_type = 111, .mime_type = "audio/opus", .clock_rate = 48000, .channels = 2};
+    ASSERT(rtc_peer_connection_add_track(offerer, RTC_KIND_AUDIO, &opus) != NULL);
+    rtc_desc_t offer;
+    ASSERT_EQ(rtc_peer_connection_create_offer(offerer, &offer), RTC_OK);
+    rtc_sdp_t duplicate = {0};
+    ASSERT_EQ(rtc_sdp_parse(&duplicate, offer.sdp, offer.sdp_len), RTC_OK);
+    duplicate.media[1] = duplicate.media[0];
+    duplicate.media[1].mid_index = 1;
+    duplicate.media_count = 2;
+    ASSERT_EQ(rtc_sdp_generate(&duplicate), RTC_OK);
+    memcpy(offer.sdp, duplicate.raw, duplicate.raw_len + 1);
+    offer.sdp_len = duplicate.raw_len;
+    ASSERT_EQ(rtc_peer_connection_set_remote_desc(answerer, &offer), RTC_ERR_SDP);
+    ASSERT_EQ(rtc_peer_connection_signaling_state(answerer), RTC_SIGNALING_STABLE);
+    ASSERT_EQ(rtc_peer_connection_connection_state(answerer), RTC_CONNECTION_NEW);
+    ASSERT(rtc_peer_connection_remote_desc(answerer) == NULL);
+    rtc_sdp_close(&duplicate);
+    rtc_peer_connection_close(offerer);
+    rtc_peer_connection_close(answerer);
+    rtc_peer_connection_destroy(offerer);
+    rtc_peer_connection_destroy(answerer);
 }
 
 TEST(peer_add_track) {
@@ -420,7 +449,43 @@ static void alice_on_conn(rtc_connection_state_t state, void *user) {
     g_alice_state = state;
 }
 
-TEST(peer_connects_to_runtime_transport) {
+static void count_received_frame(const uint8_t *data, size_t len, uint16_t seq, uint32_t timestamp,
+                                 uint32_t ssrc, bool marker, void *user) {
+    (void)data;
+    (void)len;
+    (void)seq;
+    (void)timestamp;
+    (void)ssrc;
+    (void)marker;
+    atomic_uint *frames = user;
+    atomic_fetch_add(frames, 1);
+}
+
+static void receive_runtime_track(rtc_rtp_receiver_t *receiver, void *user) {
+    rtc_rtp_receiver_on_frame(receiver, count_received_frame, user);
+}
+
+typedef struct {
+    rtc_transport_t *transport;
+    int rc;
+} source_burst_t;
+
+static void send_source_burst(void *user) {
+    source_burst_t *burst = user;
+    const uint8_t audio[] = {0xf8, 0xff, 0xfe};
+    for (unsigned i = 0; i < RTC_MEDIA_SESSION_RETIRED_MAX + 2; i++) {
+        rtc_rtp_packet_t packet;
+        burst->rc = rtc_rtp_build(&packet, 111, 1, 960, 0x10000 + i, true, audio, sizeof(audio));
+        if (burst->rc != RTC_OK)
+            return;
+        size_t len = packet.buf_len;
+        burst->rc = rtc_transport_send_rtp(burst->transport, packet.buf, &len, sizeof(packet.buf));
+        if (burst->rc != RTC_OK)
+            return;
+    }
+}
+
+TEST(peer_connects_and_surfaces_source_retirement_exhaustion) {
     g_alice_state = RTC_CONNECTION_NEW;
 
     rtc_config_t config;
@@ -432,6 +497,8 @@ TEST(peer_connects_to_runtime_transport) {
     ASSERT(make_remote_env(&remote));
 
     rtc_peer_connection_on_connection_state(alice, alice_on_conn, NULL);
+    atomic_uint received = 0;
+    rtc_peer_connection_on_track(alice, receive_runtime_track, &received);
 
     rtc_codec_t opus;
     memset(&opus, 0, sizeof(opus));
@@ -474,9 +541,20 @@ TEST(peer_connects_to_runtime_transport) {
 
     printf("    peer connected via auto-connect\n");
 
+    source_burst_t burst = {.transport = remote.transport};
+    ASSERT_EQ(rtc_transport_invoke(remote.transport, send_source_burst, &burst), RTC_OK);
+    ASSERT_EQ(burst.rc, RTC_OK);
+    uint64_t deadline = rtc_time_ms() + 2000;
+    while (g_alice_state != RTC_CONNECTION_FAILED && rtc_time_ms() < deadline)
+        SLEEP_MS(10);
+    bool failed = g_alice_state == RTC_CONNECTION_FAILED;
+    unsigned frames = atomic_load(&received);
+
     rtc_peer_connection_close(alice);
     rtc_peer_connection_destroy(alice);
     close_remote_env(&remote);
+    ASSERT(frames > 0);
+    ASSERT(failed);
 }
 
 TEST(peer_get_stats) {
@@ -715,12 +793,13 @@ int main(void) {
     RUN_TEST(peer_create_destroy);
     RUN_TEST(shared_runtime_has_room_for_eight_relay_sockets);
     RUN_TEST(peer_add_track);
+    RUN_TEST(peer_rejects_duplicate_remote_sources_without_mutation);
     RUN_TEST(peer_create_offer);
     RUN_TEST(peer_signaling_states);
     RUN_TEST(peer_ice_candidates);
     RUN_TEST(peer_add_ice_candidate);
     RUN_TEST(peer_shared_runtime_listener);
-    RUN_TEST(peer_connects_to_runtime_transport);
+    RUN_TEST(peer_connects_and_surfaces_source_retirement_exhaustion);
     RUN_TEST(peer_get_stats);
     RUN_TEST(peer_add_transceiver_remove_track);
     RUN_TEST(peer_sender_parameters);

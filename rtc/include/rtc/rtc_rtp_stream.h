@@ -28,6 +28,8 @@ typedef void (*rtc_rtp_recv_stream_frame_fn)(const uint8_t *payload, size_t len,
 typedef void (*rtc_rtp_send_stream_nack_fn)(const uint16_t *lost_seqs, int count, void *user);
 typedef void (*rtc_rtp_send_stream_pli_fn)(void *user);
 typedef int (*rtc_rtp_recv_stream_feedback_fn)(const uint8_t *data, size_t len, void *user);
+typedef void (*rtc_rtp_recv_stream_source_fn)(uint32_t previous_ssrc, uint32_t current_ssrc,
+                                              void *user);
 
 typedef struct {
     uint8_t payload_type;
@@ -87,6 +89,7 @@ bool rtc_rtp_recv_stream_is_active(const rtc_rtp_recv_stream_t *stream);
 bool rtc_rtp_recv_stream_can_receive(const rtc_rtp_recv_stream_t *stream, uint8_t payload_type);
 void rtc_rtp_recv_stream_set_ssrc(rtc_rtp_recv_stream_t *stream, uint32_t ssrc);
 uint32_t rtc_rtp_recv_stream_ssrc(const rtc_rtp_recv_stream_t *stream);
+uint64_t rtc_rtp_recv_stream_source_generation(const rtc_rtp_recv_stream_t *stream);
 const rtc_rtcp_stats_t *rtc_rtp_recv_stream_stats(const rtc_rtp_recv_stream_t *stream);
 
 /* Expected MID (from a=mid) for BUNDLE / same-payload-type routing. */
@@ -96,6 +99,11 @@ bool rtc_rtp_recv_stream_mid_matches(const rtc_rtp_recv_stream_t *stream, const 
 
 void rtc_rtp_recv_stream_on_frame(rtc_rtp_recv_stream_t *stream, rtc_rtp_recv_stream_frame_fn fn,
                                   void *user);
+/* Called on source replacement/retirement; current_ssrc == 0 means ended or
+ * expired. Does not change the negotiated receiver's enabled state. */
+void rtc_rtp_recv_stream_on_source_change(rtc_rtp_recv_stream_t *stream,
+                                          rtc_rtp_recv_stream_source_fn fn, void *user);
+void rtc_rtp_recv_stream_on_rtcp_activity(rtc_rtp_recv_stream_t *stream, uint64_t now_ms);
 void rtc_rtp_recv_stream_on_packet(rtc_rtp_recv_stream_t *stream, const rtc_rtp_packet_t *pkt);
 void rtc_rtp_recv_stream_on_sr(rtc_rtp_recv_stream_t *stream, const rtc_rtcp_sr_t *sr);
 void rtc_rtp_recv_stream_emit_rr(rtc_rtp_recv_stream_t *stream, rtc_transport_t *transport);

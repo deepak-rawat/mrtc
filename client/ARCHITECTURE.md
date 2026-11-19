@@ -235,8 +235,17 @@ callbacks. TLS uses verified server identity and the default trust store or
 ### Stats Reporting (`rtc_stats.h`, `rtc_peer.c`)
 
 `rtc_peer_connection_get_stats()` snapshots per-transceiver counters into
-a `rtc_stats_report_t` (subset of W3C `RTCStatsReport`). The values are
-monotonic counters; snapshots are serialized with the runtime worker.
+a `rtc_stats_report_t` (subset of W3C `RTCStatsReport`). Snapshots are serialized
+with the runtime worker. Inbound counters reset with the receive-source
+lifetime; compare MID, `in_ssrc` and `in_source_generation` before calculating
+deltas, including when a source resumes with the same SSRC.
+
+`rtc_rtp_receiver_on_source_change()` reports previous/current SSRCs on the
+worker; current zero means retirement or expiry, not track/participant removal.
+Register before media or in `on_track`. Applications retaining decoder/jitter
+state should discard the old source's state on this callback. The conference
+controller does this automatically. Duplicate nonzero remote SSRCs are
+rejected during SDP validation before changing the connection.
 
 ### Integrated Protocol Features
 

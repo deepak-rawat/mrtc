@@ -24,6 +24,12 @@ and preparing sessions. Receive pipelines belong to sessions so old/new decoder
 state cannot mix. This intentionally favors straightforward ownership over
 packing every decoder into a single global receive array.
 
+Receive-source callbacks retire the old SSRC's decoder/jitter state and cached
+receive handle on the owning worker after BYE, inactivity expiry or replacement.
+The next source lazily creates fresh receive state. Participant identity,
+capture and cumulative application frame counters survive; source retirement
+does not tear down the call or its SCTP channel.
+
 ## Public Lifecycle
 
 ```c

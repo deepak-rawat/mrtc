@@ -25,7 +25,8 @@ typedef struct {
     uint32_t out_bytes_sent; /* RTP payload octets (RFC 3550 sender octet count) */
 
     /* Inbound (RTCInboundRtpStreamStats subset) */
-    uint32_t in_ssrc; /* 0 if receiver hasn't seen any packet */
+    uint32_t in_ssrc;              /* current bound source; 0 if unbound/retired */
+    uint64_t in_source_generation; /* changes when a source is (re)bound */
     uint32_t in_packets_received;
     uint32_t in_packets_lost;
     uint32_t in_jitter_q16; /* Q16.16 fixed-point (RFC 3550 interarrival jitter) */

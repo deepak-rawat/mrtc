@@ -66,6 +66,12 @@ void rtc_rtp_receiver_on_frame(rtc_rtp_receiver_t *receiver, rtc_on_frame_fn fn,
         rtc_rtp_recv_stream_on_frame(receiver->stream, fn, user);
 }
 
+void rtc_rtp_receiver_on_source_change(rtc_rtp_receiver_t *receiver, rtc_on_source_change_fn fn,
+                                       void *user) {
+    if (receiver)
+        rtc_rtp_recv_stream_on_source_change(receiver->stream, fn, user);
+}
+
 int rtc_rtp_receiver_request_keyframe(rtc_rtp_receiver_t *receiver) {
     return receiver ? rtc_rtp_recv_stream_request_keyframe(receiver->stream) : RTC_ERR_INVALID;
 }

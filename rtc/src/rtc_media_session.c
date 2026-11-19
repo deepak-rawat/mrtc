@@ -5,8 +5,10 @@
 
 #include "rtc/rtc_rtcp.h"
 #include "rtc/rtc_rtp_ext.h"
+#include "rtc_worker_internal.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 #define RTC_MEDIA_SESSION_FEEDBACK_MS 20
 
@@ -21,9 +23,56 @@ static rtc_rtp_recv_stream_t *session_recv_at(rtc_media_session_t *s, size_t i) 
     return slot ? *slot : NULL;
 }
 
+static bool session_source_retired(rtc_media_session_t *s, uint32_t ssrc, uint64_t now) {
+    if (s->retirement_overflow)
+        return true;
+    for (size_t i = 0; i < RTC_MEDIA_SESSION_RETIRED_MAX; i++)
+        if (s->retired[i].ssrc == ssrc && s->retired[i].until_ms > now)
+            return true;
+    return false;
+}
+
+static void session_retire_source(rtc_media_session_t *s, rtc_rtp_recv_stream_t *stream,
+                                  uint64_t now) {
+    uint32_t ssrc = rtc_rtp_recv_stream_ssrc(stream);
+    uint64_t grace = rtc_rtcp_source_timeout_ms(rtc_rtp_recv_stream_stats(stream));
+    bool recorded = false;
+    for (size_t i = 0; i < RTC_MEDIA_SESSION_RETIRED_MAX; i++) {
+        if (!s->retired[i].ssrc || s->retired[i].ssrc == ssrc || s->retired[i].until_ms <= now) {
+            s->retired[i].ssrc = ssrc;
+            s->retired[i].until_ms = grace > UINT64_MAX - now ? UINT64_MAX : now + grace;
+            recorded = true;
+            break;
+        }
+    }
+    if (!recorded) {
+        RTC_LOG_ERR("Too many recently retired RTP sources");
+        s->retirement_overflow = true;
+        rtc_media_session_stop(s);
+        if (s->transport)
+            rtc_transport_close(s->transport);
+    }
+    if (s->transport)
+        rtc_transport_unbind_rtp(s->transport, ssrc);
+    rtc_rtp_recv_stream_set_ssrc(stream, 0);
+}
+
+static rtc_rtp_recv_stream_t *session_select_source(rtc_media_session_t *s,
+                                                    rtc_rtp_recv_stream_t *stream, uint32_t ssrc) {
+    uint32_t previous = rtc_rtp_recv_stream_ssrc(stream);
+    if (previous && previous != ssrc)
+        session_retire_source(s, stream, rtc_time_ms());
+    if (s->retirement_overflow)
+        return NULL;
+    rtc_rtp_recv_stream_set_ssrc(stream, ssrc);
+    return stream;
+}
+
 rtc_rtp_recv_stream_t *rtc_media_session_resolve(rtc_media_session_t *s,
                                                  const rtc_rtp_packet_t *pkt) {
     if (!s || !s->ready || !pkt)
+        return NULL;
+    if (!pkt->header.ssrc || session_source_retired(s, pkt->header.ssrc, rtc_time_ms()))
         return NULL;
     size_t n = rtc_vec_len(&s->recv_streams);
 
@@ -38,8 +87,7 @@ rtc_rtp_recv_stream_t *rtc_media_session_resolve(rtc_media_session_t *s,
                 rtc_rtp_recv_stream_t *rs = session_recv_at(s, i);
                 if (rs && rtc_rtp_recv_stream_mid_matches(rs, mid) &&
                     rtc_rtp_recv_stream_can_receive(rs, pkt->header.payload_type)) {
-                    rtc_rtp_recv_stream_set_ssrc(rs, pkt->header.ssrc);
-                    return rs;
+                    return session_select_source(s, rs, pkt->header.ssrc);
                 }
             }
             return NULL;
@@ -56,9 +104,7 @@ rtc_rtp_recv_stream_t *rtc_media_session_resolve(rtc_media_session_t *s,
             match = rs;
         }
     }
-    if (match)
-        rtc_rtp_recv_stream_set_ssrc(match, pkt->header.ssrc);
-    return match;
+    return match ? session_select_source(s, match, pkt->header.ssrc) : NULL;
 }
 
 /* First packet for an unbound SSRC: hand the transport demux the resolved
@@ -73,12 +119,33 @@ static rtc_rtp_send_stream_t *session_sender(rtc_media_session_t *s, uint32_t ss
     return (rtc_rtp_send_stream_t *)rtc_u32_map_get(&s->send_streams, ssrc);
 }
 
+static rtc_rtp_recv_stream_t *session_receiver(rtc_media_session_t *s, uint32_t ssrc) {
+    if (!ssrc)
+        return NULL;
+    for (size_t i = 0; i < rtc_vec_len(&s->recv_streams); i++) {
+        rtc_rtp_recv_stream_t *stream = session_recv_at(s, i);
+        if (rtc_rtp_recv_stream_ssrc(stream) == ssrc)
+            return stream;
+    }
+    return NULL;
+}
+
+static void session_handle_bye(rtc_media_session_t *s, const uint8_t *buf, size_t len) {
+    rtc_rtcp_bye_t bye;
+    if (rtc_rtcp_parse_bye(&bye, buf, len) != RTC_OK)
+        return;
+    for (unsigned i = 0; i < bye.count; i++) {
+        rtc_rtp_recv_stream_t *stream = session_receiver(s, bye.ssrcs[i]);
+        if (stream)
+            session_retire_source(s, stream, rtc_time_ms());
+    }
+}
+
 static void session_handle_sr(rtc_media_session_t *s, const uint8_t *buf, size_t len) {
     rtc_rtcp_packet_t rtcp;
     if (rtc_rtcp_parse(&rtcp, buf, len) != RTC_OK)
         return;
-    rtc_rtp_recv_stream_t *rs =
-        (rtc_rtp_recv_stream_t *)rtc_transport_rtp_bound(s->transport, rtcp.sender_ssrc);
+    rtc_rtp_recv_stream_t *rs = session_receiver(s, rtcp.sender_ssrc);
     if (rs)
         rtc_rtp_recv_stream_on_sr(rs, &rtcp.sr);
 }
@@ -87,6 +154,7 @@ static void session_handle_rr(rtc_media_session_t *s, const uint8_t *buf, size_t
     rtc_rtcp_packet_t rtcp;
     if (rtc_rtcp_parse(&rtcp, buf, len) != RTC_OK)
         return;
+    rtc_rtp_recv_stream_on_rtcp_activity(session_receiver(s, rtcp.sender_ssrc), rtc_time_ms());
 #ifdef MRTC_ENABLE_TWCC
     /* The loss-based estimator is transport-wide, but an RR can report several
      * SSRCs with different loss; feed the worst so congestion control reacts to
@@ -174,6 +242,8 @@ static void report_intercept_rtcp(rtc_interceptor_t *it, uint8_t pt, uint8_t fmt
         session_handle_rr(s, buf, len);
     } else if (pt == RTCP_PT_RR)
         session_handle_rr(s, buf, len);
+    else if (pt == RTCP_PT_BYE)
+        session_handle_bye(s, buf, len);
 }
 
 static void report_intercept_tick(rtc_interceptor_t *it, uint64_t now_ms) {
@@ -254,6 +324,10 @@ static rtc_err_t session_install_default_interceptors(rtc_media_session_t *s) {
 void rtc_media_session_handle_rtcp(rtc_media_session_t *s, const uint8_t *buf, size_t len) {
     if (!s || !s->ready || !buf)
         return;
+    if (rtc_rtcp_validate_compound(buf, len) != RTC_OK) {
+        RTC_LOG_WARN("Malformed compound RTCP packet");
+        return;
+    }
     size_t offset = 0;
     while (offset + 4 <= len) {
         if (((buf[offset] >> 6) & 0x03) != 2)
@@ -285,8 +359,15 @@ static void session_report_timer(void *user) {
         rtc_rtp_recv_stream_tick(session_recv_at(s, i), now);
     rtc_interceptor_chain_tick(&s->chain, now);
 
-    s->report_timer = rtc_worker_add_timer(s->worker, rtc_time_ms() + RTC_MEDIA_SESSION_FEEDBACK_MS,
-                                           session_report_timer, s);
+    if (atomic_load_explicit(&s->running, memory_order_acquire)) {
+        s->report_timer = rtc_worker_add_timer(
+            s->worker, rtc_time_ms() + RTC_MEDIA_SESSION_FEEDBACK_MS, session_report_timer, s);
+        if (s->report_timer == RTC_WORKER_TIMER_INVALID) {
+            atomic_store(&s->running, false);
+            RTC_LOG_ERR("Media session report timer allocation failed");
+            rtc_transport_close(s->transport);
+        }
+    }
 }
 
 /* ---- Lifecycle ---- */
@@ -307,6 +388,8 @@ rtc_err_t rtc_media_session_init(rtc_media_session_t *s, rtc_transport_t *transp
     s->worker = worker;
     s->report_timer = RTC_WORKER_TIMER_INVALID;
     s->mid_ext_id = 0;
+    memset(s->retired, 0, sizeof(s->retired));
+    s->retirement_overflow = false;
     atomic_store_explicit(&s->running, false, memory_order_relaxed);
     s->ready = true;
 
@@ -346,8 +429,27 @@ void rtc_media_session_bind_receiver(rtc_media_session_t *s, rtc_rtp_recv_stream
                                      uint32_t ssrc) {
     if (!s || !s->ready || !stream)
         return;
+    if (ssrc) {
+        rtc_rtp_recv_stream_t *other = session_receiver(s, ssrc);
+        if (other && other != stream) {
+            RTC_LOG_ERR("Duplicate RTP receive source 0x%08x", ssrc);
+            rtc_media_session_stop(s);
+            if (s->transport)
+                rtc_transport_close(s->transport);
+            return;
+        }
+    }
+    uint32_t previous = rtc_rtp_recv_stream_ssrc(stream);
+    if (previous && previous != ssrc) {
+        session_retire_source(s, stream, rtc_time_ms());
+        if (s->retirement_overflow)
+            return;
+    }
+    for (size_t i = 0; i < RTC_MEDIA_SESSION_RETIRED_MAX; i++)
+        if (s->retired[i].ssrc == ssrc)
+            s->retired[i].ssrc = 0;
     rtc_rtp_recv_stream_set_ssrc(stream, ssrc);
-    if (s->transport)
+    if (s->transport && ssrc)
         rtc_transport_bind_rtp(s->transport, ssrc, stream);
 }
 
@@ -362,24 +464,43 @@ rtc_err_t rtc_media_session_add_interceptor(rtc_media_session_t *s, rtc_intercep
     return rtc_interceptor_chain_add(&s->chain, it);
 }
 
-void rtc_media_session_start(rtc_media_session_t *s) {
-    if (!s || !s->ready || !s->worker)
-        return;
+static void session_start_on_worker(void *user) {
+    rtc_media_session_t *s = user;
     if (atomic_exchange_explicit(&s->running, true, memory_order_acq_rel))
         return;
-    if (s->report_timer == RTC_WORKER_TIMER_INVALID)
+    if (s->report_timer == RTC_WORKER_TIMER_INVALID) {
         s->report_timer = rtc_worker_add_timer(
             s->worker, rtc_time_ms() + RTC_MEDIA_SESSION_FEEDBACK_MS, session_report_timer, s);
+        if (s->report_timer == RTC_WORKER_TIMER_INVALID) {
+            atomic_store(&s->running, false);
+            RTC_LOG_ERR("Media session report timer allocation failed");
+            rtc_transport_close(s->transport);
+        }
+    }
 }
 
-void rtc_media_session_stop(rtc_media_session_t *s) {
-    if (!s || !s->ready)
+void rtc_media_session_start(rtc_media_session_t *s) {
+    if (!s || !s->ready || !s->worker || !s->transport)
         return;
+    rtc_worker_invoke(s->worker, session_start_on_worker, s);
+}
+
+static void session_stop_on_worker(void *user) {
+    rtc_media_session_t *s = user;
     atomic_store_explicit(&s->running, false, memory_order_release);
     if (s->worker && s->report_timer != RTC_WORKER_TIMER_INVALID) {
         rtc_worker_cancel_timer(s->worker, s->report_timer);
         s->report_timer = RTC_WORKER_TIMER_INVALID;
     }
+}
+
+void rtc_media_session_stop(rtc_media_session_t *s) {
+    if (!s || !s->ready)
+        return;
+    if (s->worker)
+        rtc_worker_invoke(s->worker, session_stop_on_worker, s);
+    else
+        session_stop_on_worker(s);
 }
 
 void rtc_media_session_close(rtc_media_session_t *s) {

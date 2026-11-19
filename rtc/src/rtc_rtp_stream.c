@@ -50,6 +50,10 @@ struct rtc_rtp_recv_stream {
     uint32_t clock_rate;
     rtc_rtp_recv_stream_frame_fn on_frame;
     void *on_frame_user;
+    rtc_rtp_recv_stream_source_fn on_source_change;
+    void *source_user;
+    uint64_t last_activity_ms;
+    uint64_t source_generation;
     uint32_t ssrc;
     char mid[RTC_RTP_MID_MAX];
     bool has_mid;
@@ -465,14 +469,36 @@ bool rtc_rtp_recv_stream_can_receive(const rtc_rtp_recv_stream_t *stream, uint8_
 
 void rtc_rtp_recv_stream_set_ssrc(rtc_rtp_recv_stream_t *stream, uint32_t ssrc) {
     if (stream && stream->ssrc != ssrc) {
+        uint32_t previous = stream->ssrc;
+        rtc_rtcp_stats_reset_source(&stream->rtcp_stats);
         stream->ssrc = ssrc;
+        if (ssrc)
+            stream->source_generation++;
+        stream->last_activity_ms = ssrc ? rtc_time_ms() : 0;
         stream->seq_initialized = false;
         stream->recovery = false;
         stream->frame_open = false;
         stream->frame_timestamp_valid = false;
+        stream->frame_marker_seen = false;
+        stream->last_packet_ms = 0;
         stream->last_pli_ms = 0;
         memset(stream->missing, 0, sizeof(stream->missing));
+        if (stream->on_source_change)
+            stream->on_source_change(previous, ssrc, stream->source_user);
     }
+}
+
+void rtc_rtp_recv_stream_on_source_change(rtc_rtp_recv_stream_t *stream,
+                                          rtc_rtp_recv_stream_source_fn fn, void *user) {
+    if (stream) {
+        stream->on_source_change = fn;
+        stream->source_user = user;
+    }
+}
+
+void rtc_rtp_recv_stream_on_rtcp_activity(rtc_rtp_recv_stream_t *stream, uint64_t now_ms) {
+    if (stream && stream->ssrc)
+        stream->last_activity_ms = now_ms;
 }
 
 void rtc_rtp_recv_stream_set_mid(rtc_rtp_recv_stream_t *stream, const char *mid) {
@@ -501,6 +527,10 @@ bool rtc_rtp_recv_stream_mid_matches(const rtc_rtp_recv_stream_t *stream, const 
 
 uint32_t rtc_rtp_recv_stream_ssrc(const rtc_rtp_recv_stream_t *stream) {
     return stream ? stream->ssrc : 0;
+}
+
+uint64_t rtc_rtp_recv_stream_source_generation(const rtc_rtp_recv_stream_t *stream) {
+    return stream ? stream->source_generation : 0;
 }
 
 const rtc_rtcp_stats_t *rtc_rtp_recv_stream_stats(const rtc_rtp_recv_stream_t *stream) {
@@ -537,8 +567,14 @@ static bool recv_vp8_keyframe_start(const uint8_t *payload, size_t len) {
 void rtc_rtp_recv_stream_on_packet(rtc_rtp_recv_stream_t *stream, const rtc_rtp_packet_t *pkt) {
     if (!stream || !pkt || !stream->active || !stream->on_frame)
         return;
+    if (pkt->header.payload_type != stream->payload_type) {
+        RTC_LOG_DBG("Ignoring RTP payload type %u on receiver configured for %u",
+                    pkt->header.payload_type, stream->payload_type);
+        return;
+    }
     rtc_rtp_recv_stream_set_ssrc(stream, pkt->header.ssrc);
     uint64_t now = rtc_time_ms();
+    stream->last_activity_ms = now;
     uint16_t seq = pkt->header.seq;
     if (stream->seq_initialized) {
         int16_t gap = (int16_t)(seq - stream->highest_seq);
@@ -666,7 +702,18 @@ int rtc_rtp_recv_stream_request_keyframe(rtc_rtp_recv_stream_t *stream) {
 }
 
 void rtc_rtp_recv_stream_tick(rtc_rtp_recv_stream_t *stream, uint64_t now_ms) {
-    if (!stream || !stream->active)
+    if (!stream)
+        return;
+    if (stream->ssrc && stream->last_activity_ms && now_ms >= stream->last_activity_ms &&
+        now_ms - stream->last_activity_ms >= rtc_rtcp_source_timeout_ms(&stream->rtcp_stats)) {
+        uint32_t expired = stream->ssrc;
+        if (stream->transport)
+            rtc_transport_unbind_rtp(stream->transport, expired);
+        rtc_rtp_recv_stream_set_ssrc(stream, 0);
+        RTC_LOG_DBG("RTP receive source 0x%08x expired", expired);
+        return;
+    }
+    if (!stream->active)
         return;
     uint16_t lost[64];
     int count = 0;
@@ -697,8 +744,10 @@ void rtc_rtp_recv_stream_tick(rtc_rtp_recv_stream_t *stream, uint64_t now_ms) {
 }
 
 void rtc_rtp_recv_stream_on_sr(rtc_rtp_recv_stream_t *stream, const rtc_rtcp_sr_t *sr) {
-    if (stream)
+    if (stream) {
+        rtc_rtp_recv_stream_on_rtcp_activity(stream, rtc_time_ms());
         rtc_rtcp_stats_on_sr_recv(&stream->rtcp_stats, sr);
+    }
 }
 
 void rtc_rtp_recv_stream_emit_rr(rtc_rtp_recv_stream_t *stream, rtc_transport_t *transport) {
