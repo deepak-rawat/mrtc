@@ -228,15 +228,24 @@ requires numeric UDP inputs; browser connections use the active runtime path.
 - ChannelData framing for peer communication
 - `rtc_transport_set_turn_server()` attaches the runtime relay path;
   `rtc_transport_get_relay_candidate()` exposes its allocated candidate
-- Each allocation has an isolated worker-owned UDP socket, avoiding allocation
+- Each allocation has an isolated worker-owned socket, avoiding allocation
   collisions between logical transports sharing the normal UDP listener
 - Allocation, permission, and channel refresh and cleanup are timer-driven
 - UDP/TCP/TLS client-to-server transport with UDP relay allocations.
 - TCP/TLS uses bounded framing/partial writes on the existing worker. TLS
   verifies server identity and trust; no insecure certificate bypass exists.
 - Hostname resolution occurs on the configuring caller, never the media
-  worker. One resolved address is selected; address/server failover and RFC 8489
-  authentication v2 remain separate work.
+  worker. Up to four unique results are retained, placing an alternate address
+  family second. Core callers may supply a copied numeric list instead.
+- Before allocation, alternatives are tried sequentially with a five-second
+  per-address budget and 100 ms worker checks. The host, credentials and CA path
+  are owned across retries; TLS verifies the original identity on every attempt.
+  Failed I/O is removed before replacement, without increasing registered I/O
+  slots per logical transport. Pending retry timers are cancelled on close.
+- Exhaustion retains a failed relay runtime rather than enabling a direct path.
+  Stats expose attempted-address count and terminal failure. The first
+  allocation pins the address; multiple-server selection, post-allocation
+  migration and RFC 8489 authentication v2 remain separate work.
 
 ### DTLS (`rtc_dtls.h/c`)
 
@@ -535,8 +544,9 @@ Client-facade tests (`test_peer`, `test_data_channel`,
 
 ## Known Limitations
 
-- TURN uses long-term credentials over UDP/TCP/verified TLS; server/address
-  failover and authentication v2 are not implemented.
+- TURN supports bounded pre-allocation address failover for one identity over
+  UDP/TCP/verified TLS. Multiple-server failover, live allocation migration and
+  authentication v2 are not implemented.
 - Reports and feedback are compound SR/RR + SDES, with feedback capability
   intersection in SDP. Reports use bounded live membership, sender expiry and
   timer/reverse reconsideration for the supported unicast profile.

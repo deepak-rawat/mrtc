@@ -42,19 +42,26 @@ trap cleanup EXIT HUP INT TERM
 
 set -- --no-tcp --no-tls
 export MRTC_TEST_TURN_TRANSPORT=udp
-unset MRTC_TEST_TURN_CA MRTC_TEST_TURN_EXPECT_REJECT
+unset MRTC_TEST_TURN_CA MRTC_TEST_TURN_EXPECT_REJECT MRTC_TEST_TURN_FAILOVER MRTC_TEST_TURN_EXHAUST MRTC_TEST_TURN_STALL MRTC_TEST_TURN_DNS MRTC_TEST_TURN_FOUR
+case "$mode" in
+    *-failover*) export MRTC_TEST_TURN_FAILOVER=1 ;;
+    udp-exhausted) export MRTC_TEST_TURN_FAILOVER=1 MRTC_TEST_TURN_EXHAUST=1 ;;
+esac
+case "$mode" in
+    tcp-stall-failover|tls-stall-failover) export MRTC_TEST_TURN_STALL=1 ;;
+    tls-dns) export MRTC_TEST_TURN_DNS=1 ;;
+    udp-four-failover) export MRTC_TEST_TURN_FOUR=1 ;;
+esac
 client_port=$port
 case "$mode" in
-    udp) ;;
-    tcp)
+    udp|udp-failover|udp-four-failover|udp-exhausted) ;;
+    tcp|tcp-failover|tcp-stall-failover)
         set -- --no-udp --no-tls
         export MRTC_TEST_TURN_TRANSPORT=tcp
         ;;
-    tls|tls-untrusted|tls-wrong-name)
+    tls|tls-dns|tls-untrusted|tls-wrong-name|tls-failover|tls-stall-failover|tls-failover-untrusted|tls-failover-wrong-name)
         san="IP:127.0.0.1,DNS:localhost"
-        if [ "$mode" = tls-wrong-name ]; then
-            san="DNS:wrong.example"
-        fi
+        case "$mode" in *wrong-name) san="DNS:wrong.example" ;; esac
         openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
             -subj /CN=localhost -addext "subjectAltName=$san" \
             -keyout "$private_key" -out "$certificate" > "$log" 2>&1
@@ -62,12 +69,8 @@ case "$mode" in
         set -- --no-udp --tls-listening-port="$client_port" \
             --cert="$certificate" --pkey="$private_key"
         export MRTC_TEST_TURN_TRANSPORT=tls
-        if [ "$mode" != tls-untrusted ]; then
-            export MRTC_TEST_TURN_CA="$certificate"
-        fi
-        if [ "$mode" != tls ]; then
-            export MRTC_TEST_TURN_EXPECT_REJECT=1
-        fi
+        case "$mode" in *untrusted) ;; *) export MRTC_TEST_TURN_CA="$certificate" ;; esac
+        case "$mode" in tls|tls-dns|tls-failover|tls-stall-failover) ;; *) export MRTC_TEST_TURN_EXPECT_REJECT=1 ;; esac
         ;;
     *) echo "Unsupported TURN fixture mode: $mode"; exit 1 ;;
 esac

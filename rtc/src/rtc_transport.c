@@ -28,6 +28,9 @@
 #include <limits.h>
 #include <openssl/rand.h>
 
+#define RTC_TURN_ADDRESS_TIMEOUT_MS 5000
+#define RTC_TURN_RETRY_POLL_MS      100
+
 struct rtc_transport {
     rtc_worker_t *worker;
     rtc_listener_t *listener;
@@ -77,6 +80,15 @@ struct rtc_transport {
     bool ice_restarting;
     rtc_mutex_t send_mutex;
     rtc_turn_runtime_t *turn;
+    rtc_turn_config_t turn_config;
+    char turn_host[TURN_HOST_MAX], turn_username[TURN_USERNAME_MAX];
+    char turn_credential[TURN_CREDENTIAL_MAX];
+    char *turn_ca_file;
+    rtc_addr_t turn_addresses[RTC_TURN_MAX_ADDRESSES];
+    unsigned turn_address_count, turn_address_attempts;
+    bool turn_retrying;
+    uint64_t turn_address_deadline;
+    rtc_worker_timer_t turn_retry_timer;
     bool receiving_turn;
     _Atomic bool srtp_ready;
     rtc_worker_timer_t dtls_timer;
@@ -313,6 +325,7 @@ static void transport_cancel_dtls_timer(rtc_transport_t *transport) {
     if (transport->worker && transport->dtls_timer != RTC_WORKER_TIMER_INVALID) {
         rtc_worker_cancel_timer(transport->worker, transport->dtls_timer);
         transport->dtls_timer = RTC_WORKER_TIMER_INVALID;
+        transport->turn_retry_timer = RTC_WORKER_TIMER_INVALID;
     }
 }
 
@@ -840,7 +853,8 @@ static int tx_add_candidate_impl(rtc_transport_t *transport, void *arg) {
     if (!transport->remote_candidate_valid)
         transport->remote_candidate = address;
     transport->remote_candidate_valid = true;
-    if (transport->turn && transport->remote_candidate_count == 1)
+    if (transport->turn && transport->remote_candidate_count == 1 &&
+        !(transport->turn_retrying && rtc_turn_runtime_failed(transport->turn)))
         return rtc_turn_runtime_set_peer(transport->turn, &transport->remote_candidate);
     return RTC_OK;
 }
@@ -1022,18 +1036,125 @@ static void transport_on_turn_packet(rtc_pkt_type_t type, const uint8_t *data, s
     transport->receiving_turn = false;
 }
 
+typedef struct {
+    rtc_turn_config_t config;
+    rtc_addr_t addresses[RTC_TURN_MAX_ADDRESSES];
+    unsigned count;
+} turn_setup_t;
+
+static bool transport_same_turn_address(const rtc_addr_t *a, const rtc_addr_t *b) {
+    if (a->addr.ss_family != b->addr.ss_family)
+        return false;
+    if (a->addr.ss_family == AF_INET) {
+        struct sockaddr_in left, right;
+        memcpy(&left, &a->addr, sizeof(left));
+        memcpy(&right, &b->addr, sizeof(right));
+        return left.sin_port == right.sin_port && left.sin_addr.s_addr == right.sin_addr.s_addr;
+    }
+    struct sockaddr_in6 left, right;
+    memcpy(&left, &a->addr, sizeof(left));
+    memcpy(&right, &b->addr, sizeof(right));
+    return left.sin6_port == right.sin6_port && left.sin6_scope_id == right.sin6_scope_id &&
+           memcmp(&left.sin6_addr, &right.sin6_addr, sizeof(left.sin6_addr)) == 0;
+}
+
+static void transport_clear_turn_config(rtc_transport_t *transport) {
+    OPENSSL_cleanse(transport->turn_credential, sizeof(transport->turn_credential));
+    free(transport->turn_ca_file);
+    transport->turn_ca_file = NULL;
+    memset(&transport->turn_config, 0, sizeof(transport->turn_config));
+    transport->turn_retrying = false;
+}
+
+static int transport_next_turn_address(rtc_transport_t *transport) {
+    while (transport->turn_address_attempts < transport->turn_address_count) {
+        unsigned index = transport->turn_address_attempts++;
+        transport->turn_config.resolved_address = &transport->turn_addresses[index];
+        rtc_turn_runtime_t *next = rtc_turn_runtime_create(
+            transport->worker, &transport->turn_config, transport_on_turn_packet, transport);
+        if (!next) {
+            RTC_LOG_WARN("TURN address %u/%u initialization failed", index + 1,
+                         transport->turn_address_count);
+            continue;
+        }
+        /* Keep the failed instance until a replacement exists, so relay-only
+         * sends never fall through to the direct listener during retries. */
+        rtc_turn_runtime_destroy(transport->turn);
+        transport->turn = next;
+        transport->turn_address_deadline = rtc_time_ms() + RTC_TURN_ADDRESS_TIMEOUT_MS;
+        if (!transport->remote_candidate_valid ||
+            rtc_turn_runtime_set_peer(next, &transport->remote_candidate) == RTC_OK)
+            return RTC_OK;
+        rtc_turn_runtime_abort(next);
+    }
+    RTC_LOG_ERR("TURN address alternatives exhausted");
+    return RTC_ERR_SOCKET;
+}
+
+static void transport_turn_retry_timer(void *user) {
+    rtc_transport_t *transport = user;
+    transport->turn_retry_timer = RTC_WORKER_TIMER_INVALID;
+    if (atomic_load(&transport->closed))
+        return;
+    if (rtc_turn_runtime_allocated(transport->turn)) {
+        transport_clear_turn_config(transport);
+        return;
+    }
+    if (rtc_turn_runtime_failed(transport->turn) ||
+        rtc_time_ms() >= transport->turn_address_deadline) {
+        rtc_mutex_lock(&transport->send_mutex);
+        rtc_turn_runtime_abort(transport->turn);
+        int rc = transport_next_turn_address(transport);
+        rtc_mutex_unlock(&transport->send_mutex);
+        if (rc != RTC_OK) {
+            transport_clear_turn_config(transport);
+            return;
+        }
+    }
+    transport->turn_retry_timer =
+        rtc_worker_add_timer(transport->worker, rtc_time_ms() + RTC_TURN_RETRY_POLL_MS,
+                             transport_turn_retry_timer, transport);
+    if (transport->turn_retry_timer == RTC_WORKER_TIMER_INVALID) {
+        RTC_LOG_ERR("TURN retry timer allocation failed");
+        rtc_turn_runtime_abort(transport->turn);
+        transport_clear_turn_config(transport);
+    }
+}
+
 static int tx_set_turn_impl(rtc_transport_t *transport, void *arg) {
-    const rtc_turn_config_t *cfg = arg;
+    const turn_setup_t *setup = arg;
+    const rtc_turn_config_t *cfg = &setup->config;
     if (transport->turn || transport->ice_txn_registered ||
         atomic_load(&transport->selected_remote_valid) || atomic_load(&transport->closed))
         return RTC_ERR_INVALID;
-    transport->turn =
-        rtc_turn_runtime_create(transport->worker, cfg, transport_on_turn_packet, transport);
-    if (!transport->turn)
-        return RTC_ERR_GENERIC;
-    if (transport->remote_candidate_valid)
-        return rtc_turn_runtime_set_peer(transport->turn, &transport->remote_candidate);
-    return RTC_OK;
+    if (cfg->ca_file) {
+        transport->turn_ca_file = malloc(strlen(cfg->ca_file) + 1);
+        if (!transport->turn_ca_file)
+            return RTC_ERR_NOMEM;
+        strcpy(transport->turn_ca_file, cfg->ca_file);
+    }
+    strcpy(transport->turn_host, cfg->server_host);
+    strcpy(transport->turn_username, cfg->username);
+    strcpy(transport->turn_credential, cfg->credential);
+    transport->turn_config = *cfg;
+    transport->turn_config.server_host = transport->turn_host;
+    transport->turn_config.username = transport->turn_username;
+    transport->turn_config.credential = transport->turn_credential;
+    transport->turn_config.ca_file = transport->turn_ca_file;
+    memcpy(transport->turn_addresses, setup->addresses, sizeof(setup->addresses));
+    transport->turn_address_count = setup->count;
+    transport->turn_address_attempts = 0;
+    transport->turn_retrying = setup->count > 1;
+    rtc_mutex_lock(&transport->send_mutex);
+    int rc = transport_next_turn_address(transport);
+    rtc_mutex_unlock(&transport->send_mutex);
+    if (rc != RTC_OK || !transport->turn_retrying) {
+        transport_clear_turn_config(transport);
+        return rc;
+    }
+    transport_turn_retry_timer(transport);
+    return rtc_turn_runtime_failed(transport->turn) && !transport->turn_retrying ? RTC_ERR_GENERIC
+                                                                                 : RTC_OK;
 }
 
 int rtc_transport_set_turn_server(rtc_transport_t *transport, const char *host, uint16_t port,
@@ -1049,11 +1170,31 @@ int rtc_transport_set_turn_server(rtc_transport_t *transport, const char *host, 
 int rtc_transport_set_turn_server_ex(rtc_transport_t *transport, const rtc_turn_server_t *server) {
     if (!transport || !server || !server->host || !server->host[0] || !server->username ||
         !server->credential || (unsigned)server->protocol > RTC_TURN_TLS ||
-        (server->ca_file && server->protocol != RTC_TURN_TLS))
+        (server->ca_file && server->protocol != RTC_TURN_TLS) ||
+        strlen(server->host) >= TURN_HOST_MAX || strlen(server->username) >= TURN_USERNAME_MAX ||
+        strlen(server->credential) >= TURN_CREDENTIAL_MAX ||
+        server->address_count > RTC_TURN_MAX_ADDRESSES ||
+        (!!server->addresses != !!server->address_count))
         return RTC_ERR_INVALID;
     uint16_t port = server->port ? server->port : server->protocol == RTC_TURN_TLS ? 5349 : 3478;
-    rtc_addr_t resolved;
-    if (rtc_addr_from_string(&resolved, server->host, port) != RTC_OK) {
+    turn_setup_t setup = {0};
+    if (server->addresses) {
+        for (size_t i = 0; i < server->address_count; i++) {
+            const rtc_addr_t *address = &server->addresses[i];
+            size_t expected = address->addr.ss_family == AF_INET    ? sizeof(struct sockaddr_in)
+                              : address->addr.ss_family == AF_INET6 ? sizeof(struct sockaddr_in6)
+                                                                    : 0;
+            char ip[64];
+            uint16_t address_port;
+            if (!expected || address->len != expected ||
+                rtc_addr_to_string(address, ip, sizeof(ip), &address_port) != RTC_OK ||
+                address_port != port)
+                return RTC_ERR_INVALID;
+            setup.addresses[setup.count++] = *address;
+        }
+    } else if (rtc_addr_from_string(&setup.addresses[0], server->host, port) == RTC_OK) {
+        setup.count = 1;
+    } else {
         if (rtc_worker_on_loop_thread(transport->worker)) {
             RTC_LOG_ERR("TURN hostname resolution must occur outside the media worker");
             return RTC_ERR_INVALID;
@@ -1067,23 +1208,47 @@ int rtc_transport_set_turn_server_ex(rtc_transport_t *transport, const rtc_turn_
             RTC_LOG_ERR("TURN server DNS resolution failed");
             return RTC_ERR_SOCKET;
         }
-        if (addresses->ai_addrlen > sizeof(resolved.addr)) {
-            freeaddrinfo(addresses);
-            return RTC_ERR_INVALID;
+        for (struct addrinfo *entry = addresses; entry; entry = entry->ai_next) {
+            size_t expected = entry->ai_family == AF_INET    ? sizeof(struct sockaddr_in)
+                              : entry->ai_family == AF_INET6 ? sizeof(struct sockaddr_in6)
+                                                             : 0;
+            if (!expected || entry->ai_addrlen != expected)
+                continue;
+            rtc_addr_t candidate = {0};
+            memcpy(&candidate.addr, entry->ai_addr, expected);
+            candidate.len = (socklen_t)expected;
+            bool duplicate = false, family_present = false;
+            for (unsigned i = 0; i < setup.count; i++) {
+                if (setup.addresses[i].addr.ss_family == candidate.addr.ss_family)
+                    family_present = true;
+                if (transport_same_turn_address(&setup.addresses[i], &candidate))
+                    duplicate = true;
+            }
+            if (duplicate)
+                continue;
+            if (setup.count && !family_present) {
+                unsigned end = setup.count < RTC_TURN_MAX_ADDRESSES ? setup.count++
+                                                                    : RTC_TURN_MAX_ADDRESSES - 1;
+                for (unsigned i = end; i > 1; i--)
+                    setup.addresses[i] = setup.addresses[i - 1];
+                setup.addresses[1] = candidate;
+            } else if (setup.count < RTC_TURN_MAX_ADDRESSES) {
+                setup.addresses[setup.count++] = candidate;
+            }
         }
-        memset(&resolved, 0, sizeof(resolved));
-        memcpy(&resolved.addr, addresses->ai_addr, addresses->ai_addrlen);
-        resolved.len = (socklen_t)addresses->ai_addrlen;
         freeaddrinfo(addresses);
+        if (!setup.count) {
+            RTC_LOG_ERR("TURN DNS returned no supported address");
+            return RTC_ERR_SOCKET;
+        }
     }
-    rtc_turn_config_t cfg = {.server_host = server->host,
-                             .server_port = port,
-                             .username = server->username,
-                             .credential = server->credential,
-                             .protocol = server->protocol,
-                             .ca_file = server->ca_file,
-                             .resolved_address = &resolved};
-    return tx_op_invoke(transport, tx_set_turn_impl, &cfg);
+    setup.config = (rtc_turn_config_t){.server_host = server->host,
+                                       .server_port = port,
+                                       .username = server->username,
+                                       .credential = server->credential,
+                                       .protocol = server->protocol,
+                                       .ca_file = server->ca_file};
+    return tx_op_invoke(transport, tx_set_turn_impl, &setup);
 }
 
 static int tx_get_relay_impl(rtc_transport_t *transport, void *arg) {
@@ -1114,6 +1279,10 @@ static int tx_get_stats_impl(rtc_transport_t *transport, void *arg) {
     rtc_transport_stats_t *out = (rtc_transport_stats_t *)arg;
     memset(out, 0, sizeof(*out));
     out->closed = atomic_load_explicit(&transport->closed, memory_order_acquire);
+    out->turn_address_attempts = transport->turn_address_attempts;
+    out->turn_failed = !out->closed && transport->turn_address_attempts &&
+                       !transport->turn_retrying &&
+                       (!transport->turn || rtc_turn_runtime_failed(transport->turn));
     rtc_mutex_lock(&transport->send_mutex);
     transport_expire_members_locked(transport, rtc_time_ms());
     out->rtcp_members = transport->rtcp_membership.members;
@@ -1166,6 +1335,11 @@ static int tx_close_impl(rtc_transport_t *transport, void *arg) {
     }
     transport_cancel_ice_timer(transport);
     transport_cancel_dtls_timer(transport);
+    if (transport->turn_retry_timer != RTC_WORKER_TIMER_INVALID) {
+        rtc_worker_cancel_timer(transport->worker, transport->turn_retry_timer);
+        transport->turn_retry_timer = RTC_WORKER_TIMER_INVALID;
+    }
+    transport_clear_turn_config(transport);
     rtc_rtp_demux_close(&transport->rtp_demux);
 #ifdef MRTC_ENABLE_TWCC
     if (transport->twcc_fb_timer != RTC_WORKER_TIMER_INVALID) {

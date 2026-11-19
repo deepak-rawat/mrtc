@@ -231,6 +231,11 @@ The client supports one authenticated UDP/TCP `turn:` or TLS `turns:` URL,
 including relay-only gathering and asynchronous candidate/end-of-candidates
 callbacks. TLS uses verified server identity and the default trust store or
 `rtc_config_t.turn_tls_ca_file`. Multiple TURN URLs remain rejected.
+Hostname URLs automatically use up to four resolved addresses before
+allocation, with a five-second budget per alternative. DNS stays on the
+configuring caller. Each retry verifies the same TLS identity and never enables
+a direct path on exhaustion. Once allocated, the relay address is pinned;
+in-call allocation migration is not implemented.
 
 ### Stats Reporting (`rtc_stats.h`, `rtc_peer.c`)
 
@@ -313,6 +318,7 @@ the scaffolding touches runtime internals.
   transport's `rtc_transport_get_stats()` and per-channel byte counters.
 - Established codec/payload-type changes are rejected; live track and
   direction changes are supported.
-- TURN supports one authenticated UDP/TCP/TLS URL, without server/address failover.
+- TURN supports one authenticated UDP/TCP/TLS URL with bounded pre-allocation
+  address retries, not multiple-server or live allocation failover.
 - Multiple peer connections share one default runtime; per-peer worker
   isolation is not a public knob.

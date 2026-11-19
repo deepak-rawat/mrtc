@@ -16,6 +16,9 @@ typedef struct rtc_packet_io rtc_packet_io_t;
 
 #define TURN_MAX_CHANNELS    8
 #define TURN_MAX_PERMISSIONS 16
+#define TURN_HOST_MAX        256
+#define TURN_USERNAME_MAX    128
+#define TURN_CREDENTIAL_MAX  256
 
 typedef struct {
     const char *server_host;

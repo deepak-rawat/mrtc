@@ -17,7 +17,7 @@ struct rtc_turn_runtime {
     rtc_worker_t *worker;
     rtc_packet_io_t io;
     rtc_turn_client_t client;
-    char host[256], username[128], credential[256];
+    char host[TURN_HOST_MAX], username[TURN_USERNAME_MAX], credential[TURN_CREDENTIAL_MAX];
     rtc_packet_io_recv_fn receive;
     void *user;
     rtc_worker_timer_t timer;
@@ -59,6 +59,8 @@ static void stream_service(rtc_turn_runtime_t *turn, bool readiness);
 static void turn_release(rtc_turn_runtime_t *turn) {
     if (atomic_fetch_sub(&turn->refs, 1) == 1) {
         rtc_mutex_destroy(&turn->mutex);
+        OPENSSL_cleanse(turn->credential, sizeof(turn->credential));
+        OPENSSL_cleanse(turn->client.lt_key, sizeof(turn->client.lt_key));
         free(turn);
     }
 }
@@ -70,8 +72,9 @@ static void turn_fail(rtc_turn_runtime_t *turn, const char *reason) {
     rtc_mutex_unlock(&turn->mutex);
     if (first)
         RTC_LOG_ERR("TURN: %s", reason);
-    if (turn->stream && turn->io_registered) {
-        rtc_worker_remove_io(turn->worker, turn->socket);
+    if (turn->io_registered) {
+        rtc_worker_remove_io(turn->worker,
+                             turn->stream ? turn->socket : rtc_packet_io_get_socket(&turn->io));
         turn->io_registered = false;
     }
 }
@@ -629,6 +632,19 @@ rtc_turn_runtime_t *rtc_turn_runtime_create(rtc_worker_t *worker, const rtc_turn
     return turn;
 }
 
+bool rtc_turn_runtime_allocated(const rtc_turn_runtime_t *turn) {
+    return turn && turn->client.allocated;
+}
+
+bool rtc_turn_runtime_failed(const rtc_turn_runtime_t *turn) {
+    return turn && atomic_load(&turn->failed);
+}
+
+void rtc_turn_runtime_abort(rtc_turn_runtime_t *turn) {
+    if (turn)
+        turn_fail(turn, "allocation address deadline exceeded");
+}
+
 int rtc_turn_runtime_candidate(rtc_turn_runtime_t *turn, rtc_addr_t *relay) {
     if (!turn || !relay || !turn->client.allocated || turn->failed ||
         rtc_time_ms() >= atomic_load(&turn->allocation_expires_ms))
@@ -692,7 +708,7 @@ void rtc_turn_runtime_destroy(rtc_turn_runtime_t *turn) {
     if (turn->stream_timer != RTC_WORKER_TIMER_INVALID)
         rtc_worker_cancel_timer(turn->worker, turn->stream_timer);
     atomic_store(&turn->closed, true);
-    if (!turn->stream && turn->client.allocated &&
+    if (!turn->stream && turn->client.has_credentials &&
         turn_build(turn, STUN_METHOD_REFRESH, 0) == RTC_OK)
         (void)rtc_packet_io_send(&turn->io, turn->request.buf, turn->request.buf_len,
                                  &turn->client.server_addr);

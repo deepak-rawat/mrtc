@@ -267,7 +267,7 @@ TEST(peer_turn_relay_sctp_refresh_and_restart) {
     char url[128];
     const char *transport = getenv("MRTC_TEST_TURN_TRANSPORT");
     bool tls = transport && !strcmp(transport, "tls");
-    snprintf(url, sizeof(url), "%s:127.0.0.1:%s?transport=%s", tls ? "turns" : "turn", port,
+    snprintf(url, sizeof(url), "%s:localhost:%s?transport=%s", tls ? "turns" : "turn", port,
              tls || (transport && !strcmp(transport, "tcp")) ? "tcp" : "udp");
     rtc_config_t ac = {.ice_server_count = 1};
     ac.turn_tls_ca_file = getenv("MRTC_TEST_TURN_CA");

@@ -98,6 +98,8 @@ typedef struct {
     uint32_t target_bitrate_bps; /* configured/estimated target, not measured capacity */
     unsigned rtcp_members;
     unsigned rtcp_senders;
+    unsigned turn_address_attempts;
+    bool turn_failed; /* terminal failure, not a pending address retry */
 } rtc_transport_stats_t;
 
 rtc_transport_t *rtc_transport_create(rtc_worker_t *worker, const rtc_transport_config_t *cfg);
@@ -117,10 +119,12 @@ int rtc_transport_set_remote_dtls_parameters(rtc_transport_t *transport,
 int rtc_transport_set_ice_controlling(rtc_transport_t *transport, bool controlling);
 /* Configure a UDP TURN allocation before connectivity starts. Relay-only:
  * all checks, DTLS and media use this allocation, never the listener socket.
- * Allocation is asynchronous; poll get_relay_candidate until RTC_OK. */
+ * Allocation is asynchronous; poll get_relay_candidate until RTC_OK, or
+ * inspect get_stats().turn_failed for terminal failure. */
 int rtc_transport_set_turn_server(rtc_transport_t *transport, const char *host, uint16_t port,
                                   const char *username, const char *credential);
 typedef enum { RTC_TURN_UDP, RTC_TURN_TCP, RTC_TURN_TLS } rtc_turn_protocol_t;
+#define RTC_TURN_MAX_ADDRESSES 4
 typedef struct {
     const char *host;
     uint16_t port; /* zero: 3478, or 5349 for TLS */
@@ -128,9 +132,16 @@ typedef struct {
     const char *credential;
     rtc_turn_protocol_t protocol;
     const char *ca_file; /* NULL: OpenSSL's default trust store; TLS only */
+    /* Optional caller-resolved addresses, copied by set_turn_server_ex.
+     * Ports must match port above. TLS still verifies host, never an alias. */
+    const rtc_addr_t *addresses;
+    size_t address_count;
 } rtc_turn_server_t;
 /* DNS resolution occurs on the calling thread, before worker configuration.
- * Hostname configuration must therefore be called outside worker callbacks.
+ * Without caller-resolved addresses, hostname configuration must be outside
+ * worker callbacks. Up to four addresses are tried before allocation; with
+ * alternatives, each attempt has a five-second allocation budget.
+ * An established allocation is never moved to another address automatically.
  * TCP/TLS is the client-to-relay leg; the allocated relay is still UDP. */
 int rtc_transport_set_turn_server_ex(rtc_transport_t *transport, const rtc_turn_server_t *server);
 int rtc_transport_get_relay_candidate(rtc_transport_t *transport,

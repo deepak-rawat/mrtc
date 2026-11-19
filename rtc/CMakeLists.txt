@@ -119,7 +119,10 @@ if(MRTC_BUILD_TESTS)
             COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_turn_runtime.sh
                 "${MRTC_COTURN_EXECUTABLE}" $<TARGET_FILE:test_network_runtime>)
         set_tests_properties(test_network_turn PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
-        foreach(mode IN ITEMS tcp tls tls-untrusted tls-wrong-name)
+        foreach(mode IN ITEMS tcp tls tls-untrusted tls-wrong-name
+                udp-failover tcp-failover tls-failover tls-failover-untrusted
+                tls-failover-wrong-name udp-exhausted tcp-stall-failover tls-stall-failover
+                tls-dns udp-four-failover)
             string(REPLACE "-" "_" test_mode "${mode}")
             add_test(NAME test_network_turn_${test_mode}
                 COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_turn_runtime.sh
