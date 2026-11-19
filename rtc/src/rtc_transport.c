@@ -2,6 +2,7 @@
  * Logical endpoint transport skeleton.
  */
 #include "rtc_transport_internal.h"
+#include "rtc_rtp_pacer.h"
 
 #include "rtc_listener_internal.h"
 #include "rtc_dtls.h"
@@ -91,6 +92,11 @@ struct rtc_transport {
     bool consent_expired;
     bool ice_restarting;
     rtc_mutex_t send_mutex;
+    bool enable_rtp_pacing;
+    rtc_rtp_pacer_t pacer;
+    rtc_worker_timer_t pacer_timer;
+    uint64_t pacer_last_log_ms;
+    uint64_t rtp_retransmissions_sent, rtp_retransmissions_rejected;
     rtc_turn_runtime_t *turn;
     transport_turn_attempt_t turn_attempts[RTC_TURN_MAX_ADDRESSES];
     unsigned turn_address_count, turn_address_attempts;
@@ -126,6 +132,7 @@ void rtc_transport_retain(rtc_transport_t *transport) {
 
 void rtc_transport_release(rtc_transport_t *transport) {
     if (transport && atomic_fetch_sub_explicit(&transport->refs, 1, memory_order_acq_rel) == 1) {
+        rtc_rtp_pacer_close(&transport->pacer);
         rtc_mutex_destroy(&transport->send_mutex);
         free(transport->app_buf);
         free(transport);
@@ -715,6 +722,9 @@ rtc_transport_t *rtc_transport_create(rtc_worker_t *worker, const rtc_transport_
     transport->enable_sctp = cfg->enable_sctp;
     transport->enable_twcc = cfg->enable_twcc;
     transport->initial_outgoing_bitrate_bps = cfg->initial_outgoing_bitrate_bps;
+    transport->enable_rtp_pacing = cfg->enable_rtp_pacing;
+    transport->pacer.bitrate_bps = cfg->initial_outgoing_bitrate_bps;
+    transport->pacer_timer = RTC_WORKER_TIMER_INVALID;
     transport->controlling = cfg->ice_mode == RTC_ICE_MODE_FULL;
     transport->consent_timeout_ms = cfg->consent_timeout_ms ? cfg->consent_timeout_ms : 30000;
     if (transport->consent_timeout_ms < 30)
@@ -1439,6 +1449,14 @@ static int tx_get_stats_impl(rtc_transport_t *transport, void *arg) {
     transport_expire_members_locked(transport, rtc_time_ms());
     out->rtcp_members = transport->rtcp_membership.members;
     out->rtcp_senders = transport->rtcp_membership.senders;
+    out->rtp_packets_sent = transport->pacer.packets_sent;
+    out->rtp_bytes_sent = transport->pacer.bytes_sent;
+    out->rtp_packets_queued = transport->pacer.packets;
+    out->rtp_bytes_queued = transport->pacer.bytes;
+    out->rtp_packets_dropped = transport->pacer.packets_dropped;
+    out->rtp_frames_dropped = transport->pacer.frames_dropped;
+    out->rtp_retransmissions_sent = transport->rtp_retransmissions_sent;
+    out->rtp_retransmissions_rejected = transport->rtp_retransmissions_rejected;
     rtc_mutex_unlock(&transport->send_mutex);
     out->ice_mode = transport->ice_mode;
     out->selected_tuple_valid =
@@ -1508,6 +1526,11 @@ static int tx_close_impl(rtc_transport_t *transport, void *arg) {
     }
 #endif
     rtc_mutex_lock(&transport->send_mutex);
+    if (transport->pacer_timer != RTC_WORKER_TIMER_INVALID) {
+        rtc_worker_cancel_timer(transport->worker, transport->pacer_timer);
+        transport->pacer_timer = RTC_WORKER_TIMER_INVALID;
+    }
+    rtc_rtp_pacer_clear(&transport->pacer);
     if (transport->turn) {
         rtc_turn_runtime_destroy(transport->turn);
         transport->turn = NULL;
@@ -1813,6 +1836,120 @@ static int transport_send_raw_locked(rtc_transport_t *transport, const uint8_t *
     return transport_send_to(transport, data, len, &transport->selected_remote);
 }
 
+static int transport_pacer_write(const uint8_t *wire, size_t len, void *user) {
+    rtc_transport_t *transport = user;
+    int rc = transport_send_raw_locked(transport, wire, len);
+    if (rc == RTC_OK) {
+#ifdef MRTC_ENABLE_TWCC
+        if (transport->twcc_enabled) {
+            rtc_rtp_packet_t packet;
+            rtc_rtp_ext_t exts[16];
+            size_t count = 16;
+            if (rtc_rtp_parse(&packet, wire, len) == RTC_OK && packet.ext_data &&
+                rtc_rtp_ext_parse_body(packet.ext_data, packet.ext_len, exts, &count) == RTC_OK) {
+                const rtc_rtp_ext_t *ext = rtc_rtp_ext_find(exts, count, transport->twcc_ext_id);
+                if (ext && ext->len == 2) {
+                    uint16_t seq = rtc_rtp_ext_read_transport_cc(ext);
+                    rtc_twcc_sent_pkt_t *entry =
+                        &transport->twcc_sender.ring[seq & (RTC_TWCC_SENDER_RING - 1)];
+                    *entry = (rtc_twcc_sent_pkt_t){.seq = seq,
+                                                   .size = (uint16_t)len,
+                                                   .send_time_us = rtc_time_us(),
+                                                   .used = true};
+                }
+            }
+        }
+#endif
+        uint32_t ssrc;
+        memcpy(&ssrc, wire + 8, sizeof(ssrc));
+        (void)rtc_rtcp_membership_touch(&transport->rtcp_membership, ntohl(ssrc), true, true,
+                                        rtc_time_ms());
+    }
+    return rc;
+}
+
+bool rtc_transport_rtp_pacing_enabled(const rtc_transport_t *transport) {
+    return transport && transport->enable_rtp_pacing;
+}
+
+static void transport_pacer_tick(void *user);
+
+static int transport_pacer_schedule_locked(rtc_transport_t *transport) {
+    if (!rtc_rtp_pacer_pending(&transport->pacer) ||
+        transport->pacer_timer != RTC_WORKER_TIMER_INVALID)
+        return RTC_OK;
+    transport->pacer_timer =
+        rtc_worker_add_timer(transport->worker, rtc_time_ms() + 1, transport_pacer_tick, transport);
+    if (transport->pacer_timer == RTC_WORKER_TIMER_INVALID) {
+        rtc_rtp_pacer_clear(&transport->pacer);
+        RTC_LOG_ERR("RTP pacing timer exhausted; pending frames discarded");
+        return RTC_ERR_NOMEM;
+    }
+    return RTC_OK;
+}
+
+static void transport_pacer_tick(void *user) {
+    rtc_transport_t *transport = user;
+    rtc_mutex_lock(&transport->send_mutex);
+    transport->pacer_timer = RTC_WORKER_TIMER_INVALID;
+    if (!atomic_load(&transport->closed)) {
+        uint64_t before = transport->pacer.frames_dropped;
+        uint64_t now = rtc_time_ms();
+        rtc_rtp_pacer_run(&transport->pacer, now, transport_pacer_write, transport);
+        if (transport->pacer.frames_dropped != before &&
+            now - transport->pacer_last_log_ms >= 1000) {
+            RTC_LOG_WARN("RTP pacing expired/failed frames=%llu queued_bytes=%zu",
+                         (unsigned long long)transport->pacer.frames_dropped,
+                         transport->pacer.bytes);
+            transport->pacer_last_log_ms = now;
+        }
+        (void)transport_pacer_schedule_locked(transport);
+    }
+    rtc_mutex_unlock(&transport->send_mutex);
+}
+
+void rtc_transport_discard_rtp(rtc_transport_t *transport, uint32_t ssrc) {
+    if (!transport)
+        return;
+    rtc_mutex_lock(&transport->send_mutex);
+    rtc_rtp_pacer_discard(&transport->pacer, ssrc);
+    rtc_mutex_unlock(&transport->send_mutex);
+}
+
+void rtc_transport_forget_rtp(rtc_transport_t *transport, uint32_t ssrc) {
+    if (!transport)
+        return;
+    rtc_mutex_lock(&transport->send_mutex);
+    rtc_rtp_pacer_forget(&transport->pacer, ssrc);
+    rtc_mutex_unlock(&transport->send_mutex);
+}
+
+bool rtc_transport_sync_rtp_stats(rtc_transport_t *transport, rtc_rtcp_stats_t *stats,
+                                  uint64_t *dropped) {
+    if (!transport || !stats)
+        return false;
+    rtc_pacer_sent_t sent;
+    if (!rtc_transport_rtp_sent(transport, stats->ssrc, &sent))
+        return false;
+    stats->packets_sent = (uint32_t)sent.packets_sent;
+    stats->octets_sent = (uint32_t)sent.octets_sent;
+    stats->rtp_timestamp = sent.timestamp;
+    stats->send_time_ms = sent.send_time_ms;
+    stats->send_clock_valid = sent.packets_sent != 0;
+    if (dropped)
+        *dropped = sent.packets_dropped - sent.packets_rejected;
+    return true;
+}
+
+bool rtc_transport_rtp_sent(rtc_transport_t *transport, uint32_t ssrc, rtc_pacer_sent_t *out) {
+    if (!transport || !out)
+        return false;
+    rtc_mutex_lock(&transport->send_mutex);
+    bool found = rtc_rtp_pacer_sent(&transport->pacer, ssrc, out);
+    rtc_mutex_unlock(&transport->send_mutex);
+    return found;
+}
+
 int rtc_transport_send_raw(rtc_transport_t *transport, const uint8_t *data, size_t len) {
     if (!transport || !data)
         return RTC_ERR_INVALID;
@@ -1831,7 +1968,23 @@ static int tx_retransmit_rtp_impl(rtc_transport_t *transport, void *arg) {
                          : SRTP_GCM_TAG_LEN;
     if (a->len < RTP_HEADER_SIZE + tag_len || (a->data[0] >> 6) != 2)
         return RTC_ERR_INVALID;
-    return rtc_transport_send_raw(transport, a->data, a->len);
+    rtc_mutex_lock(&transport->send_mutex);
+    int rc = RTC_ERR_TIMEOUT;
+    /* Video repair is allowed only after an initial successful write, never
+     * from a staged, expired, failed, or retired frame. Ciphertext is reused. */
+    uint32_t ssrc;
+    memcpy(&ssrc, a->data + 8, sizeof(ssrc));
+    rtc_pacer_sent_t sent;
+    bool video = rtc_rtp_pacer_sent(&transport->pacer, ntohl(ssrc), &sent);
+    if (!transport->enable_rtp_pacing ||
+        (video && rtc_rtp_pacer_repair(&transport->pacer, a->data, a->len, rtc_time_ms())))
+        rc = transport_send_raw_locked(transport, a->data, a->len);
+    if (rc == RTC_OK)
+        transport->rtp_retransmissions_sent++;
+    else
+        transport->rtp_retransmissions_rejected++;
+    rtc_mutex_unlock(&transport->send_mutex);
+    return rc;
 }
 
 int rtc_transport_retransmit_rtp(rtc_transport_t *transport, const uint8_t *wire, size_t len) {
@@ -1842,6 +1995,11 @@ int rtc_transport_retransmit_rtp(rtc_transport_t *transport, const uint8_t *wire
 }
 
 int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap) {
+    return rtc_transport_send_rtp_media(transport, buf, len, buf_cap, false, 0);
+}
+
+int rtc_transport_send_rtp_media(rtc_transport_t *transport, uint8_t *buf, size_t *len,
+                                 size_t buf_cap, bool video, uint32_t bitrate_bps) {
     if (!transport || !buf || !len || *len < RTP_HEADER_SIZE)
         return RTC_ERR_INVALID;
     if (*len > buf_cap)
@@ -1849,6 +2007,13 @@ int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len
     uint32_t ssrc;
     memcpy(&ssrc, buf + 8, sizeof(ssrc));
     ssrc = ntohl(ssrc);
+    size_t payload_len = 0;
+    if (video && transport->enable_rtp_pacing) {
+        rtc_rtp_packet_t packet;
+        if (rtc_rtp_parse(&packet, buf, *len) != RTC_OK)
+            return RTC_ERR_INVALID;
+        payload_len = packet.payload_len;
+    }
     rtc_mutex_lock(&transport->send_mutex);
     int rc = RTC_ERR_INVALID;
     if (!atomic_load(&transport->closed) && atomic_load(&transport->srtp_ready) &&
@@ -1860,9 +2025,20 @@ int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len
             return RTC_ERR_NOMEM;
         }
         rc = rtc_srtp_protect(&transport->srtp_send, buf, len, buf_cap);
-        if (rc == RTC_OK)
+        if (rc == RTC_OK && video && transport->enable_rtp_pacing) {
+            if (bitrate_bps)
+                transport->pacer.bitrate_bps = bitrate_bps;
+            rc = rtc_rtp_pacer_enqueue(&transport->pacer, buf, *len, payload_len, rtc_time_ms());
+            if (rc == RTC_OK)
+                rc = transport_pacer_schedule_locked(transport);
+            else if (rtc_time_ms() - transport->pacer_last_log_ms >= 1000) {
+                RTC_LOG_WARN("RTP pacing frame rejected: %d", rc);
+                transport->pacer_last_log_ms = rtc_time_ms();
+            }
+        } else if (rc == RTC_OK) {
             rc = transport_send_raw_locked(transport, buf, *len);
-        if (rc == RTC_OK)
+        }
+        if (rc == RTC_OK && !(video && transport->enable_rtp_pacing))
             rc = rtc_rtcp_membership_touch(&transport->rtcp_membership, ssrc, true, true,
                                            rtc_time_ms());
     }
@@ -1887,6 +2063,22 @@ int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *le
             rc = rtc_rtcp_membership_on_rtcp(&updated, buf, *len, true, *len + tag + 4 + 48,
                                              rtc_time_ms());
         }
+        if (rc == RTC_OK) {
+            size_t offset = 0;
+            while (offset + 4 <= *len) {
+                size_t size = (((size_t)buf[offset + 2] << 8) | buf[offset + 3]) * 4 + 4;
+                if (size > *len - offset)
+                    break;
+                unsigned count = buf[offset] & 31;
+                if (buf[offset + 1] == RTCP_PT_BYE && 4 + count * 4 <= size)
+                    for (unsigned i = 0; i < count; i++) {
+                        uint32_t ssrc;
+                        memcpy(&ssrc, buf + offset + 4 + i * 4, sizeof(ssrc));
+                        rtc_rtp_pacer_discard(&transport->pacer, ntohl(ssrc));
+                    }
+                offset += size;
+            }
+        }
         if (rc == RTC_OK)
             rc = rtc_srtp_protect_rtcp(&transport->srtp_send, buf, len, buf_cap);
         if (rc == RTC_OK)
@@ -1901,6 +2093,8 @@ int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *le
 int rtc_transport_send_report(rtc_transport_t *transport, rtc_rtcp_stats_t *stats, bool sender) {
     if (!transport || !stats)
         return RTC_ERR_INVALID;
+    if (sender && rtc_transport_sync_rtp_stats(transport, stats, NULL) && !stats->packets_sent)
+        return RTC_ERR_TIMEOUT;
     rtc_transport_stats_t state;
     int rc = rtc_transport_get_stats(transport, &state);
     if (rc != RTC_OK || state.closed || !state.srtp_ready)
@@ -1943,6 +2137,7 @@ int rtc_transport_send_bye(rtc_transport_t *transport, uint32_t ssrc) {
 }
 
 int rtc_transport_send_bye_named(rtc_transport_t *transport, uint32_t ssrc, const char *cname) {
+    rtc_transport_discard_rtp(transport, ssrc);
     uint8_t wire[8 + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
     size_t length;
     int rc = rtc_rtcp_build_bye(wire, sizeof(wire), &length, ssrc);

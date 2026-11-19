@@ -141,6 +141,7 @@ static int peer_runtime_init(rtc_peer_connection_t *pc, const rtc_config_t *conf
     pc->runtime_transport = rtc_transport_create(worker, &(rtc_transport_config_t){
                                                              .listener = listener,
                                                              .ice_mode = RTC_ICE_MODE_FULL,
+                                                             .enable_rtp_pacing = true,
 #ifdef MRTC_ENABLE_TWCC
                                                              .enable_twcc = true,
 #endif

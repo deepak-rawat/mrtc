@@ -145,6 +145,89 @@ TEST(receiver_reports_drive_bounded_consumer_estimates) {
     rtc_producer_destroy(producer);
     close_env(&env);
 }
+
+static int consumer_remb(test_env_t *env, rtc_consumer_t *consumer, uint32_t bps) {
+    rtc_rtp_parameters_t params;
+    if (rtc_consumer_get_rtp_parameters(consumer, &params) != RTC_OK)
+        return RTC_ERR_INVALID;
+    uint8_t wire[64];
+    size_t len;
+    int rc = rtc_rtcp_build_remb(wire, sizeof(wire), &len, 1, params.ssrc, bps);
+    if (rc != RTC_OK)
+        return rc;
+    feedback_args_t args = {.consumer = consumer, .wire = wire, .len = len};
+    rc = rtc_transport_invoke(env->transport, consume_report_on_worker, &args);
+    return rc == RTC_OK ? args.result : rc;
+}
+
+TEST(subscriber_allocation_pools_connections_and_recovers_without_muting_audio) {
+    test_env_t first, second;
+    ASSERT(make_env(&first));
+    ASSERT(make_env(&second));
+    rtc_producer_options_t options = video_producer_options();
+    rtc_producer_t *publisher = rtc_transport_produce(first.transport, &options);
+    ASSERT(publisher != NULL);
+    rtc_consumer_t *legs[] = {
+        rtc_transport_consume(first.transport, &(rtc_consumer_options_t){.producer = publisher}),
+        rtc_transport_consume(second.transport, &(rtc_consumer_options_t){.producer = publisher}),
+    };
+    ASSERT(legs[0] && legs[1]);
+    uint64_t now = rtc_time_ms();
+    ASSERT_EQ(rtc_consumer_allocate_video(legs, 2, UINT32_MAX, now), RTC_OK);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(legs[0], now), 500000);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(legs[1], now), 500000);
+    ASSERT_EQ(consumer_remb(&first, legs[0], 100000), RTC_OK);
+    ASSERT_EQ(consumer_remb(&second, legs[1], 900000), RTC_OK);
+    ASSERT_EQ(rtc_consumer_allocate_video(legs, 2, UINT32_MAX, rtc_time_ms()), RTC_OK);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(legs[0], rtc_time_ms()), 500000);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(legs[1], rtc_time_ms()), 500000);
+    ASSERT_EQ(consumer_remb(&second, legs[1], 100000), RTC_OK);
+    ASSERT_EQ(rtc_consumer_allocate_video(legs, 2, UINT32_MAX, rtc_time_ms()), RTC_OK);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(legs[0], rtc_time_ms()), 100000);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(legs[1], rtc_time_ms()), 100000);
+    ASSERT_EQ(consumer_remb(&second, legs[1], 300000), RTC_OK);
+    ASSERT_EQ(rtc_consumer_allocate_video(legs, 2, UINT32_MAX, rtc_time_ms()), RTC_OK);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(legs[0], rtc_time_ms()), 200000);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(legs[1], rtc_time_ms()), 200000);
+    rtc_consumer_pause(legs[1]);
+    ASSERT_EQ(rtc_consumer_allocate_video(legs, 2, 600000, rtc_time_ms()), RTC_OK);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(legs[0], rtc_time_ms()), 600000);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(legs[1], rtc_time_ms()), UINT32_MAX);
+    rtc_consumer_resume(legs[1]);
+    ASSERT_EQ(rtc_consumer_allocate_video(legs, 2, 600000, rtc_time_ms()), RTC_OK);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(legs[0], rtc_time_ms()), 300000);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(legs[1], rtc_time_ms()), 300000);
+
+    ASSERT_EQ(rtc_consumer_set_bitrate_allocation(legs[0], 0), RTC_OK);
+    rtc_producer_stats_t stats;
+    ASSERT_EQ(rtc_producer_get_stats(publisher, &stats), RTC_OK);
+    ASSERT_EQ(stats.target_bitrate_bps, 300000);
+    rtc_consumer_stats_t before, after;
+    ASSERT_EQ(rtc_consumer_get_stats(legs[0], &before), RTC_OK);
+    rtc_rtp_packet_t packet;
+    const uint8_t payload[] = {0x10, 0x00};
+    ASSERT_EQ(rtc_rtp_build(&packet, 117, 1, 9000, options.rtp.ssrc, true, payload,
+                            sizeof(payload)),
+              RTC_OK);
+    rtc_consumer_on_producer_rtp(legs[0], &packet);
+    ASSERT_EQ(rtc_consumer_get_stats(legs[0], &after), RTC_OK);
+    ASSERT_EQ(after.packets_dropped, before.packets_dropped + 1);
+    ASSERT_EQ(after.packets_sent, before.packets_sent);
+    ASSERT_EQ(after.allocated_bitrate_bps, 0);
+
+    ASSERT_EQ(rtc_consumer_allocate_video(legs, 2, 600000, after.last_packet_ms + 10000), RTC_OK);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(legs[1], rtc_time_ms()), 600000);
+    ASSERT_EQ(rtc_consumer_allocate_video(legs, 2, 0, rtc_time_ms()), RTC_OK);
+    ASSERT_EQ(rtc_consumer_get_stats(legs[1], &after), RTC_OK);
+    ASSERT_EQ(after.allocated_bitrate_bps, 0);
+    ASSERT_EQ(rtc_consumer_allocate_video(legs, RTC_CONSUMER_MAX_ALLOCATION_LEGS + 1, 0, now),
+              RTC_ERR_INVALID);
+    rtc_consumer_destroy(legs[0]);
+    rtc_consumer_destroy(legs[1]);
+    rtc_producer_destroy(publisher);
+    close_env(&second);
+    close_env(&first);
+}
 #endif
 
 typedef struct {
@@ -802,6 +885,7 @@ int main(void) {
     RUN_TEST(producer_control_activity_lease_expires_without_ending_the_source);
 #ifdef MRTC_ENABLE_RATE_CONTROL
     RUN_TEST(receiver_reports_drive_bounded_consumer_estimates);
+    RUN_TEST(subscriber_allocation_pools_connections_and_recovers_without_muting_audio);
 #endif
     RUN_TEST(consumer_create_pause_resume);
     RUN_TEST(media_rejects_closed_inputs);

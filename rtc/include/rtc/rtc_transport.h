@@ -76,6 +76,7 @@ typedef struct {
     rtc_ice_mode_t ice_mode;
     bool enable_sctp;
     bool enable_twcc;
+    bool enable_rtp_pacing; /* composed video streams only; raw RTP remains immediate */
     uint32_t initial_outgoing_bitrate_bps;
     uint32_t consent_timeout_ms; /* zero: RFC 7675 default of 30 seconds */
 } rtc_transport_config_t;
@@ -90,6 +91,14 @@ typedef struct {
     uint64_t packets_received;
     uint64_t bytes_received;
     uint64_t dtls_packets_received;
+    uint64_t rtp_packets_sent;   /* paced video: successful initial socket writes */
+    uint64_t rtp_bytes_sent;     /* protected wire bytes, excluding retransmissions */
+    uint64_t rtp_packets_queued; /* currently staged or scheduled */
+    uint64_t rtp_bytes_queued;
+    uint64_t rtp_packets_dropped;
+    uint64_t rtp_frames_dropped;
+    uint64_t rtp_retransmissions_sent;
+    uint64_t rtp_retransmissions_rejected;
     bool ice_controlling;
     bool consent_expired;
     bool ice_restarting;

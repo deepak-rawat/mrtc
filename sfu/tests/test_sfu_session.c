@@ -5,6 +5,8 @@
 #include <rtc/rtc_rtcp.h>
 #include "test_harness.h"
 #include <stdatomic.h>
+#include <media/video_codec.h>
+#include "vp8_packetizer.h"
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -27,6 +29,10 @@ typedef struct endpoint {
     _Atomic unsigned estimates;
     _Atomic unsigned feedback;
     _Atomic unsigned acknowledged;
+    video_decoder_t decoder;
+    rtc_vp8_depacketizer_t *depacketizer;
+    _Atomic unsigned decoded_frames;
+    _Atomic unsigned decode_errors;
 } endpoint_t;
 
 typedef struct {
@@ -132,6 +138,20 @@ static void received_video(const uint8_t *data, size_t len, uint16_t seq, uint32
     received_packet(data, len, seq, timestamp, ssrc, marker, user);
     endpoint_t *endpoint = user;
     atomic_fetch_add(&endpoint->video_packets, 1);
+    if (endpoint->depacketizer) {
+        const uint8_t *frame;
+        size_t frame_len;
+        bool keyframe;
+        if (rtc_vp8_depacketize(endpoint->depacketizer, data, len, seq, timestamp, marker, &frame,
+                                &frame_len, &keyframe) == RTC_OK) {
+            video_frame_t decoded;
+            if (video_decode(&endpoint->decoder, frame, (int)frame_len, &decoded) == RTC_OK &&
+                decoded.width == 160 && decoded.height == 120)
+                atomic_fetch_add(&endpoint->decoded_frames, 1);
+            else
+                atomic_fetch_add(&endpoint->decode_errors, 1);
+        }
+    }
 }
 
 static void received_source_change(uint32_t previous, uint32_t current, void *user) {
@@ -548,10 +568,186 @@ TEST(overlapping_epochs_keep_distinct_sctp_associations) {
     rtc_mutex_destroy(&fixture.mutex);
 }
 
+static int send_keyframe(rtc_rtp_sender_t *sender, video_encoder_t *encoder,
+                         const video_frame_t *frame, unsigned *packets) {
+    int rc = video_encoder_request_keyframe(encoder);
+    video_packet_t encoded;
+    if (rc == RTC_OK)
+        rc = video_encode(encoder, frame, &encoded);
+    if (rc != RTC_OK)
+        return rc;
+    rtc_vp8_payload_t payloads[64];
+    int count;
+    rc = rtc_vp8_packetize(encoded.data, (size_t)encoded.len, true, payloads, 64, &count);
+    if (rc != RTC_OK)
+        return rc;
+    if (count < 3)
+        return RTC_ERR_GENERIC;
+    for (int i = 0; i < count; i++) {
+        rc = rtc_rtp_sender_send(sender, payloads[i].data, payloads[i].len,
+                                 i == count - 1 ? 3000 : 0, payloads[i].marker);
+        if (rc != RTC_OK)
+            return rc;
+    }
+    *packets += (unsigned)count;
+    return RTC_OK;
+}
+
+typedef struct {
+    rtc_rtp_sender_t *sender;
+    uint32_t bps;
+} sender_rate_t;
+
+static void set_sender_rate(void *user) {
+    sender_rate_t *rate = user;
+    rtc_rtp_send_stream_set_max_bitrate(rate->sender->stream, rate->bps);
+}
+
+static void constrain_subscription(void *user) {
+    sfu_session_t *session = user;
+    session->last_allocation_ms = rtc_time_ms();
+    (void)rtc_consumer_set_bitrate_allocation(session->consumers[0], 1000);
+}
+
+TEST(paced_real_vp8_both_sfu_legs_bound_queue_age_and_recover) {
+    fixture_t fixture = {0};
+    ASSERT_EQ(rtc_mutex_init(&fixture.mutex), RTC_OK);
+    fixture.sfu = rtc_sfu_create(&(rtc_sfu_config_t){.listen_ip = "127.0.0.1",
+                                                     .subscription_id = subscription_id,
+                                                     .on_event = send_message,
+                                                     .user = &fixture});
+    ASSERT(fixture.sfu != NULL);
+    endpoint_t publisher = {.pc = rtc_peer_connection_create(NULL), .id = "publisher", .epoch = 1};
+    endpoint_t subscriber = {
+        .pc = rtc_peer_connection_create(NULL), .id = "subscriber", .epoch = 1};
+    fixture.endpoints[0] = &publisher;
+    fixture.endpoints[1] = &subscriber;
+    ASSERT(publisher.pc && subscriber.pc);
+    subscriber.depacketizer = calloc(1, sizeof(*subscriber.depacketizer));
+    ASSERT(subscriber.depacketizer != NULL);
+    ASSERT_EQ(rtc_vp8_depacketizer_init(subscriber.depacketizer), RTC_OK);
+    ASSERT_EQ(video_decoder_create(&subscriber.decoder, "VP8"), RTC_OK);
+    rtc_peer_connection_on_track(subscriber.pc, received_track, &subscriber);
+    rtc_codec_t vp8 = {.payload_type = 117, .mime_type = "video/VP8", .clock_rate = 90000};
+    rtc_codec_t opus = {
+        .payload_type = 109, .mime_type = "audio/opus", .clock_rate = 48000, .channels = 2};
+    rtc_rtp_sender_t *video = rtc_peer_connection_add_track(publisher.pc, RTC_KIND_VIDEO, &vp8);
+    rtc_rtp_sender_t *audio = rtc_peer_connection_add_track(publisher.pc, RTC_KIND_AUDIO, &opus);
+    rtc_data_channel_t *channel =
+        rtc_peer_connection_create_data_channel(publisher.pc, "paced", NULL);
+    ASSERT(video && audio && channel);
+    rtc_data_channel_on_message(channel, received_message, &publisher);
+    ASSERT(offer(&fixture, &publisher));
+    uint64_t deadline = rtc_time_ms() + 5000;
+    while (rtc_time_ms() < deadline &&
+           (rtc_peer_connection_connection_state(publisher.pc) != RTC_CONNECTION_CONNECTED ||
+            rtc_peer_connection_connection_state(subscriber.pc) != RTC_CONNECTION_CONNECTED ||
+            rtc_data_channel_state(channel) != RTC_DC_OPEN)) {
+        ASSERT(pump(&fixture));
+        SLEEP_MS(5);
+    }
+    ASSERT_EQ(rtc_peer_connection_connection_state(publisher.pc), RTC_CONNECTION_CONNECTED);
+    ASSERT_EQ(rtc_peer_connection_connection_state(subscriber.pc), RTC_CONNECTION_CONNECTED);
+    ASSERT_EQ(rtc_data_channel_state(channel), RTC_DC_OPEN);
+    sfu_session_t *subscription = find_session(fixture.sfu, "live", subscriber.id, publisher.id, 1);
+    ASSERT(subscription && subscription->consumers[0]);
+    video_encoder_t encoder;
+    video_frame_t frame;
+    ASSERT_EQ(video_encoder_create(&encoder, "VP8", 160, 120, 1000, 30), RTC_OK);
+    ASSERT_EQ(video_frame_alloc(&frame, 160, 120), RTC_OK);
+    uint32_t random = 1;
+    for (int y = 0; y < frame.height; y++)
+        for (int x = 0; x < frame.width; x++) {
+            random = random * 1664525u + 1013904223u;
+            frame.planes[0][y * frame.stride[0] + x] = (uint8_t)(random >> 24);
+        }
+    memset(frame.planes[1], 128, 80 * 60);
+    memset(frame.planes[2], 128, 80 * 60);
+    unsigned packets = 0;
+    ASSERT_EQ(send_keyframe(video, &encoder, &frame, &packets), RTC_OK);
+    ASSERT(wait_count(&fixture, &subscriber.decoded_frames, 1));
+    rtc_transport_stats_t up, down;
+    ASSERT_EQ(rtc_transport_get_stats(publisher.pc->runtime_transport, &up), RTC_OK);
+    ASSERT_EQ(rtc_transport_get_stats(subscription->transport, &down), RTC_OK);
+    ASSERT_EQ(up.rtp_packets_sent, packets);
+    ASSERT_EQ(down.rtp_packets_sent, packets);
+    ASSERT_EQ(up.rtp_packets_dropped, 0);
+    ASSERT_EQ(down.rtp_packets_dropped, 0);
+    ASSERT_EQ(atomic_load(&subscriber.decode_errors), 0);
+
+    sender_rate_t rate = {.sender = video, .bps = 1000};
+    ASSERT_EQ(rtc_transport_invoke(publisher.pc->runtime_transport, set_sender_rate, &rate),
+              RTC_OK);
+    ASSERT_EQ(send_keyframe(video, &encoder, &frame, &packets), RTC_OK);
+    ASSERT_EQ(rtc_transport_get_stats(publisher.pc->runtime_transport, &up), RTC_OK);
+    ASSERT(up.rtp_packets_queued > 0);
+    unsigned before_audio = atomic_load(&subscriber.audio_packets);
+    const uint8_t silence[] = {0xf8, 0xff, 0xfe};
+    ASSERT_EQ(rtc_rtp_sender_send(audio, silence, sizeof(silence), 960, false), RTC_OK);
+    ASSERT_EQ(rtc_data_channel_send_text(channel, "video backlog"), RTC_OK);
+    ASSERT(wait_count(&fixture, &subscriber.audio_packets, before_audio + 1));
+    ASSERT(wait_count(&fixture, &publisher.messages, 1));
+    deadline = rtc_time_ms() + 1000;
+    do {
+        ASSERT(pump(&fixture));
+        ASSERT_EQ(rtc_transport_get_stats(publisher.pc->runtime_transport, &up), RTC_OK);
+        if (!up.rtp_packets_queued)
+            break;
+        SLEEP_MS(5);
+    } while (rtc_time_ms() < deadline);
+    ASSERT_EQ(up.rtp_packets_queued, 0);
+    ASSERT(up.rtp_frames_dropped > 0);
+
+    rate.bps = 500000;
+    ASSERT_EQ(rtc_transport_invoke(publisher.pc->runtime_transport, set_sender_rate, &rate),
+              RTC_OK);
+    ASSERT_EQ(send_keyframe(video, &encoder, &frame, &packets), RTC_OK);
+    ASSERT(wait_count(&fixture, &subscriber.decoded_frames, 2));
+    ASSERT_EQ(rtc_transport_get_stats(subscription->transport, &down), RTC_OK);
+    uint64_t prior_drops = down.rtp_frames_dropped;
+    ASSERT_EQ(send_keyframe(video, &encoder, &frame, &packets), RTC_OK);
+    ASSERT_EQ(rtc_transport_invoke(subscription->transport, constrain_subscription, subscription),
+              RTC_OK);
+    deadline = rtc_time_ms() + 1000;
+    do {
+        ASSERT(pump(&fixture));
+        ASSERT_EQ(rtc_transport_get_stats(subscription->transport, &down), RTC_OK);
+        if (down.rtp_frames_dropped > prior_drops && !down.rtp_packets_queued)
+            break;
+        SLEEP_MS(5);
+    } while (rtc_time_ms() < deadline);
+    ASSERT(down.rtp_frames_dropped > prior_drops);
+    ASSERT_EQ(down.rtp_packets_queued, 0);
+    /* A subsequent frame updates the pacer rate after policy recovery. */
+    ASSERT_EQ(rtc_transport_invoke(publisher.pc->runtime_transport, set_sender_rate, &rate),
+              RTC_OK);
+    deadline = rtc_time_ms() + 2000;
+    while (rtc_time_ms() < deadline && atomic_load(&subscriber.decoded_frames) < 3) {
+        ASSERT_EQ(send_keyframe(video, &encoder, &frame, &packets), RTC_OK);
+        uint64_t next = rtc_time_ms() + 300;
+        while (rtc_time_ms() < next) {
+            ASSERT(pump(&fixture));
+            SLEEP_MS(5);
+        }
+    }
+    ASSERT(atomic_load(&subscriber.decoded_frames) >= 3);
+    ASSERT_EQ(atomic_load(&subscriber.decode_errors), 0);
+    rtc_peer_connection_destroy(publisher.pc);
+    rtc_peer_connection_destroy(subscriber.pc);
+    rtc_sfu_destroy(fixture.sfu);
+    ASSERT(pump(&fixture));
+    video_frame_free(&frame);
+    video_encoder_destroy(&encoder);
+    video_decoder_destroy(&subscriber.decoder);
+    free(subscriber.depacketizer);
+    rtc_mutex_destroy(&fixture.mutex);
+}
+
 int main(void) {
     rtc_client_init();
     RUN_TEST(sfu_live_tracks_restart_sctp_and_publisher_feedback);
     RUN_TEST(overlapping_epochs_keep_distinct_sctp_associations);
+    RUN_TEST(paced_real_vp8_both_sfu_legs_bound_queue_age_and_recover);
     rtc_client_cleanup();
     TEST_SUMMARY();
     return _test_fail_count ? 1 : 0;

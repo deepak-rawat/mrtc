@@ -30,6 +30,7 @@ struct rtc_rtp_send_stream {
     _Atomic uint32_t remote_limit_bps;
     _Atomic uint64_t remote_limit_ms;
     bool send_active;
+    bool video;
 
     rtc_rtp_send_stream_nack_fn on_nack;
     void *on_nack_user;
@@ -103,12 +104,14 @@ rtc_rtp_send_stream_t *rtc_rtp_send_stream_create(const rtc_rtp_send_stream_conf
 void rtc_rtp_send_stream_destroy(rtc_rtp_send_stream_t *stream) {
     if (!stream)
         return;
+    rtc_transport_forget_rtp(stream->transport, stream->rtp_session.ssrc);
 #ifdef MRTC_ENABLE_RATE_CONTROL
     if (stream->rate_ctrl)
         rtc_rate_control_destroy(stream->rate_ctrl);
 #endif
     if (stream->nack_buf)
         rtc_nack_buf_destroy(stream->nack_buf);
+    rtc_transport_release(stream->transport);
     free(stream);
 }
 
@@ -162,6 +165,9 @@ uint32_t rtc_rtp_send_stream_ssrc(const rtc_rtp_send_stream_t *stream) {
 }
 
 const rtc_rtcp_stats_t *rtc_rtp_send_stream_stats(const rtc_rtp_send_stream_t *stream) {
+    if (stream)
+        (void)rtc_transport_sync_rtp_stats(stream->transport,
+                                           &((rtc_rtp_send_stream_t *)stream)->rtcp_stats, NULL);
     return stream ? &stream->rtcp_stats : NULL;
 }
 
@@ -169,6 +175,8 @@ void rtc_rtp_send_stream_attach_transport(rtc_rtp_send_stream_t *stream,
                                           rtc_transport_t *transport) {
     if (!stream || !stream->active)
         return;
+    rtc_transport_retain(transport);
+    rtc_transport_release(stream->transport);
     stream->transport = transport;
 }
 
@@ -187,6 +195,7 @@ void rtc_rtp_send_stream_attach_twcc(rtc_rtp_send_stream_t *stream, uint8_t ext_
 void rtc_rtp_send_stream_arm_video(rtc_rtp_send_stream_t *stream) {
     if (!stream || !stream->active)
         return;
+    stream->video = true;
 #ifdef MRTC_ENABLE_RATE_CONTROL
     rtc_rate_control_config_t rc_cfg = {
         .target_bitrate_kbps = 500,
@@ -205,8 +214,11 @@ void rtc_rtp_send_stream_arm_video(rtc_rtp_send_stream_t *stream) {
 }
 
 void rtc_rtp_send_stream_set_send_active(rtc_rtp_send_stream_t *stream, bool active) {
-    if (stream)
+    if (stream) {
+        if (!active)
+            rtc_transport_discard_rtp(stream->transport, stream->rtp_session.ssrc);
         stream->send_active = active;
+    }
 }
 
 bool rtc_rtp_send_stream_send_active(const rtc_rtp_send_stream_t *stream) {
@@ -255,10 +267,13 @@ static int send_stream_send(rtc_rtp_send_stream_t *stream, const uint8_t *payloa
         return rc;
 
     size_t pkt_len = pkt.buf_len;
-    rc = rtc_transport_send_rtp(stream->transport, pkt.buf, &pkt_len, sizeof(pkt.buf));
+    int target = rtc_rtp_send_stream_get_target_bitrate(stream);
+    rc = rtc_transport_send_rtp_media(stream->transport, pkt.buf, &pkt_len, sizeof(pkt.buf),
+                                      stream->video, target > 0 ? (uint32_t)target * 1000 : 0);
     if (rc != RTC_OK)
         return rc;
-    rtc_rtcp_stats_on_rtp_send(&stream->rtcp_stats, pkt.header.timestamp, len);
+    if (!rtc_transport_sync_rtp_stats(stream->transport, &stream->rtcp_stats, NULL))
+        rtc_rtcp_stats_on_rtp_send(&stream->rtcp_stats, pkt.header.timestamp, len);
 
 #ifdef MRTC_ENABLE_TWCC
     if (tagged) {
@@ -266,7 +281,7 @@ static int send_stream_send(rtc_rtp_send_stream_t *stream, const uint8_t *payloa
         entry->seq = twcc_seq;
         entry->size = (uint16_t)pkt_len;
         entry->send_time_us = rtc_time_us();
-        entry->used = true;
+        entry->used = !(stream->video && rtc_transport_rtp_pacing_enabled(stream->transport));
     }
 #endif
 
@@ -393,9 +408,10 @@ void rtc_rtp_send_stream_handle_nack(rtc_rtp_send_stream_t *stream, const uint16
         uint16_t twcc_seq = 0;
         if (!rtc_nack_buf_retransmit(stream->nack_buf, lost_seqs[i], &pkt, &pkt_len, &twcc_seq))
             continue;
-        int rc = rtc_transport_send_raw(stream->transport, pkt, pkt_len);
+        int rc = rtc_transport_retransmit_rtp(stream->transport, pkt, pkt_len);
         if (rc != RTC_OK) {
-            RTC_LOG_WARN("RTP retransmission failed: %d", rc);
+            if (rc != RTC_ERR_TIMEOUT)
+                RTC_LOG_WARN("RTP retransmission failed: %d", rc);
             continue;
         }
 #ifdef MRTC_ENABLE_TWCC
@@ -455,6 +471,8 @@ void rtc_rtp_send_stream_emit_sr(rtc_rtp_send_stream_t *stream, rtc_transport_t 
 
 void rtc_rtp_send_stream_emit_report(rtc_rtp_send_stream_t *stream, rtc_rtp_recv_stream_t *receiver,
                                      rtc_transport_t *transport) {
+    if (stream)
+        (void)rtc_transport_sync_rtp_stats(transport, &stream->rtcp_stats, NULL);
     if (!stream || !stream->active || !transport || stream->rtcp_stats.packets_sent == 0)
         return;
     if (!receiver) {

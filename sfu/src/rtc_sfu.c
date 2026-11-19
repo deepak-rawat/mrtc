@@ -37,6 +37,7 @@ typedef struct sfu_session {
     bool sctp_connected;
     bool media_ready;
     uint64_t last_stats_ms;
+    uint64_t last_allocation_ms;
 } sfu_session_t;
 
 struct rtc_sfu {
@@ -94,6 +95,29 @@ static void resume_live_consumer(rtc_consumer_t *consumer) {
 
 static void session_tick(void *user) {
     sfu_session_t *session = user;
+    uint64_t now = rtc_time_ms();
+    if (!session->publishing && now - session->last_allocation_ms >= 200) {
+        rtc_consumer_t *legs[RTC_CONSUMER_MAX_ALLOCATION_LEGS];
+        size_t count = 0;
+        bool overflow = false;
+        for (sfu_session_t *s = session->sfu->sessions; s; s = s->next) {
+            if (s->publishing || s->epoch != session->epoch || strcmp(s->room, session->room) ||
+                strcmp(s->owner, session->owner))
+                continue;
+            s->last_allocation_ms = now;
+            for (int i = 0; i < SDP_MAX_MEDIA; i++)
+                if (s->consumers[i]) {
+                    if (count < RTC_CONSUMER_MAX_ALLOCATION_LEGS)
+                        legs[count++] = s->consumers[i];
+                    else
+                        overflow = true;
+                }
+        }
+        if (overflow)
+            RTC_LOG_ERR("SFU subscriber allocation leg limit exceeded");
+        else if (rtc_consumer_allocate_video(legs, count, UINT32_MAX, now) != RTC_OK)
+            RTC_LOG_DBG("SFU subscriber allocation feedback unavailable");
+    }
     rtc_transport_stats_t stats;
     if (rtc_transport_get_stats(session->transport, &stats) == RTC_OK) {
         if (session->sfu->trace && rtc_time_ms() - session->last_stats_ms >= 5000) {
@@ -245,6 +269,7 @@ static sfu_session_t *new_session(rtc_sfu_t *sfu, const rtc_sfu_command_t *comma
         sfu->router, &(rtc_transport_config_t){.listener = s->listener,
                                                .ice_mode = RTC_ICE_MODE_LITE,
                                                .enable_twcc = publishing,
+                                               .enable_rtp_pacing = true,
                                                .initial_outgoing_bitrate_bps = 1500000});
     if (!s->transport) {
         if (s->listener != sfu->listener)

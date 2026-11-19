@@ -45,9 +45,20 @@ struct rtc_consumer {
     rtc_rate_controller_t *rate_controller;
     _Atomic uint32_t estimated_bitrate_bps;
     _Atomic uint64_t bitrate_feedback_ms;
+    _Atomic uint32_t allocated_bitrate_bps;
+    _Atomic uint64_t last_packet_ms;
     rtc_worker_t *worker;
     rtc_worker_timer_t report_timer;
 };
+
+static void consumer_sync_sent(rtc_consumer_t *consumer) {
+    rtc_pacer_sent_t sent;
+    if (rtc_transport_rtp_sent(consumer->transport, consumer->rtp.ssrc, &sent)) {
+        (void)rtc_transport_sync_rtp_stats(consumer->transport, &consumer->rtcp, NULL);
+        atomic_store(&consumer->packets_sent, sent.packets_sent);
+        atomic_store(&consumer->bytes_sent, sent.octets_sent);
+    }
+}
 
 static _Atomic uint32_t g_next_consumer_id = 1;
 
@@ -76,6 +87,8 @@ static void consumer_report_timer(void *user) {
 
 static void consumer_retire_on_worker(void *user) {
     rtc_consumer_t *consumer = user;
+    rtc_mutex_lock(&consumer->media_mutex);
+    consumer_sync_sent(consumer);
     if (consumer->report_timer != RTC_WORKER_TIMER_INVALID) {
         rtc_worker_cancel_timer(consumer->worker, consumer->report_timer);
         consumer->report_timer = RTC_WORKER_TIMER_INVALID;
@@ -84,6 +97,8 @@ static void consumer_retire_on_worker(void *user) {
         rtc_transport_send_bye_named(consumer->transport, consumer->rtp.ssrc,
                                      consumer->rtp.rtcp_cname) != RTC_OK)
         RTC_LOG_DBG("RTCP BYE unavailable on retiring consumer");
+    rtc_transport_discard_rtp(consumer->transport, consumer->rtp.ssrc);
+    rtc_mutex_unlock(&consumer->media_mutex);
 }
 
 rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
@@ -110,6 +125,7 @@ rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
     consumer->report_timer = RTC_WORKER_TIMER_INVALID;
     consumer->producer = opts->producer;
     consumer->kind = producer_stats.kind;
+    atomic_init(&consumer->allocated_bitrate_bps, UINT32_MAX);
     if (rtc_producer_get_rtp_parameters(opts->producer, &consumer->rtp) != RTC_OK) {
         free(consumer);
         return NULL;
@@ -157,6 +173,7 @@ rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
         free(consumer);
         return NULL;
     }
+    rtc_transport_retain(transport);
     return consumer;
 }
 
@@ -175,6 +192,11 @@ void rtc_consumer_pause(rtc_consumer_t *consumer) {
     if (!consumer)
         return;
     atomic_store_explicit(&consumer->paused, true, memory_order_release);
+    rtc_mutex_lock(&consumer->media_mutex);
+    consumer_sync_sent(consumer);
+    rtc_transport_discard_rtp(consumer->transport, consumer->rtp.ssrc);
+    memset(consumer->history, 0, sizeof(consumer->history));
+    rtc_mutex_unlock(&consumer->media_mutex);
     (void)rtc_producer_update_bitrate(consumer->producer);
 }
 
@@ -213,9 +235,11 @@ void rtc_consumer_source_ended(rtc_consumer_t *consumer) {
         return;
     rtc_mutex_lock(&consumer->media_mutex);
     if (!atomic_load(&consumer->closed) && !atomic_exchange(&consumer->source_ended, true)) {
+        consumer_sync_sent(consumer);
         atomic_store(&consumer->paused, true);
         atomic_store(&consumer->bitrate_feedback_ms, 0);
         memset(consumer->history, 0, sizeof(consumer->history));
+        rtc_transport_discard_rtp(consumer->transport, consumer->rtp.ssrc);
         if (atomic_load(&consumer->packets_sent)) {
             int rc = rtc_transport_send_bye_named(consumer->transport, consumer->rtp.ssrc,
                                                   consumer->rtp.rtcp_cname);
@@ -241,6 +265,8 @@ void rtc_consumer_destroy(rtc_consumer_t *consumer) {
     if (!consumer)
         return;
     rtc_consumer_close(consumer);
+    rtc_transport_forget_rtp(consumer->transport, consumer->rtp.ssrc);
+    rtc_transport_release(consumer->transport);
     rtc_rate_control_destroy(consumer->rate_controller);
     rtc_mutex_destroy(&consumer->media_mutex);
     free(consumer);
@@ -261,12 +287,105 @@ int rtc_consumer_get_stats(rtc_consumer_t *consumer, rtc_consumer_stats_t *out) 
     out->packets_retransmitted =
         atomic_load_explicit(&consumer->packets_retransmitted, memory_order_relaxed);
     out->estimated_bitrate_bps = atomic_load(&consumer->estimated_bitrate_bps);
+    out->bitrate_feedback_ms = atomic_load(&consumer->bitrate_feedback_ms);
+    out->last_packet_ms = atomic_load(&consumer->last_packet_ms);
+    out->allocated_bitrate_bps = atomic_load(&consumer->allocated_bitrate_bps);
+    rtc_pacer_sent_t snapshot;
+    if (rtc_transport_rtp_sent(consumer->transport, consumer->rtp.ssrc, &snapshot)) {
+        out->packets_sent = snapshot.packets_sent;
+        out->bytes_sent = snapshot.octets_sent;
+        out->packets_dropped += snapshot.packets_dropped - snapshot.packets_rejected;
+        out->packets_queued = snapshot.packets_queued;
+    }
     return RTC_OK;
 }
 
+int rtc_consumer_set_bitrate_allocation(rtc_consumer_t *consumer, uint32_t bitrate_bps) {
+    if (!consumer || consumer->kind != RTC_MEDIA_KIND_VIDEO || atomic_load(&consumer->closed))
+        return RTC_ERR_INVALID;
+    uint32_t previous = atomic_exchange(&consumer->allocated_bitrate_bps, bitrate_bps);
+    if (previous == bitrate_bps)
+        return RTC_OK;
+    if (bitrate_bps == 0) {
+        rtc_mutex_lock(&consumer->media_mutex);
+        consumer_sync_sent(consumer);
+        rtc_transport_discard_rtp(consumer->transport, consumer->rtp.ssrc);
+        memset(consumer->history, 0, sizeof(consumer->history));
+        rtc_mutex_unlock(&consumer->media_mutex);
+    } else if (previous == 0) {
+        rtc_producer_request_keyframe(consumer->producer);
+    }
+    return rtc_producer_update_bitrate(consumer->producer);
+}
+
+int rtc_consumer_allocate_video(rtc_consumer_t *const *consumers, size_t count, uint32_t budget_bps,
+                                uint64_t now_ms) {
+    if ((!consumers && count) || count > RTC_CONSUMER_MAX_ALLOCATION_LEGS)
+        return RTC_ERR_INVALID;
+    bool active[RTC_CONSUMER_MAX_ALLOCATION_LEGS] = {false};
+    bool changed[RTC_CONSUMER_MAX_ALLOCATION_LEGS] = {false};
+    uint64_t pool = 0;
+    unsigned legs = 0;
+    for (size_t i = 0; i < count; i++) {
+        rtc_consumer_t *c = consumers[i];
+        if (!c || c->kind != RTC_MEDIA_KIND_VIDEO || atomic_load(&c->closed) ||
+            atomic_load(&c->source_ended) || atomic_load(&c->paused))
+            continue;
+        uint64_t last = atomic_load(&c->last_packet_ms);
+        if (last && now_ms >= last && now_ms - last >= 10000)
+            continue;
+        active[i] = true;
+        legs++;
+        uint64_t feedback = atomic_load(&c->bitrate_feedback_ms);
+        uint32_t estimate = feedback && now_ms >= feedback && now_ms - feedback < 10000
+                                ? atomic_load(&c->estimated_bitrate_bps)
+                                : 500000;
+        pool += estimate < 2500000 ? estimate : 2500000;
+    }
+    if (budget_bps != UINT32_MAX)
+        pool = budget_bps;
+    uint32_t share = legs ? (uint32_t)(pool / legs) : 0;
+    if (share > 2500000)
+        share = 2500000;
+    for (size_t i = 0; i < count; i++) {
+        rtc_consumer_t *c = consumers[i];
+        if (!c || c->kind != RTC_MEDIA_KIND_VIDEO || atomic_load(&c->closed))
+            continue;
+        uint32_t allocation = active[i] ? share : UINT32_MAX;
+        uint32_t previous = atomic_exchange(&c->allocated_bitrate_bps, allocation);
+        changed[i] = previous != allocation;
+        if (!changed[i])
+            continue;
+        if (allocation == 0) {
+            rtc_mutex_lock(&c->media_mutex);
+            consumer_sync_sent(c);
+            rtc_transport_discard_rtp(c->transport, c->rtp.ssrc);
+            memset(c->history, 0, sizeof(c->history));
+            rtc_mutex_unlock(&c->media_mutex);
+        } else if (previous == 0 && active[i]) {
+            rtc_producer_request_keyframe(c->producer);
+        }
+    }
+    int result = RTC_OK;
+    for (size_t i = 0; i < count; i++)
+        if (changed[i]) {
+            int rc = rtc_producer_update_bitrate(consumers[i]->producer);
+            if (rc != RTC_OK)
+                result = rc;
+        }
+    return result;
+}
+
 uint32_t rtc_consumer_bitrate_limit(rtc_consumer_t *consumer, uint64_t now_ms) {
-    if (!consumer || atomic_load(&consumer->closed) || atomic_load(&consumer->paused) ||
-        consumer->kind != RTC_MEDIA_KIND_VIDEO || !atomic_load(&consumer->bitrate_feedback_ms) ||
+    if (!consumer || atomic_load(&consumer->closed) || atomic_load(&consumer->source_ended) ||
+        atomic_load(&consumer->paused) || consumer->kind != RTC_MEDIA_KIND_VIDEO)
+        return UINT32_MAX;
+    uint32_t allocation = atomic_load(&consumer->allocated_bitrate_bps);
+    if (allocation == 0)
+        return UINT32_MAX;
+    if (allocation != UINT32_MAX)
+        return allocation;
+    if (!atomic_load(&consumer->bitrate_feedback_ms) ||
         now_ms - atomic_load(&consumer->bitrate_feedback_ms) > 10000)
         return UINT32_MAX;
     return atomic_load(&consumer->estimated_bitrate_bps);
@@ -275,6 +394,12 @@ uint32_t rtc_consumer_bitrate_limit(rtc_consumer_t *consumer, uint64_t now_ms) {
 void rtc_consumer_on_producer_rtp(rtc_consumer_t *consumer, const rtc_rtp_packet_t *pkt) {
     if (!consumer || !pkt)
         return;
+    atomic_store(&consumer->last_packet_ms, rtc_time_ms());
+    if (consumer->kind == RTC_MEDIA_KIND_VIDEO &&
+        atomic_load(&consumer->allocated_bitrate_bps) == 0) {
+        atomic_fetch_add(&consumer->packets_dropped, 1);
+        return;
+    }
     if (atomic_load_explicit(&consumer->closed, memory_order_acquire) ||
         atomic_load_explicit(&consumer->paused, memory_order_acquire) ||
         atomic_load(&consumer->source_ended)) {
@@ -328,7 +453,10 @@ void rtc_consumer_on_producer_rtp(rtc_consumer_t *consumer, const rtc_rtp_packet
     }
 
     size_t wire_len = out_pkt.buf_len;
-    rc = rtc_transport_send_rtp(consumer->transport, out_pkt.buf, &wire_len, sizeof(out_pkt.buf));
+    uint32_t allocation = atomic_load(&consumer->allocated_bitrate_bps);
+    rc = rtc_transport_send_rtp_media(consumer->transport, out_pkt.buf, &wire_len,
+                                      sizeof(out_pkt.buf), consumer->kind == RTC_MEDIA_KIND_VIDEO,
+                                      allocation != UINT32_MAX ? allocation : 500000);
     if (rc != RTC_OK) {
         atomic_fetch_add_explicit(&consumer->packets_dropped, 1, memory_order_relaxed);
         rtc_mutex_unlock(&consumer->media_mutex);
@@ -341,6 +469,7 @@ void rtc_consumer_on_producer_rtp(rtc_consumer_t *consumer, const rtc_rtp_packet
     atomic_fetch_add_explicit(&consumer->bytes_sent, (uint64_t)pkt->payload_len,
                               memory_order_relaxed);
     rtc_rtcp_stats_on_rtp_send(&consumer->rtcp, pkt->header.timestamp, pkt->payload_len);
+    consumer_sync_sent(consumer);
     if (consumer->report_timer == RTC_WORKER_TIMER_INVALID) {
         consumer->report_timer =
             rtc_worker_add_timer(consumer->worker, rtc_time_ms(), consumer_report_timer, consumer);
