@@ -51,11 +51,11 @@ typedef struct {
  * needs its own rollover counter (ROC) and replay window. A single shared ROC
  * across SSRCs would mis-estimate rollover whenever two streams interleave and
  * corrupt the AES-CM IV. */
-#define SRTP_REPLAY_MAX_STREAMS 8
+/* A per-key lifetime bound, not an eviction cache. Reclaim only with new keys. */
+#define SRTP_REPLAY_MAX_STREAMS 64
 typedef struct {
     uint32_t ssrc;
     bool in_use;
-    uint64_t lru_tick;        /* set on each access; smallest is evicted when full */
     uint32_t roc;             /* rollover counter for this SSRC */
     uint16_t last_seq;        /* last sequence number seen for this SSRC */
     bool roc_init;            /* false until the first packet for this SSRC */
@@ -101,8 +101,6 @@ typedef struct {
     rtc_srtp_replay_entry_t rtp_send[SRTP_REPLAY_MAX_STREAMS];
     rtc_srtp_replay_entry_t rtp_replay[SRTP_REPLAY_MAX_STREAMS];
     rtc_srtp_replay_entry_t rtcp_replay[SRTP_REPLAY_MAX_STREAMS];
-    uint64_t send_lru_tick;
-    uint64_t replay_lru_tick;
 
     bool initialized;
 } rtc_srtp_ctx_t;

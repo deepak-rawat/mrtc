@@ -134,32 +134,24 @@ static void srtp_update_roc(rtc_srtp_replay_entry_t *stream, uint32_t roc, uint1
     }
 }
 
-/* Find or allocate the per-SSRC entry, evicting the least recently used when full. */
+/* Keep every SSRC until rekeying: eviction would forget replay/nonce state. */
 static rtc_srtp_replay_entry_t *srtp_entry_for_ssrc(rtc_srtp_replay_entry_t *table, size_t n,
-                                                    uint64_t *lru_tick, uint32_t ssrc) {
+                                                    uint32_t ssrc) {
     rtc_srtp_replay_entry_t *free_slot = NULL;
-    rtc_srtp_replay_entry_t *lru_slot = &table[0];
     for (size_t i = 0; i < n; i++) {
-        if (table[i].in_use && table[i].ssrc == ssrc) {
-            table[i].lru_tick = ++(*lru_tick);
+        if (table[i].in_use && table[i].ssrc == ssrc)
             return &table[i];
-        }
         if (!table[i].in_use && !free_slot)
             free_slot = &table[i];
-        if (table[i].lru_tick < lru_slot->lru_tick)
-            lru_slot = &table[i];
     }
-
-    rtc_srtp_replay_entry_t *slot = free_slot ? free_slot : lru_slot;
-    if (slot == lru_slot && slot->in_use) {
-        RTC_LOG_WARN("SRTP: stream table full, evicting SSRC=0x%08x for SSRC=0x%08x", slot->ssrc,
-                     ssrc);
+    if (!free_slot) {
+        RTC_LOG_ERR("SRTP source capacity exhausted; a new keyed transport is required");
+        return NULL;
     }
-    memset(slot, 0, sizeof(*slot));
-    slot->ssrc = ssrc;
-    slot->in_use = true;
-    slot->lru_tick = ++(*lru_tick);
-    return slot;
+    memset(free_slot, 0, sizeof(*free_slot));
+    free_slot->ssrc = ssrc;
+    free_slot->in_use = true;
+    return free_slot;
 }
 
 /*
@@ -469,8 +461,9 @@ static int srtp_protect_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size
     uint32_t ssrc =
         ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) | ((uint32_t)buf[10] << 8) | buf[11];
 
-    rtc_srtp_replay_entry_t *st =
-        srtp_entry_for_ssrc(ctx->rtp_send, SRTP_REPLAY_MAX_STREAMS, &ctx->send_lru_tick, ssrc);
+    rtc_srtp_replay_entry_t *st = srtp_entry_for_ssrc(ctx->rtp_send, SRTP_REPLAY_MAX_STREAMS, ssrc);
+    if (!st)
+        return RTC_ERR_NOMEM;
     uint32_t roc = srtp_estimate_roc(st, seq);
 
     size_t hdr_len;
@@ -518,7 +511,9 @@ static int srtp_unprotect_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
 
     uint64_t pkt_index = ((uint64_t)roc << 16) | seq;
     rtc_srtp_replay_entry_t *st =
-        srtp_entry_for_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS, &ctx->replay_lru_tick, ssrc);
+        srtp_entry_for_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS, ssrc);
+    if (!st)
+        return RTC_ERR_NOMEM;
     int replay_rc = srtp_replay_check(&st->replay, pkt_index);
     if (replay_rc != RTC_OK)
         return replay_rc;
@@ -591,7 +586,9 @@ static int srtp_unprotect_rtcp_gcm(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *le
 
     /* Replay check after auth (per-SSRC SRTCP index space). */
     rtc_srtp_replay_entry_t *st =
-        srtp_entry_for_ssrc(ctx->rtcp_replay, SRTP_REPLAY_MAX_STREAMS, &ctx->replay_lru_tick, ssrc);
+        srtp_entry_for_ssrc(ctx->rtcp_replay, SRTP_REPLAY_MAX_STREAMS, ssrc);
+    if (!st)
+        return RTC_ERR_NOMEM;
     int replay_rc = srtp_replay_check(&st->replay, (uint64_t)index);
     if (replay_rc != RTC_OK)
         return replay_rc;
@@ -624,8 +621,11 @@ int rtc_srtp_protect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len, size_t buf_
 
     /* Per-SSRC rollover: bundled streams share this context but have
      * independent sequence spaces, so the ROC must be tracked per SSRC. */
-    rtc_srtp_replay_entry_t *st =
-        srtp_entry_for_ssrc(ctx->rtp_send, SRTP_REPLAY_MAX_STREAMS, &ctx->send_lru_tick, ssrc);
+    rtc_srtp_replay_entry_t *st = srtp_entry_for_ssrc(ctx->rtp_send, SRTP_REPLAY_MAX_STREAMS, ssrc);
+    if (!st) {
+        rtc_mutex_unlock(&ctx->lock);
+        return RTC_ERR_NOMEM;
+    }
     uint32_t roc = srtp_estimate_roc(st, seq);
 
     /* Determine header length (handle CSRC and extension) */
@@ -729,7 +729,11 @@ int rtc_srtp_unprotect(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
      * bundled streams share a key but not a sequence space. */
     uint64_t pkt_index = ((uint64_t)roc << 16) | seq;
     rtc_srtp_replay_entry_t *st =
-        srtp_entry_for_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS, &ctx->replay_lru_tick, ssrc);
+        srtp_entry_for_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS, ssrc);
+    if (!st) {
+        rtc_mutex_unlock(&ctx->lock);
+        return RTC_ERR_NOMEM;
+    }
     int replay_rc = srtp_replay_check(&st->replay, pkt_index);
     if (replay_rc != RTC_OK) {
         rtc_mutex_unlock(&ctx->lock);
@@ -918,8 +922,12 @@ int rtc_srtp_unprotect_rtcp(rtc_srtp_ctx_t *ctx, uint8_t *buf, size_t *len) {
      * SRTCP index space is independent for each sender. */
     uint32_t sender_ssrc =
         ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) | ((uint32_t)buf[6] << 8) | buf[7];
-    rtc_srtp_replay_entry_t *st = srtp_entry_for_ssrc(ctx->rtcp_replay, SRTP_REPLAY_MAX_STREAMS,
-                                                      &ctx->replay_lru_tick, sender_ssrc);
+    rtc_srtp_replay_entry_t *st =
+        srtp_entry_for_ssrc(ctx->rtcp_replay, SRTP_REPLAY_MAX_STREAMS, sender_ssrc);
+    if (!st) {
+        rtc_mutex_unlock(&ctx->lock);
+        return RTC_ERR_NOMEM;
+    }
     int replay_rc = srtp_replay_check(&st->replay, (uint64_t)index);
     if (replay_rc != RTC_OK) {
         rtc_mutex_unlock(&ctx->lock);

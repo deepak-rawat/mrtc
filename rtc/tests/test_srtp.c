@@ -603,6 +603,86 @@ TEST(srtcp_replay_rejected) {
     rtc_srtp_close(&recv_ctx);
 }
 
+static int build_capacity_packet(bool control, uint32_t ssrc, uint16_t seq, uint8_t *buf,
+                                 size_t *len) {
+    if (control)
+        return rtc_rtcp_build_bye(buf, SRTP_MAX_PACKET, len, ssrc);
+    rtc_rtp_packet_t packet;
+    const uint8_t audio[] = {0xf8, 0xff, 0xfe};
+    int rc = rtc_rtp_build(&packet, 111, seq, 960, ssrc, true, audio, sizeof(audio));
+    if (rc == RTC_OK) {
+        memcpy(buf, packet.buf, packet.buf_len);
+        *len = packet.buf_len;
+    }
+    return rc;
+}
+
+TEST(srtp_source_capacity_preserves_replay_and_rollover) {
+    const rtc_srtp_profile_t profiles[] = {RTC_SRTP_PROFILE_AES128_CM_SHA1_80,
+                                           RTC_SRTP_PROFILE_AEAD_AES_128_GCM,
+                                           RTC_SRTP_PROFILE_AEAD_AES_256_GCM};
+    for (size_t p = 0; p < sizeof(profiles) / sizeof(profiles[0]); p++) {
+        for (int control = 0; control < 2; control++) {
+            const uint8_t *key = p == 2 ? test_key256 : test_key;
+            size_t key_len = p == 2 ? sizeof(test_key256) : sizeof(test_key);
+            const uint8_t *salt = p == 0 ? test_salt : test_gcm_salt;
+            size_t salt_len = p == 0 ? sizeof(test_salt) : sizeof(test_gcm_salt);
+            rtc_srtp_ctx_t send, receive, extra;
+            ASSERT_EQ(rtc_srtp_init_profile(&send, profiles[p], key, key_len, salt, salt_len),
+                      RTC_OK);
+            ASSERT_EQ(rtc_srtp_init_profile(&receive, profiles[p], key, key_len, salt, salt_len),
+                      RTC_OK);
+            ASSERT_EQ(rtc_srtp_init_profile(&extra, profiles[p], key, key_len, salt, salt_len),
+                      RTC_OK);
+            uint8_t first[SRTP_MAX_PACKET];
+            size_t first_len = 0;
+            for (unsigned i = 0; i <= SRTP_REPLAY_MAX_STREAMS; i++) {
+                uint8_t wire[SRTP_MAX_PACKET];
+                size_t len;
+                ASSERT_EQ(build_capacity_packet(control, 0x10000 + i, 65535, wire, &len), RTC_OK);
+                bool full = i == SRTP_REPLAY_MAX_STREAMS;
+                if (full && !control)
+                    ASSERT_EQ(rtc_srtp_protect(&send, wire, &len, sizeof(wire)), RTC_ERR_NOMEM);
+                rtc_srtp_ctx_t *sender = full ? &extra : &send;
+                ASSERT_EQ(control ? rtc_srtp_protect_rtcp(sender, wire, &len, sizeof(wire))
+                                  : rtc_srtp_protect(sender, wire, &len, sizeof(wire)),
+                          RTC_OK);
+                if (i == 0) {
+                    memcpy(first, wire, len);
+                    first_len = len;
+                }
+                if (full) {
+                    uint8_t forged[SRTP_MAX_PACKET];
+                    memcpy(forged, wire, len);
+                    forged[len - 1] ^= 1;
+                    size_t forged_len = len;
+                    ASSERT_EQ(control ? rtc_srtp_unprotect_rtcp(&receive, forged, &forged_len)
+                                      : rtc_srtp_unprotect(&receive, forged, &forged_len),
+                              RTC_ERR_SRTP);
+                }
+                ASSERT_EQ(control ? rtc_srtp_unprotect_rtcp(&receive, wire, &len)
+                                  : rtc_srtp_unprotect(&receive, wire, &len),
+                          full ? RTC_ERR_NOMEM : RTC_OK);
+            }
+            uint8_t next[SRTP_MAX_PACKET];
+            size_t next_len;
+            ASSERT_EQ(build_capacity_packet(control, 0x10000, 0, next, &next_len), RTC_OK);
+            ASSERT_EQ(control ? rtc_srtp_protect_rtcp(&send, next, &next_len, sizeof(next))
+                              : rtc_srtp_protect(&send, next, &next_len, sizeof(next)),
+                      RTC_OK);
+            ASSERT_EQ(control ? rtc_srtp_unprotect_rtcp(&receive, next, &next_len)
+                              : rtc_srtp_unprotect(&receive, next, &next_len),
+                      RTC_OK);
+            ASSERT_EQ(control ? rtc_srtp_unprotect_rtcp(&receive, first, &first_len)
+                              : rtc_srtp_unprotect(&receive, first, &first_len),
+                      RTC_ERR_SRTP);
+            rtc_srtp_close(&extra);
+            rtc_srtp_close(&receive);
+            rtc_srtp_close(&send);
+        }
+    }
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  SRTP Component Tests\n");
@@ -626,6 +706,7 @@ int main(void) {
     RUN_TEST(srtcp_wrong_key_fails);
     RUN_TEST(srtp_replay_rejected);
     RUN_TEST(srtcp_replay_rejected);
+    RUN_TEST(srtp_source_capacity_preserves_replay_and_rollover);
 
     rtc_cleanup();
     TEST_SUMMARY();

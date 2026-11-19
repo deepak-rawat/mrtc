@@ -383,8 +383,12 @@ static void transport_handle_rtp(rtc_transport_t *transport, const uint8_t *data
     uint8_t buf[SRTP_MAX_PACKET];
     memcpy(buf, data, len);
     size_t pkt_len = len;
-    if (rtc_srtp_unprotect(&transport->srtp_recv, buf, &pkt_len) != RTC_OK)
+    int rc = rtc_srtp_unprotect(&transport->srtp_recv, buf, &pkt_len);
+    if (rc != RTC_OK) {
+        if (rc == RTC_ERR_NOMEM)
+            rtc_transport_close(transport);
         return;
+    }
 
     rtc_rtp_packet_t pkt;
     if (rtc_rtp_parse(&pkt, buf, pkt_len) != RTC_OK)
@@ -414,8 +418,12 @@ static void transport_handle_rtcp(rtc_transport_t *transport, const uint8_t *dat
     uint8_t buf[SRTP_MAX_PACKET];
     memcpy(buf, data, len);
     size_t pkt_len = len;
-    if (rtc_srtp_unprotect_rtcp(&transport->srtp_recv, buf, &pkt_len) != RTC_OK)
+    int rc = rtc_srtp_unprotect_rtcp(&transport->srtp_recv, buf, &pkt_len);
+    if (rc != RTC_OK) {
+        if (rc == RTC_ERR_NOMEM)
+            rtc_transport_close(transport);
         return;
+    }
 #ifdef MRTC_ENABLE_TWCC
     transport_consume_twcc_feedback(transport, buf, pkt_len);
 #endif
