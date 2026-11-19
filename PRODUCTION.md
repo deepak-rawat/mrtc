@@ -170,10 +170,12 @@ The retained changes are a tested foundation, not completion of work items 0–6
 
 1. Complete supported-profile negotiation validation, including feedback
    capability intersection, rejected sections and browser-specific SDP shapes.
-2. Complete SSRC collision recovery and dynamic membership reconsideration.
-   Incoming/outgoing BYE, source inactivity expiry, small-connection scheduling,
-   compound feedback and capability intersection are implemented. Duplicate
-   remote-SSRC SDP rejection is validation, not automatic collision recovery.
+2. Complete SSRC collision recovery and qualify sender-clock synchronization
+   across media legs. Dynamic member/sender tracking, timer/reverse
+   reconsideration, incoming/outgoing BYE and source inactivity expiry are
+   implemented for the supported unicast profile. Duplicate remote-SSRC SDP
+   rejection is validation, not automatic collision recovery. Large-group BYE
+   backoff is outside this profile and remains unimplemented.
 3. Qualify conservative shared-source bitrate adaptation under impairments,
    then complete pacing and subscriber-wide allocation across media legs.
 4. Qualify TURN under hostile networks and complete server/address failover and
@@ -224,7 +226,7 @@ Reoffers may deactivate it or introduce a new SSRC; active same-SSRC restart is
 rejected before mutation and requires a new source or transport. Inactivity
 alone is resumable and does not destroy the producer/consumer graph. Each RTP
 leg has its own activity; these leases do not promise a global end-to-end
-expiry deadline or implement dynamic RTCP membership reconsideration.
+expiry deadline. Per-transport RTCP membership is maintained separately below.
 
 Local validation of this source-lifecycle implementation:
 
@@ -240,6 +242,56 @@ timeout. Three unchanged isolated repeats and the final runs passed; the cause
 was not established. Later timed checks used process-scoped idle-sleep
 prevention, not relaxed timeouts or media assertions. These results do not
 replace hostile-network, long-soak or external-platform qualification.
+
+## Live RTCP membership and sender clocks
+
+Each logical transport now tracks its own live SSRC membership, not the room
+roster or a fixed four-source estimate. Authenticated RTP SSRCs/CSRCs, RTCP
+report/feedback senders and SDES chunks establish remote membership; successful
+outgoing RTP/RTCP establishes local activity. Local report contexts register
+their own participant before scheduling. BYE removes listed members, sender
+roles expire after two calculated sender intervals, and inactive members expire
+after five deterministic receiver intervals.
+
+The shared model is bounded to 128 entries per transport; incoming capacity
+exhaustion closes the transport, while local operations return a logged
+resource error. This is separate from the 64-SSRC lifetime crypto tables.
+Malformed SDES item/chunk bounds, alignment and feedback framing are rejected
+before membership mutation. Reported-source references in RR blocks do not
+create phantom members. Local and remote IDs are tracked separately; that is
+not a substitute for collision recovery.
+
+Native and routing reports use live sender/receiver counts, a shared 1/16 EWMA
+of protected RTCP sizes and a 5% media-target budget. Size accounting includes
+conservative IPv6/UDP overhead. Timer reconsideration delays reports as a group
+grows; reverse reconsideration advances the previous/next report epochs when
+it shrinks. Routing timers check changes at most 100 ms apart while healthy,
+rather than sleeping through a shortened deadline. This bounded polling adds
+timer work and is not a media pacer. Transport statistics expose member/sender
+counts. Idle senders eventually emit RR instead of indefinitely claiming SR.
+Native sender/receiver objects sharing a local SSRC use one report schedule:
+the SR carries the receiver's RR block instead of independently emitting a
+second regular report and multiplying that source's report bandwidth.
+
+Sender reports extrapolate the RTP clock to the report's monotonic instant
+and pair it with the current NTP wall-clock timestamp. Reordered packets and
+equal-timestamp fragments do not move the clock anchor backwards; RTP wrapping
+and exact NTP fractions are covered by deterministic wire-format tests. Native
+senders and SFU consumers supply the negotiated clock rate. This uses the
+latest transmitted media anchor; preserving original publisher capture-clock
+correlation across SFU legs and lip-sync under impairments still need work and
+qualification.
+
+Local validation of these changes:
+
+- Warning-free native build and 12/12 focused Debug CTests.
+- 9/9 focused ASan/UBSan, 7/7 TSan and 9/9 optional-controls-disabled tests.
+- Full real Chromium/native suite, including decoded media, SCTP, topology
+  migration/abort isolation and 120 leave/join generations.
+- 2,447,616 parser/membership fuzz inputs over 61 seconds, without findings.
+- Eight peers for 60 seconds with 12 media/RSS samples and clean shutdown:
+  post-warmup growth was at most 0.53125 MiB for the server and 0.4375 MiB
+  for any client. This short sampled run is not long-soak/capacity certification.
 
 ## Latest transport implementation
 
@@ -282,8 +334,8 @@ targeted ASan/UBSan tests pass with this path enabled.
 
 Reports now use shared randomized, bandwidth-aware interval calculation and
 independent worker timers, including while media is idle/paused. Runtime
-membership uses the declared four-SSRC one-camera/one-microphone model; this is
-not dynamic group reconsideration. Publisher SR timing is echoed in receiver
+membership now uses the live per-transport model described above. Publisher SR
+timing is echoed in receiver
 reports, and retiring native/SFU sending sources attempt compound BYE before
 transport shutdown. Focused tests verify interval bounds, quiet-path encrypted
 receiver reports and their SR references, plus callback-safe teardown.

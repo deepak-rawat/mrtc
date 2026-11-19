@@ -56,8 +56,11 @@ have been replaced. See [the layout](ARCHITECTURE.md),
 ### 2. Improve RTCP interoperability
 
 - Preserve compound SR/RR + SDES CNAME on native and routing report paths.
-- Preserve randomized bandwidth-aware small-connection intervals; add dynamic
-  membership reconsideration beyond that model.
+- Qualify live member/sender tracking and timer/reverse reconsideration under
+  network faults; preserve bounded memory and report bandwidth.
+- Preserve advancing RTP/NTP sender-clock mapping through idle/reordered media;
+  improve original publisher capture-clock correlation and lip-sync across SFU
+  legs.
 - Qualify incoming/outgoing BYE, inactivity expiry and source replacement under
   broader network faults; complete SSRC collision recovery. Compound feedback
   is implemented; reduced-size RTCP is not advertised.

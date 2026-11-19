@@ -12,7 +12,7 @@ changes there alone do not change client or SFU connectivity.
 
 | Standard | Implemented behavior | Remaining boundary |
 |---|---|---|
-| RFC 3550 — RTP/RTCP | Compound reports/feedback + SDES/CNAME, interval loss/jitter, randomized bandwidth-aware small-connection reports, publisher SR timing, incoming/outgoing BYE and inactivity expiry | Runtime timing assumes the one-camera/one-microphone connection; dynamic membership reconsideration and collision recovery remain incomplete |
+| RFC 3550 — RTP/RTCP | Compound reports/feedback + SDES/CNAME, interval loss/jitter, live bounded membership/sender expiry, timer/reverse reconsideration, advancing SR clock mapping, incoming/outgoing BYE and inactivity expiry | Supported unicast profile; SSRC collision recovery, original publisher capture-clock correlation across SFU legs and large-group BYE backoff remain incomplete |
 | RFC 3711 — SRTP/SRTCP | AES-128-CM/HMAC-SHA1-80, per-SSRC rollover/replay state, authenticated replay rejection, capacity checks | No MKI/rekeying API or independent hardening audit |
 | RFC 7714 — SRTP AEAD | AES-128-GCM and AES-256-GCM; RTP/SRTCP protection and DTLS profile negotiation | Not every optional cipher/profile is offered |
 | RFC 8489 / RFC 5389 — STUN | UDP messages, integrity/fingerprint, address validation, ICE checks and credential-based TURN authentication | Authentication v2, alternate servers and TCP/TLS STUN are not implemented |
@@ -176,7 +176,7 @@ success does not certify every SDL device/launch configuration.
 
 ## Deferred Work and Deployment Limits
 
-- Dynamic RTCP membership reconsideration and SSRC collision recovery; broader fault qualification of implemented BYE/source expiry.
+- SSRC collision recovery, cross-leg capture-clock synchronization and large-group BYE backoff; broader fault qualification of membership reconsideration and BYE/source expiry.
 - FEC/RTX, simulcast/SVC and additional codecs.
 - TURN server/address failover, dual-stack completeness and STUN authentication v2.
 - Full SDP/Unified Plan coverage and established codec changes.
