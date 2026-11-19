@@ -29,6 +29,7 @@ struct rtc_consumer {
     void *app_data;
     _Atomic bool closed;
     _Atomic bool paused;
+    _Atomic bool source_ended;
     _Atomic uint64_t packets_sent;
     _Atomic uint64_t bytes_sent;
     _Atomic uint64_t packets_dropped;
@@ -54,7 +55,7 @@ static void consumer_report_timer(void *user) {
     rtc_consumer_t *consumer = user;
     rtc_mutex_lock(&consumer->media_mutex);
     consumer->report_timer = RTC_WORKER_TIMER_INVALID;
-    if (atomic_load(&consumer->closed)) {
+    if (atomic_load(&consumer->closed) || atomic_load(&consumer->source_ended)) {
         rtc_mutex_unlock(&consumer->media_mutex);
         return;
     }
@@ -76,7 +77,7 @@ static void consumer_retire_on_worker(void *user) {
         rtc_worker_cancel_timer(consumer->worker, consumer->report_timer);
         consumer->report_timer = RTC_WORKER_TIMER_INVALID;
     }
-    if (atomic_load(&consumer->packets_sent) &&
+    if (!atomic_load(&consumer->source_ended) && atomic_load(&consumer->packets_sent) &&
         rtc_transport_send_bye(consumer->transport, consumer->rtp.ssrc) != RTC_OK)
         RTC_LOG_DBG("RTCP BYE unavailable on retiring consumer");
 }
@@ -90,7 +91,8 @@ rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
     rtc_producer_stats_t producer_stats;
     if (rtc_transport_get_stats(transport, &transport_stats) != RTC_OK || transport_stats.closed)
         return NULL;
-    if (rtc_producer_get_stats(opts->producer, &producer_stats) != RTC_OK || producer_stats.closed)
+    if (rtc_producer_get_stats(opts->producer, &producer_stats) != RTC_OK ||
+        producer_stats.closed || producer_stats.source_ended)
         return NULL;
 
     rtc_consumer_t *consumer = (rtc_consumer_t *)calloc(1, sizeof(*consumer));
@@ -173,9 +175,33 @@ void rtc_consumer_pause(rtc_consumer_t *consumer) {
 void rtc_consumer_resume(rtc_consumer_t *consumer) {
     if (!consumer)
         return;
+    rtc_mutex_lock(&consumer->media_mutex);
+    if (atomic_load(&consumer->closed) || atomic_load(&consumer->source_ended)) {
+        rtc_mutex_unlock(&consumer->media_mutex);
+        RTC_LOG_WARN("Cannot resume a closed or retired consumer source");
+        return;
+    }
     atomic_store_explicit(&consumer->paused, false, memory_order_release);
     atomic_store(&consumer->bitrate_feedback_ms, 0);
+    rtc_mutex_unlock(&consumer->media_mutex);
     rtc_producer_request_keyframe(consumer->producer);
+}
+
+void rtc_consumer_source_ended(rtc_consumer_t *consumer) {
+    if (!consumer)
+        return;
+    rtc_mutex_lock(&consumer->media_mutex);
+    if (!atomic_load(&consumer->closed) && !atomic_exchange(&consumer->source_ended, true)) {
+        atomic_store(&consumer->paused, true);
+        atomic_store(&consumer->bitrate_feedback_ms, 0);
+        memset(consumer->history, 0, sizeof(consumer->history));
+        if (atomic_load(&consumer->packets_sent)) {
+            int rc = rtc_transport_send_bye(consumer->transport, consumer->rtp.ssrc);
+            if (rc != RTC_OK)
+                RTC_LOG_DBG("RTCP BYE unavailable on ended consumer: %d", rc);
+        }
+    }
+    rtc_mutex_unlock(&consumer->media_mutex);
 }
 
 void rtc_consumer_close(rtc_consumer_t *consumer) {
@@ -203,7 +229,9 @@ int rtc_consumer_get_stats(rtc_consumer_t *consumer, rtc_consumer_stats_t *out) 
         return RTC_ERR_INVALID;
     memset(out, 0, sizeof(*out));
     out->closed = atomic_load_explicit(&consumer->closed, memory_order_acquire);
-    out->paused = atomic_load_explicit(&consumer->paused, memory_order_acquire);
+    out->source_ended = atomic_load(&consumer->source_ended);
+    out->paused =
+        out->source_ended || atomic_load_explicit(&consumer->paused, memory_order_acquire);
     out->kind = consumer->kind;
     out->packets_sent = atomic_load_explicit(&consumer->packets_sent, memory_order_relaxed);
     out->bytes_sent = atomic_load_explicit(&consumer->bytes_sent, memory_order_relaxed);
@@ -226,11 +254,17 @@ void rtc_consumer_on_producer_rtp(rtc_consumer_t *consumer, const rtc_rtp_packet
     if (!consumer || !pkt)
         return;
     if (atomic_load_explicit(&consumer->closed, memory_order_acquire) ||
-        atomic_load_explicit(&consumer->paused, memory_order_acquire)) {
+        atomic_load_explicit(&consumer->paused, memory_order_acquire) ||
+        atomic_load(&consumer->source_ended)) {
         return;
     }
 
     rtc_mutex_lock(&consumer->media_mutex);
+    if (atomic_load(&consumer->closed) || atomic_load(&consumer->source_ended) ||
+        atomic_load(&consumer->paused)) {
+        rtc_mutex_unlock(&consumer->media_mutex);
+        return;
+    }
     uint16_t source_seq = pkt->header.seq;
     if (!consumer->source_initialized) {
         consumer->seq_offset = (uint16_t)(consumer->initial_seq - source_seq);
@@ -297,6 +331,10 @@ void rtc_consumer_on_producer_rtp(rtc_consumer_t *consumer, const rtc_rtp_packet
 int rtc_consumer_handle_rtcp(rtc_consumer_t *consumer, const uint8_t *data, size_t len) {
     if (!consumer || !data || atomic_load_explicit(&consumer->closed, memory_order_acquire))
         return RTC_ERR_INVALID;
+    if (rtc_rtcp_validate_compound(data, len) != RTC_OK)
+        return RTC_ERR_INVALID;
+    if (atomic_load(&consumer->source_ended))
+        return RTC_OK;
     size_t offset = 0;
     while (offset + 4 <= len) {
         const uint8_t *packet = data + offset;

@@ -20,6 +20,9 @@ typedef struct endpoint {
     uint32_t epoch;
     _Atomic unsigned packets;
     _Atomic unsigned audio_packets;
+    _Atomic unsigned video_packets;
+    _Atomic unsigned ended_sources;
+    _Atomic uint32_t last_ended_ssrc;
     _Atomic unsigned messages;
     _Atomic unsigned estimates;
     _Atomic unsigned feedback;
@@ -124,10 +127,26 @@ static void received_audio(const uint8_t *data, size_t len, uint16_t seq, uint32
     atomic_fetch_add(&endpoint->audio_packets, 1);
 }
 
+static void received_video(const uint8_t *data, size_t len, uint16_t seq, uint32_t timestamp,
+                           uint32_t ssrc, bool marker, void *user) {
+    received_packet(data, len, seq, timestamp, ssrc, marker, user);
+    endpoint_t *endpoint = user;
+    atomic_fetch_add(&endpoint->video_packets, 1);
+}
+
+static void received_source_change(uint32_t previous, uint32_t current, void *user) {
+    endpoint_t *endpoint = user;
+    if (previous && !current) {
+        atomic_store(&endpoint->last_ended_ssrc, previous);
+        atomic_fetch_add(&endpoint->ended_sources, 1);
+    }
+}
+
 static void received_track(rtc_rtp_receiver_t *receiver, void *user) {
     rtc_rtp_receiver_on_frame(
         receiver,
-        rtc_rtp_receiver_kind(receiver) == RTC_KIND_AUDIO ? received_audio : received_packet, user);
+        rtc_rtp_receiver_kind(receiver) == RTC_KIND_AUDIO ? received_audio : received_video, user);
+    rtc_rtp_receiver_on_source_change(receiver, received_source_change, user);
 }
 
 static void received_message(const uint8_t *data, size_t len, void *user) {
@@ -424,6 +443,43 @@ TEST(sfu_live_tracks_restart_sctp_and_publisher_feedback) {
     ASSERT_EQ(handle(&fixture, &publisher, &candidate), RTC_ERR_SDP);
     ASSERT_EQ(rtc_data_channel_send_text(channel, "after candidate filtering"), RTC_OK);
     ASSERT(wait_count(&fixture, &publisher.messages, 4));
+
+    rtc_producer_t *video_producer = session->producers[0];
+    ASSERT(video_producer != NULL);
+    unsigned ended_before = atomic_load(&subscriber.ended_sources);
+    uint32_t publisher_ssrc = rtc_rtp_send_stream_ssrc(sender->stream);
+    ASSERT_EQ(rtc_transport_send_bye(publisher.pc->runtime_transport, publisher_ssrc), RTC_OK);
+    ASSERT(wait_count(&fixture, &subscriber.ended_sources, ended_before + 1));
+    ASSERT_EQ(atomic_load(&subscriber.last_ended_ssrc), original.ssrc);
+    rtc_producer_stats_t ended_stats;
+    ASSERT_EQ(rtc_producer_get_stats(video_producer, &ended_stats), RTC_OK);
+    ASSERT(ended_stats.source_ended && !ended_stats.source_active && !ended_stats.closed);
+    ASSERT_EQ(rtc_consumer_get_stats(consumer, &stats), RTC_OK);
+    ASSERT(stats.source_ended && stats.paused);
+    uint64_t accepted_before_late = ended_stats.packets_received;
+    unsigned video_after_bye = atomic_load(&subscriber.video_packets);
+    unsigned audio_before_late = atomic_load(&subscriber.audio_packets);
+    for (unsigned i = 0; i < 10; i++) {
+        ASSERT_EQ(rtc_rtp_sender_send(sender, payload, sizeof(payload), 3000, true), RTC_OK);
+        ASSERT_EQ(rtc_rtp_sender_send(audio, silence, sizeof(silence), 960, false), RTC_OK);
+        ASSERT(pump(&fixture));
+        SLEEP_MS(10);
+    }
+    ASSERT(wait_count(&fixture, &subscriber.audio_packets, audio_before_late + 10));
+    ASSERT_EQ(atomic_load(&subscriber.video_packets), video_after_bye);
+    ASSERT_EQ(rtc_producer_get_stats(video_producer, &ended_stats), RTC_OK);
+    ASSERT_EQ(ended_stats.packets_received, accepted_before_late);
+    sig_msg_t ended_offer = {.type = SIG_MSG_OFFER, .to = "sfu"};
+    snprintf(ended_offer.sdp, sizeof(ended_offer.sdp), "%s", session->remote.raw);
+    ASSERT_EQ(handle(&fixture, &publisher, &ended_offer), RTC_ERR_SDP);
+    ASSERT(session->transport == transport && session->sctp == association);
+    ASSERT_EQ(rtc_data_channel_send_text(channel, "after video BYE"), RTC_OK);
+    ASSERT(wait_count(&fixture, &publisher.messages, 5));
+    rtc_rtp_transceiver_set_direction(video, RTC_DIR_INACTIVE);
+    ASSERT(offer(&fixture, &publisher));
+    ASSERT_EQ(subscription->description.media[0].direction, 3);
+    ASSERT(subscription->consumers[0] == NULL);
+    ASSERT_EQ(rtc_data_channel_state(channel), RTC_DC_OPEN);
 
     rtc_sfu_leave(fixture.sfu, "live", subscriber.id, 0);
     rtc_sfu_leave(fixture.sfu, "live", publisher.id, 0);

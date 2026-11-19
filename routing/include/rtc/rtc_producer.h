@@ -18,6 +18,8 @@ typedef struct {
 
 typedef struct {
     bool closed;
+    bool source_active;
+    bool source_ended;
     rtc_media_kind_t kind;
     uint64_t packets_received;
     uint64_t bytes_received;

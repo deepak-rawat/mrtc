@@ -76,6 +76,19 @@ is retained for RR LSR/DLSR. Closing consumers cancels report callbacks and
 attempts BYE before freeing their state; the SFU retires them before closing
 their transport.
 
+Validated publisher BYE permanently marks the producer ended, cancels reports
+and ends its consumers. Consumers clear protected retransmission history, stop
+media/feedback processing and emit BYE using their rewritten SSRC if they sent
+RTP. Ended sources cannot be resumed or acquire new consumers. Source state is
+exposed in producer/consumer statistics; SRTP replay/nonce state is preserved.
+
+Five deterministic report intervals without known RTP/SR/RR activity instead
+expire the producer's active-source lease and RTCP receive-report statistics,
+not its graph, identity or cumulative forwarding counters. Fresh activity may
+resume this source. The upstream and downstream
+legs have independent activity; downstream reporting context can remain while
+the upstream source is inactive.
+
 There is no unbounded per-subscriber queue. Closed/not-ready transports and
 failed sends produce checked failures and drop counters. This is a simple
 forwarder, not a simulcast selector or a full subscriber bitrate allocator.

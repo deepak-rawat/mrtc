@@ -11,6 +11,7 @@
 #include <rtc/rtc_rtcp.h>
 #include "test_harness.h"
 #include "rtc_consumer_internal.h"
+#include "rtc_producer_internal.h"
 
 #include <stdatomic.h>
 
@@ -145,6 +146,63 @@ TEST(receiver_reports_drive_bounded_consumer_estimates) {
     close_env(&env);
 }
 #endif
+
+typedef struct {
+    rtc_producer_t *producer;
+    const uint8_t *wire;
+    size_t len;
+    uint64_t now;
+    int result;
+    bool expired;
+} source_activity_args_t;
+
+static void producer_activity_on_worker(void *user) {
+    source_activity_args_t *args = user;
+    if (args->wire)
+        args->result = rtc_producer_handle_rtcp(args->producer, args->wire, args->len);
+    else
+        args->expired = rtc_producer_expire_source(args->producer, args->now);
+}
+
+TEST(producer_control_activity_lease_expires_without_ending_the_source) {
+    test_env_t env;
+    ASSERT(make_env(&env));
+    rtc_producer_options_t options = video_producer_options();
+    rtc_producer_t *producer = rtc_transport_produce(env.transport, &options);
+    ASSERT(producer != NULL);
+    rtc_worker_stats_t initial;
+    ASSERT_EQ(rtc_worker_get_stats(env.worker, &initial), RTC_OK);
+    rtc_rtcp_stats_t sender;
+    ASSERT_EQ(rtc_rtcp_stats_init(&sender, options.rtp.ssrc), RTC_OK);
+    rtc_rtcp_packet_t report;
+    ASSERT_EQ(rtc_rtcp_build_report(&report, &sender, true), RTC_OK);
+    uint64_t before_activity = rtc_time_ms();
+    source_activity_args_t args = {.producer = producer, .wire = report.buf, .len = report.buf_len};
+    ASSERT_EQ(rtc_transport_invoke(env.transport, producer_activity_on_worker, &args), RTC_OK);
+    ASSERT_EQ(args.result, RTC_OK);
+    rtc_producer_stats_t stats;
+    ASSERT_EQ(rtc_producer_get_stats(producer, &stats), RTC_OK);
+    ASSERT(stats.source_active && !stats.source_ended);
+    args.wire = NULL;
+    args.now = before_activity + rtc_rtcp_source_timeout_ms(NULL) - 1;
+    ASSERT_EQ(rtc_transport_invoke(env.transport, producer_activity_on_worker, &args), RTC_OK);
+    ASSERT(!args.expired);
+    args.now = rtc_time_ms() + rtc_rtcp_source_timeout_ms(NULL) + 1;
+    ASSERT_EQ(rtc_transport_invoke(env.transport, producer_activity_on_worker, &args), RTC_OK);
+    ASSERT(args.expired);
+    ASSERT_EQ(rtc_producer_get_stats(producer, &stats), RTC_OK);
+    ASSERT(!stats.source_active && !stats.source_ended && !stats.closed);
+    rtc_worker_stats_t expired;
+    ASSERT_EQ(rtc_worker_get_stats(env.worker, &expired), RTC_OK);
+    ASSERT_EQ(expired.timers_pending, initial.timers_pending);
+    args.wire = report.buf;
+    ASSERT_EQ(rtc_transport_invoke(env.transport, producer_activity_on_worker, &args), RTC_OK);
+    ASSERT_EQ(args.result, RTC_OK);
+    ASSERT_EQ(rtc_producer_get_stats(producer, &stats), RTC_OK);
+    ASSERT(stats.source_active && !stats.source_ended);
+    rtc_producer_destroy(producer);
+    close_env(&env);
+}
 
 TEST(producer_create_stats) {
     test_env_t env;
@@ -700,6 +758,7 @@ TEST(routed_loss_wrap_and_bounded_retransmission) {
 int main(void) {
     rtc_init();
     RUN_TEST(producer_create_stats);
+    RUN_TEST(producer_control_activity_lease_expires_without_ending_the_source);
 #ifdef MRTC_ENABLE_RATE_CONTROL
     RUN_TEST(receiver_reports_drive_bounded_consumer_estimates);
 #endif

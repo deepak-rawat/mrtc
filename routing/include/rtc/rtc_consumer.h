@@ -22,6 +22,7 @@ typedef struct {
 typedef struct {
     bool closed;
     bool paused;
+    bool source_ended;
     rtc_media_kind_t kind;
     uint64_t packets_sent;
     uint64_t bytes_sent;

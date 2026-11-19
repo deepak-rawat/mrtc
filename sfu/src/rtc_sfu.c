@@ -82,6 +82,16 @@ static void on_channel(rtc_data_channel_t *channel, void *user) {
     rtc_data_channel_on_message(channel, on_chat, session);
 }
 
+static void resume_live_consumer(rtc_consumer_t *consumer) {
+    rtc_consumer_stats_t stats;
+    if (rtc_consumer_get_stats(consumer, &stats) != RTC_OK) {
+        RTC_LOG_ERR("SFU could not inspect consumer source state");
+        return;
+    }
+    if (!stats.closed && !stats.source_ended)
+        rtc_consumer_resume(consumer);
+}
+
 static void session_tick(void *user) {
     sfu_session_t *session = user;
     rtc_transport_stats_t stats;
@@ -114,7 +124,7 @@ static void session_tick(void *user) {
                     session->description.media[i].direction == 1 &&
                     (session->remote.media[i].direction == 0 ||
                      session->remote.media[i].direction == 2))
-                    rtc_consumer_resume(session->consumers[i]);
+                    resume_live_consumer(session->consumers[i]);
         }
         if (session->sctp && stats.dtls_state == RTC_TRANSPORT_DTLS_CONNECTED &&
             !session->sctp_connected) {
@@ -184,6 +194,10 @@ static void destroy_session(sfu_session_t *session) {
 
 static void on_feedback(const uint8_t *data, size_t len, void *user) {
     sfu_session_t *s = user;
+    if (rtc_rtcp_validate_compound(data, len) != RTC_OK) {
+        RTC_LOG_WARN("SFU rejected malformed compound RTCP");
+        return;
+    }
     for (int i = 0; i < SDP_MAX_MEDIA; i++) {
         if (s->publishing && s->producers[i])
             rtc_producer_handle_rtcp(s->producers[i], data, len);
@@ -343,21 +357,30 @@ static int subscribe(rtc_sfu_t *sfu, const char *subscriber, sfu_session_t *publ
         s->description.media[index] = publisher->description.media[i];
         s->description.media[index].mid_index = index;
         bool sending = media_sending(&publisher->remote.media[i]);
+        rtc_producer_t *wanted = publisher->producers[i];
+        if (wanted) {
+            rtc_producer_stats_t stats;
+            if (rtc_producer_get_stats(wanted, &stats) != RTC_OK)
+                return RTC_ERR_GENERIC;
+            if (stats.source_ended) {
+                sending = false;
+                wanted = NULL;
+            }
+        }
         s->description.media[index].direction = sending ? 1 : 3;
         s->description.media[index].extmap_count = 0;
         s->description.media[index].rtcp_feedback =
             s->description.media[index].media_type == RTC_MEDIA_VIDEO
                 ? RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR | RTC_SDP_FB_REMB
                 : 0;
-        if (s->subscriptions[index] != publisher->producers[i]) {
+        if (s->subscriptions[index] != wanted) {
             rtc_consumer_destroy(s->consumers[index]);
             s->consumers[index] = NULL;
-            s->subscriptions[index] = publisher->producers[i];
-            if (publisher->producers[i])
+            s->subscriptions[index] = wanted;
+            if (wanted)
                 s->consumers[index] = rtc_transport_consume(
-                    s->transport,
-                    &(rtc_consumer_options_t){.producer = publisher->producers[i], .paused = true});
-            if (publisher->producers[i] && !s->consumers[index]) {
+                    s->transport, &(rtc_consumer_options_t){.producer = wanted, .paused = true});
+            if (wanted && !s->consumers[index]) {
                 RTC_LOG_ERR("SFU consumer creation failed: subscriber=%s publisher=%s media=%d",
                             subscriber, publisher->owner, i);
                 if (created)
@@ -429,6 +452,17 @@ static int validate_publisher(sfu_session_t *session, const rtc_sdp_t *remote, u
             continue;
         }
         bool video = media->media_type == RTC_MEDIA_VIDEO;
+        if (session && session->producers[i] && media_sending(media)) {
+            rtc_producer_stats_t stats;
+            rtc_rtp_parameters_t rtp;
+            if (rtc_producer_get_stats(session->producers[i], &stats) != RTC_OK ||
+                rtc_producer_get_rtp_parameters(session->producers[i], &rtp) != RTC_OK)
+                return RTC_ERR_SDP;
+            if (stats.source_ended && rtp.ssrc == media->ssrc) {
+                RTC_LOG_WARN("Ended publisher source requires a new SSRC or transport");
+                return RTC_ERR_SDP;
+            }
+        }
         if (!media->rejected && !media->rtcp_mux)
             return RTC_ERR_SDP;
         if (strcmp(media->codec_name, video ? "VP8" : "opus") != 0 || media->payload_type < 0 ||
@@ -671,7 +705,7 @@ static int handle_worker(rtc_sfu_t *sfu, const rtc_sfu_command_t *message) {
                     continue;
                 if (ready && s->description.media[i].direction == 1 &&
                     (s->remote.media[i].direction == 0 || s->remote.media[i].direction == 2))
-                    rtc_consumer_resume(s->consumers[i]);
+                    resume_live_consumer(s->consumers[i]);
                 else
                     rtc_consumer_pause(s->consumers[i]);
             }

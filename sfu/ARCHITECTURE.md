@@ -66,6 +66,14 @@ creates new epoch-scoped sessions.
 
 ## Recovery and Congestion
 
+- Publisher BYE permanently ends only that producer and propagates BYE in each
+  consumer's rewritten SSRC space. Late media is ignored; audio from other
+  sources, participant identity and SCTP remain. New subscriptions represent
+  ended sources as inactive rather than failing the room join.
+- Active same-SSRC reoffers after BYE are rejected before mutation; deactivation
+  or a new SSRC follows the existing update path. A discontinuous restart needs
+  a new source or transport, not reset SRTP replay state. Inactivity expiry alone
+  is resumable and preserves the media graph.
 - Producer/consumer forwarding, protected-wire retransmission history, sequence
   offsets and drop counters come from the routing library.
 - PLI/FIR reaches the originating publisher; downstream NACK uses consumer

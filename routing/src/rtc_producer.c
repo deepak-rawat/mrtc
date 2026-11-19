@@ -27,6 +27,9 @@ struct rtc_producer {
     rtc_mutex_t consumers_mutex;
     bool consumers_ready;
     _Atomic bool closed;
+    _Atomic bool source_active;
+    _Atomic bool source_ended;
+    uint64_t last_activity_ms;
     _Atomic uint64_t packets_received;
     _Atomic uint64_t bytes_received;
     _Atomic uint64_t last_keyframe_request_ms;
@@ -44,16 +47,27 @@ static _Atomic uint32_t g_next_producer_id = 1;
 static void producer_report_timer(void *user) {
     rtc_producer_t *producer = user;
     producer->report_timer = RTC_WORKER_TIMER_INVALID;
-    if (atomic_load(&producer->closed))
+    if (atomic_load(&producer->closed) || atomic_load(&producer->source_ended) ||
+        !producer->last_activity_ms)
         return;
-    int rc = rtc_transport_send_report(producer->transport, &producer->rtcp, false);
+    uint64_t now = rtc_time_ms();
+    uint64_t timeout = rtc_rtcp_source_timeout_ms(&producer->rtcp);
+    if (rtc_producer_expire_source(producer, now))
+        return;
+    int rc = producer->rtcp.packets_received
+                 ? rtc_transport_send_report(producer->transport, &producer->rtcp, false)
+                 : RTC_ERR_TIMEOUT;
     if (rc != RTC_OK && rc != RTC_ERR_TIMEOUT)
         RTC_LOG_WARN("Producer receiver report failed: %d", rc);
-    uint64_t now = rtc_time_ms();
-    producer->report_timer = rtc_worker_add_timer(
-        producer->worker,
-        producer->rtcp.next_report_time > now ? producer->rtcp.next_report_time : now + 1000,
-        producer_report_timer, producer);
+    uint64_t expiry = timeout > UINT64_MAX - producer->last_activity_ms
+                          ? UINT64_MAX
+                          : producer->last_activity_ms + timeout;
+    uint64_t next =
+        producer->rtcp.next_report_time > now ? producer->rtcp.next_report_time : now + 1000;
+    if (!producer->rtcp.packets_received || expiry < next)
+        next = expiry;
+    producer->report_timer =
+        rtc_worker_add_timer(producer->worker, next, producer_report_timer, producer);
     if (producer->report_timer == RTC_WORKER_TIMER_INVALID)
         RTC_LOG_ERR("Producer report timer allocation failed");
 }
@@ -66,6 +80,19 @@ static void producer_retire_on_worker(void *user) {
     }
 }
 
+bool rtc_producer_expire_source(rtc_producer_t *producer, uint64_t now_ms) {
+    if (!producer || atomic_load(&producer->closed) || atomic_load(&producer->source_ended) ||
+        !producer->last_activity_ms || now_ms < producer->last_activity_ms ||
+        now_ms - producer->last_activity_ms < rtc_rtcp_source_timeout_ms(&producer->rtcp))
+        return false;
+    producer_retire_on_worker(producer);
+    atomic_store(&producer->source_active, false);
+    producer->last_activity_ms = 0;
+    rtc_rtcp_stats_reset_source(&producer->rtcp);
+    RTC_LOG_DBG("Producer RTP source 0x%08x expired", producer->rtp.ssrc);
+    return true;
+}
+
 static void copy_label(char *dst, size_t dst_len, const char *src) {
     if (!src)
         src = "";
@@ -74,6 +101,32 @@ static void copy_label(char *dst, size_t dst_len, const char *src) {
         len = dst_len - 1;
     memcpy(dst, src, len);
     dst[len] = '\0';
+}
+
+static void producer_note_activity(rtc_producer_t *producer) {
+    producer->last_activity_ms = rtc_time_ms();
+    atomic_store(&producer->source_active, true);
+    if (producer->report_timer == RTC_WORKER_TIMER_INVALID) {
+        producer->report_timer =
+            rtc_worker_add_timer(producer->worker, rtc_time_ms(), producer_report_timer, producer);
+        if (producer->report_timer == RTC_WORKER_TIMER_INVALID)
+            RTC_LOG_ERR("Producer report timer allocation failed");
+    }
+}
+
+static void producer_end_source(rtc_producer_t *producer) {
+    if (atomic_exchange(&producer->source_ended, true))
+        return;
+    atomic_store(&producer->source_active, false);
+    producer->last_activity_ms = 0;
+    rtc_rtcp_stats_reset_source(&producer->rtcp);
+    producer_retire_on_worker(producer);
+    rtc_mutex_lock(&producer->consumers_mutex);
+    for (size_t i = 0; i < rtc_vec_len(&producer->consumers); i++) {
+        rtc_consumer_t **slot = rtc_vec_at(&producer->consumers, i);
+        rtc_consumer_source_ended(*slot);
+    }
+    rtc_mutex_unlock(&producer->consumers_mutex);
 }
 
 rtc_producer_t *rtc_transport_produce(rtc_transport_t *transport,
@@ -129,17 +182,33 @@ void rtc_producer_set_rtcp_feedback(rtc_producer_t *producer, uint8_t feedback) 
 int rtc_producer_handle_rtcp(rtc_producer_t *producer, const uint8_t *data, size_t len) {
     if (!producer || !data || atomic_load(&producer->closed))
         return RTC_ERR_INVALID;
+    if (rtc_rtcp_validate_compound(data, len) != RTC_OK)
+        return RTC_ERR_INVALID;
+    if (atomic_load(&producer->source_ended))
+        return RTC_OK;
     size_t offset = 0;
     while (len - offset >= 4) {
         size_t size = (((size_t)data[offset + 2] << 8) | data[offset + 3]) * 4 + 4;
         if (size > len - offset || (data[offset] >> 6) != 2)
             return RTC_ERR_INVALID;
-        if (data[offset + 1] == RTCP_PT_SR) {
+        if (data[offset + 1] == RTCP_PT_BYE) {
+            rtc_rtcp_bye_t bye;
+            if (rtc_rtcp_parse_bye(&bye, data + offset, size) != RTC_OK)
+                return RTC_ERR_INVALID;
+            for (unsigned i = 0; i < bye.count; i++)
+                if (bye.ssrcs[i] == producer->rtp.ssrc) {
+                    producer_end_source(producer);
+                    return RTC_OK;
+                }
+        } else if (data[offset + 1] == RTCP_PT_SR || data[offset + 1] == RTCP_PT_RR) {
             rtc_rtcp_packet_t report;
             if (rtc_rtcp_parse(&report, data + offset, size) != RTC_OK)
                 return RTC_ERR_INVALID;
-            if (report.sender_ssrc == producer->rtp.ssrc)
-                rtc_rtcp_stats_on_sr_recv(&producer->rtcp, &report.sr);
+            if (report.sender_ssrc == producer->rtp.ssrc) {
+                producer_note_activity(producer);
+                if (data[offset + 1] == RTCP_PT_SR)
+                    rtc_rtcp_stats_on_sr_recv(&producer->rtcp, &report.sr);
+            }
         }
         offset += size;
     }
@@ -168,7 +237,8 @@ static void producer_update_bitrate_on_worker(void *user) {
     producer_bitrate_args_t *args = user;
     rtc_producer_t *producer = args->producer;
     args->result = RTC_OK;
-    if (atomic_load(&producer->closed) || producer->kind != RTC_MEDIA_KIND_VIDEO ||
+    if (atomic_load(&producer->closed) || atomic_load(&producer->source_ended) ||
+        producer->kind != RTC_MEDIA_KIND_VIDEO ||
         !(atomic_load(&producer->feedback) & RTC_SDP_FB_REMB))
         return;
     uint64_t now = rtc_time_ms();
@@ -212,6 +282,7 @@ void rtc_producer_close(rtc_producer_t *producer) {
     bool was_closed = atomic_exchange_explicit(&producer->closed, true, memory_order_acq_rel);
     if (was_closed)
         return;
+    atomic_store(&producer->source_active, false);
     if (producer->transport && producer->rtp.ssrc != 0)
         rtc_router_unregister_producer(producer->transport, producer->rtp.ssrc);
     rtc_worker_invoke(producer->worker, producer_retire_on_worker, producer);
@@ -234,6 +305,8 @@ int rtc_producer_get_stats(rtc_producer_t *producer, rtc_producer_stats_t *out) 
         return RTC_ERR_INVALID;
     memset(out, 0, sizeof(*out));
     out->closed = atomic_load_explicit(&producer->closed, memory_order_acquire);
+    out->source_active = atomic_load(&producer->source_active);
+    out->source_ended = atomic_load(&producer->source_ended);
     out->kind = producer->kind;
     out->packets_received = atomic_load_explicit(&producer->packets_received, memory_order_relaxed);
     out->bytes_received = atomic_load_explicit(&producer->bytes_received, memory_order_relaxed);
@@ -242,7 +315,8 @@ int rtc_producer_get_stats(rtc_producer_t *producer, rtc_producer_stats_t *out) 
 }
 
 int rtc_producer_request_keyframe(rtc_producer_t *producer) {
-    if (!producer || atomic_load_explicit(&producer->closed, memory_order_acquire))
+    if (!producer || atomic_load_explicit(&producer->closed, memory_order_acquire) ||
+        atomic_load(&producer->source_ended))
         return RTC_ERR_INVALID;
     if (producer->kind != RTC_MEDIA_KIND_VIDEO)
         return RTC_OK;
@@ -307,7 +381,8 @@ void rtc_producer_remove_consumer(rtc_producer_t *producer, rtc_consumer_t *cons
 
 void rtc_producer_on_rtp(rtc_producer_t *producer, const rtc_rtp_packet_t *pkt) {
     if (!producer || !pkt || pkt->header.ssrc != producer->rtp.ssrc ||
-        atomic_load_explicit(&producer->closed, memory_order_acquire))
+        atomic_load_explicit(&producer->closed, memory_order_acquire) ||
+        atomic_load(&producer->source_ended))
         return;
     atomic_fetch_add_explicit(&producer->packets_received, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&producer->bytes_received, (uint64_t)pkt->payload_len,
@@ -315,12 +390,7 @@ void rtc_producer_on_rtp(rtc_producer_t *producer, const rtc_rtp_packet_t *pkt) 
     uint32_t clock_rate = producer->rtp.codec_count ? producer->rtp.codecs[0].clock_rate : 90000;
     rtc_rtcp_stats_on_rtp_recv(&producer->rtcp, pkt->header.seq, pkt->header.timestamp,
                                pkt->header.ssrc, clock_rate);
-    if (producer->report_timer == RTC_WORKER_TIMER_INVALID) {
-        producer->report_timer =
-            rtc_worker_add_timer(producer->worker, rtc_time_ms(), producer_report_timer, producer);
-        if (producer->report_timer == RTC_WORKER_TIMER_INVALID)
-            RTC_LOG_ERR("Producer report timer allocation failed");
-    }
+    producer_note_activity(producer);
 
     rtc_mutex_lock(&producer->consumers_mutex);
     size_t count = rtc_vec_len(&producer->consumers);

@@ -170,9 +170,10 @@ The retained changes are a tested foundation, not completion of work items 0–6
 
 1. Complete supported-profile negotiation validation, including feedback
    capability intersection, rejected sections and browser-specific SDP shapes.
-2. Complete incoming BYE/source expiry, SSRC collision recovery and dynamic
-   membership reconsideration. Small-connection scheduling, outgoing BYE,
-   compound feedback and capability intersection are implemented.
+2. Complete SSRC collision recovery and dynamic membership reconsideration.
+   Incoming/outgoing BYE, source inactivity expiry, small-connection scheduling,
+   compound feedback and capability intersection are implemented. Duplicate
+   remote-SSRC SDP rejection is validation, not automatic collision recovery.
 3. Qualify conservative shared-source bitrate adaptation under impairments,
    then complete pacing and subscriber-wide allocation across media legs.
 4. Qualify TURN under hostile networks and complete server/address failover and
@@ -185,6 +186,60 @@ The retained changes are a tested foundation, not completion of work items 0–6
 Actual Safari, Firefox, Linux/Windows qualification, long soaks and independent
 protocol/security review remain open. No access-control scheme is selected by
 this plan.
+
+## Receive-source lifecycle
+
+Native receivers validate compound framing and SR/RR/BYE bodies before
+dispatch. A known-source BYE unbinds that source and resets receive statistics
+and loss recovery without removing the track, participant, audio from other
+sources or SCTP. Source-change callbacks run on the media
+worker. The native conference controller uses them to discard the retired
+source's decoder and cached receive handle.
+
+Recently retired SSRCs are suppressed for five deterministic RTCP report
+intervals (normally 25 seconds). The history holds 32 sources; exhaustion logs
+an error and closes the transport instead of silently admitting stale media.
+Explicit SDP binding can authorize a retired SSRC again. Replacements retire
+the old binding before learning the new one; bound RTP also checks the
+negotiated payload type.
+
+Known RTP/SR/RR activity refreshes a source lease. Five deterministic report
+intervals of inactivity clear a native binding, allowing a fresh same-SSRC
+packet to resume it. SRTP replay/nonce state is never reset. Inbound statistics
+are source-lifetime values; `in_source_generation` changes on each nonzero
+binding, including same-SSRC resumption, so polling consumers can detect resets.
+This does not reset cumulative application frame counters.
+
+SRTP source tables retain 64 lifetime SSRCs per table/key without LRU eviction,
+preserving old replay windows and sender rollover state across source churn.
+Receive allocation happens after authentication; exhaustion closes the
+transport. Outgoing RTP exhaustion returns `RTC_ERR_NOMEM`. Reclaiming this
+capacity requires a new keyed transport, not ICE restart. Internal fatal
+transport closure is surfaced as a failed native peer connection.
+
+An SFU publisher BYE permanently ends that producer. Consumers clear recovery
+history, stop forwarding/reporting and send BYE with their rewritten SSRC.
+Late media cannot revive the producer, while other media and SCTP continue.
+Reoffers may deactivate it or introduce a new SSRC; active same-SSRC restart is
+rejected before mutation and requires a new source or transport. Inactivity
+alone is resumable and does not destroy the producer/consumer graph. Each RTP
+leg has its own activity; these leases do not promise a global end-to-end
+expiry deadline or implement dynamic RTCP membership reconsideration.
+
+Local validation of this source-lifecycle implementation:
+
+- Warning-free native build and 13/13 focused Debug CTests.
+- 10/10 focused ASan/UBSan tests and 7/7 focused TSan tests.
+- 8/8 focused tests with TWCC and rate control disabled.
+- Full real Chromium/native interop suite, including mesh/SFU/AUTO decoded
+  media, SCTP, migration/abort isolation and 120 leave/join generations.
+- Packet-parser fuzzing: 1,504,500 inputs in 31 seconds without findings.
+
+An earlier routing run timed out with elapsed wall time exceeding its configured
+timeout. Three unchanged isolated repeats and the final runs passed; the cause
+was not established. Later timed checks used process-scoped idle-sleep
+prevention, not relaxed timeouts or media assertions. These results do not
+replace hostile-network, long-soak or external-platform qualification.
 
 ## Latest transport implementation
 

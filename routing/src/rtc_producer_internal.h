@@ -15,5 +15,7 @@ int rtc_producer_add_consumer(rtc_producer_t *producer, rtc_consumer_t *consumer
 void rtc_producer_remove_consumer(rtc_producer_t *producer, rtc_consumer_t *consumer);
 void rtc_producer_on_rtp(rtc_producer_t *producer, const rtc_rtp_packet_t *pkt);
 int rtc_producer_update_bitrate(rtc_producer_t *producer);
+/* Owning-worker source lease check; cancellation is part of expiry. */
+bool rtc_producer_expire_source(rtc_producer_t *producer, uint64_t now_ms);
 
 #endif /* RTC_PRODUCER_INTERNAL_H */

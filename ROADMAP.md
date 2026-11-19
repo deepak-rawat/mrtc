@@ -58,8 +58,9 @@ have been replaced. See [the layout](ARCHITECTURE.md),
 - Preserve compound SR/RR + SDES CNAME on native and routing report paths.
 - Preserve randomized bandwidth-aware small-connection intervals; add dynamic
   membership reconsideration beyond that model.
-- Complete incoming BYE/source expiry and collision recovery. Outgoing BYE and
-  compound feedback are implemented; reduced-size RTCP is not advertised.
+- Qualify incoming/outgoing BYE, inactivity expiry and source replacement under
+  broader network faults; complete SSRC collision recovery. Compound feedback
+  is implemented; reduced-size RTCP is not advertised.
 
 These are more useful next protocol improvements than reimplementing already
 working NACK, PLI, RTP extensions or replay windows.
