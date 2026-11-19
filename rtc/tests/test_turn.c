@@ -52,6 +52,26 @@ TEST(turn_allocate_request) {
     printf("    Allocate request: %zu bytes, transport=UDP\n", msg.buf_len);
 }
 
+TEST(turn_ipv6_relay_address_and_truncation) {
+    uint8_t wire[] = {0x01, 0x03, 0x00, 0x18, 0x21, 0x12, 0xa4, 0x42, 0x00, 0x01, 0x02,
+                      0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x00, 0x16,
+                      0x00, 0x14, 0x00, 0x02, 0xe2, 0x42, 0x21, 0x12, 0xa4, 0x42, 0x00,
+                      0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0a};
+    rtc_stun_msg_t response;
+    rtc_addr_t address;
+    ASSERT_EQ(rtc_stun_parse(&response, wire, sizeof(wire)), RTC_OK);
+    ASSERT_EQ(rtc_stun_get_relayed_address(&response, &address), RTC_OK);
+    char host[64];
+    uint16_t port;
+    ASSERT_EQ(rtc_addr_to_string(&address, host, sizeof(host), &port), RTC_OK);
+    ASSERT_EQ(strcmp(host, "::1"), 0);
+    ASSERT_EQ(port, 50000);
+    wire[3] = 12;
+    wire[23] = 8;
+    ASSERT_EQ(rtc_stun_parse(&response, wire, 32), RTC_OK);
+    ASSERT_EQ(rtc_stun_get_relayed_address(&response, &address), RTC_ERR_INVALID);
+}
+
 TEST(turn_channel_bind_request) {
     rtc_stun_msg_t msg;
     int rc = rtc_stun_build_request(&msg, STUN_METHOD_CHANNEL_BIND, NULL, NULL);
@@ -217,6 +237,7 @@ int main(void) {
     rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(turn_allocate_request);
+    RUN_TEST(turn_ipv6_relay_address_and_truncation);
     RUN_TEST(turn_stream_fragmentation_padding_and_bounds);
     RUN_TEST(turn_channel_bind_request);
     RUN_TEST(turn_channel_data_frame);

@@ -117,6 +117,8 @@ rtc_err_t rtc_turn_allocate(rtc_turn_client_t *tc) {
     if (rc != RTC_OK)
         return rc;
     rtc_stun_add_requested_transport(&req, 17); /* UDP */
+    if (tc->cfg.relay_family == AF_INET6)
+        rtc_stun_add_requested_address_family(&req, AF_INET6);
     rtc_stun_finalize(&req, NULL);
 
     rc = turn_transaction(tc, &req, &resp);
@@ -146,6 +148,8 @@ rtc_err_t rtc_turn_allocate(rtc_turn_client_t *tc) {
             /* Retry with credentials */
             build_authenticated_request(tc, &req, STUN_METHOD_ALLOCATE);
             rtc_stun_add_requested_transport(&req, 17);
+            if (tc->cfg.relay_family == AF_INET6)
+                rtc_stun_add_requested_address_family(&req, AF_INET6);
             /* lt_key is 16 raw bytes — finalize_with_key uses the byte-length variant. */
             finalize_with_key(tc, &req);
 
@@ -169,6 +173,8 @@ rtc_err_t rtc_turn_allocate(rtc_turn_client_t *tc) {
         RTC_LOG_ERR("TURN: no relayed address in response");
         return rc;
     }
+    if (tc->relay_addr.addr.ss_family != (tc->cfg.relay_family == AF_INET6 ? AF_INET6 : AF_INET))
+        return RTC_ERR_INVALID;
 
     rtc_stun_get_lifetime(&resp, &tc->lifetime);
     tc->allocated = true;

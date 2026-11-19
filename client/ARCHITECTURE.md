@@ -227,15 +227,31 @@ sender's wire output without stopping audio or signaling.
 application exchanges the new ICE credentials through another offer/answer
 cycle; a successful restart preserves the SCTP association and RTP streams.
 
-The client supports one authenticated UDP/TCP `turn:` or TLS `turns:` URL,
+The client supports up to four authenticated UDP/TCP `turn:` or TLS `turns:` URLs,
 including relay-only gathering and asynchronous candidate/end-of-candidates
 callbacks. TLS uses verified server identity and the default trust store or
-`rtc_config_t.turn_tls_ca_file`. Multiple TURN URLs remain rejected.
-Hostname URLs automatically use up to four resolved addresses before
-allocation, with a five-second budget per alternative. DNS stays on the
-configuring caller. Each retry verifies the same TLS identity and never enables
-a direct path on exhaustion. Once allocated, the relay address is pinned;
-in-call allocation migration is not implemented.
+`rtc_config_t.turn_tls_ca_file`, overridden per identity by
+`rtc_ice_server_t.tls_ca_file`. Each identity owns its credentials and trust.
+Hostname alternatives are interleaved by URL, then address/family, within four
+total attempts (not four attempts per URL), with five seconds per attempt.
+When available, successive attempts prefer different server address families.
+DNS stays on the configuring caller before connection deadlines begin.
+Each retry verifies that endpoint's original name and never enables a direct
+path on exhaustion. Once allocated, the relay address is pinned. An explicit
+ICE restart can replace a **failed** allocation and emits a fresh relay
+candidate tagged with the new ICE ufrag; DTLS/SRTP/SCTP remain intact.
+
+The default relay family remains IPv4, regardless of the connection family to
+the TURN server. Set `rtc_ice_server_t.relay_family = AF_INET6` to request an
+IPv6 UDP relay (RFC 6156), independently of UDP/TCP/TLS server addressing.
+Only same-family peer candidates are eligible for that allocation. Alternatives
+must request the same relay family; mixed relay-family lists fail creation.
+Relay permissions require a numeric peer candidate; an mDNS-only peer cannot
+bootstrap this relay-only path.
+Simultaneous dual-family allocation, NAT64 synthesis, and transparent migration
+of a healthy allocation are unsupported. Local coturn fixtures exercise IPv6
+loopback and both cross-family server/relay combinations; they do not establish
+external NAT/WAN, other-platform, browser, or long-soak qualification.
 
 ### Stats Reporting (`rtc_stats.h`, `rtc_peer.c`)
 
@@ -318,7 +334,8 @@ the scaffolding touches runtime internals.
   transport's `rtc_transport_get_stats()` and per-channel byte counters.
 - Established codec/payload-type changes are rejected; live track and
   direction changes are supported.
-- TURN supports one authenticated UDP/TCP/TLS URL with bounded pre-allocation
-  address retries, not multiple-server or live allocation failover.
+- TURN supports four total endpoint attempts across authenticated UDP/TCP/TLS
+  URLs, and failed-allocation recovery on explicit ICE restart, not transparent
+  migration or simultaneous dual-family allocation.
 - Multiple peer connections share one default runtime; per-peer worker
   isolation is not a public knob.

@@ -59,6 +59,31 @@ TEST(shared_runtime_has_room_for_eight_relay_sockets) {
     }
 }
 
+TEST(peer_turn_url_budget_and_relay_family) {
+    rtc_config_t config = {.ice_server_count = 2};
+    config.ice_servers[0] = (rtc_ice_server_t){.urls = {"turn:127.0.0.1:9", "turn:[::1]:9?"
+                                                                            "transport=tcp"},
+                                               .url_count = 2,
+                                               .username = "first",
+                                               .credential = "first-secret"};
+    config.ice_servers[1] = (rtc_ice_server_t){.urls = {"turn:127.0.0.2:9", "turns:localhost:9"},
+                                               .url_count = 2,
+                                               .username = "second",
+                                               .credential = "second-secret"};
+    rtc_peer_connection_t *peer = rtc_peer_connection_create(&config);
+    ASSERT(peer != NULL);
+    rtc_peer_connection_close(peer);
+    rtc_peer_connection_destroy(peer);
+    config.ice_servers[1].urls[2] = "turn:127.0.0.3:9";
+    config.ice_servers[1].url_count = 3;
+    ASSERT(rtc_peer_connection_create(&config) == NULL);
+    config.ice_servers[1].url_count = 2;
+    config.ice_servers[1].relay_family = AF_INET6;
+    ASSERT(rtc_peer_connection_create(&config) == NULL);
+    config.ice_servers[0].relay_family = -1;
+    ASSERT(rtc_peer_connection_create(&config) == NULL);
+}
+
 TEST(peer_rejects_duplicate_remote_sources_without_mutation) {
     rtc_peer_connection_t *offerer = rtc_peer_connection_create(NULL);
     rtc_peer_connection_t *answerer = rtc_peer_connection_create(NULL);
@@ -792,6 +817,7 @@ int main(void) {
 
     RUN_TEST(peer_create_destroy);
     RUN_TEST(shared_runtime_has_room_for_eight_relay_sockets);
+    RUN_TEST(peer_turn_url_budget_and_relay_family);
     RUN_TEST(peer_add_track);
     RUN_TEST(peer_rejects_duplicate_remote_sources_without_mutation);
     RUN_TEST(peer_create_offer);

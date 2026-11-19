@@ -136,6 +136,9 @@ typedef struct {
      * Ports must match port above. TLS still verifies host, never an alias. */
     const rtc_addr_t *addresses;
     size_t address_count;
+    /* Zero/AF_INET: IPv4 relay; AF_INET6: IPv6 relay (RFC 6156).
+     * The relay family is independent of the server connection family. */
+    int relay_family;
 } rtc_turn_server_t;
 /* DNS resolution occurs on the calling thread, before worker configuration.
  * Without caller-resolved addresses, hostname configuration must be outside
@@ -144,6 +147,15 @@ typedef struct {
  * An established allocation is never moved to another address automatically.
  * TCP/TLS is the client-to-relay leg; the allocated relay is still UDP. */
 int rtc_transport_set_turn_server_ex(rtc_transport_t *transport, const rtc_turn_server_t *server);
+/* At most four identities and four total address attempts, interleaved by
+ * identity then address/family (preferring a different family when available),
+ * each with a five-second allocation budget.
+ * All alternatives must request the same relay family. No simultaneous
+ * dual-family allocation, NAT64 synthesis or cross-family peer permission.
+ * Configuration is owned until close. Only an explicit ICE restart may
+ * replace a failed allocation; a healthy allocation remains pinned. */
+int rtc_transport_set_turn_servers(rtc_transport_t *transport, const rtc_turn_server_t *servers,
+                                   size_t count);
 int rtc_transport_get_relay_candidate(rtc_transport_t *transport,
                                       rtc_transport_candidate_t *candidate);
 typedef void (*rtc_transport_task_fn)(void *user);

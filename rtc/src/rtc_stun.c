@@ -257,25 +257,31 @@ int rtc_stun_build_binding_response(const uint8_t *req_buf, size_t req_len,
         return RTC_ERR_NOMEM;
 
     const struct sockaddr *sa = (const struct sockaddr *)&mapped_addr->addr;
-    if (sa->sa_family != AF_INET)
+    if (sa->sa_family != AF_INET && sa->sa_family != AF_INET6)
         return RTC_ERR_INVALID;
 
     size_t pos = STUN_HEADER_SIZE;
-    const struct sockaddr_in *sin = (const struct sockaddr_in *)&mapped_addr->addr;
-    uint16_t xport = ntohs(sin->sin_port) ^ (uint16_t)(STUN_MAGIC_COOKIE >> 16);
-    uint32_t xip = ntohl(sin->sin_addr.s_addr) ^ STUN_MAGIC_COOKIE;
+    uint8_t val[20] = {0};
+    uint16_t value_len;
+    if (sa->sa_family == AF_INET) {
+        const struct sockaddr_in *sin = (const struct sockaddr_in *)sa;
+        val[1] = 1;
+        write_u16(val + 2, ntohs(sin->sin_port) ^ (uint16_t)(STUN_MAGIC_COOKIE >> 16));
+        write_u32(val + 4, ntohl(sin->sin_addr.s_addr) ^ STUN_MAGIC_COOKIE);
+        value_len = 8;
+    } else {
+        const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)sa;
+        val[1] = 2;
+        write_u16(val + 2, ntohs(sin6->sin6_port) ^ (uint16_t)(STUN_MAGIC_COOKIE >> 16));
+        uint8_t key[16];
+        write_u32(key, STUN_MAGIC_COOKIE);
+        memcpy(key + 4, req_buf + 8, STUN_TXN_ID_SIZE);
+        for (size_t i = 0; i < sizeof(key); i++)
+            val[4 + i] = sin6->sin6_addr.s6_addr[i] ^ key[i];
+        value_len = 20;
+    }
 
-    uint8_t val[8];
-    val[0] = 0x00;
-    val[1] = 0x01;
-    val[2] = (uint8_t)(xport >> 8);
-    val[3] = (uint8_t)xport;
-    val[4] = (uint8_t)(xip >> 24);
-    val[5] = (uint8_t)(xip >> 16);
-    val[6] = (uint8_t)(xip >> 8);
-    val[7] = (uint8_t)xip;
-
-    int rc = append_attr(out, &pos, out_cap, STUN_ATTR_XOR_MAPPED_ADDRESS, val, sizeof(val));
+    int rc = append_attr(out, &pos, out_cap, STUN_ATTR_XOR_MAPPED_ADDRESS, val, value_len);
     if (rc != RTC_OK)
         return rc;
 
@@ -513,6 +519,16 @@ int rtc_stun_add_requested_transport(rtc_stun_msg_t *msg, uint8_t protocol) {
     return rc;
 }
 
+int rtc_stun_add_requested_address_family(rtc_stun_msg_t *msg, int family) {
+    if (family != AF_INET && family != AF_INET6)
+        return RTC_ERR_INVALID;
+    uint8_t value[4] = {family == AF_INET6 ? 2 : 1, 0, 0, 0};
+    int rc = msg_append_attr(msg, STUN_ATTR_REQUESTED_ADDRESS_FAMILY, value, sizeof(value));
+    if (rc == RTC_OK)
+        msg_update_header(msg);
+    return rc;
+}
+
 int rtc_stun_add_lifetime(rtc_stun_msg_t *msg, uint32_t seconds) {
     uint8_t val[4];
     write_u32(val, seconds);
@@ -535,6 +551,21 @@ int rtc_stun_add_xor_peer_address(rtc_stun_msg_t *msg, const rtc_addr_t *peer) {
         uint32_t ip = ntohl(sin->sin_addr.s_addr) ^ STUN_MAGIC_COOKIE;
         write_u32(val + 4, ip);
         int rc = msg_append_attr(msg, STUN_ATTR_XOR_PEER_ADDRESS, val, 8);
+        if (rc == RTC_OK)
+            msg_update_header(msg);
+        return rc;
+    }
+    if (sa->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)sa;
+        val[0] = 0;
+        val[1] = 0x02;
+        write_u16(val + 2, ntohs(sin6->sin6_port) ^ (uint16_t)(STUN_MAGIC_COOKIE >> 16));
+        uint8_t key[16];
+        write_u32(key, STUN_MAGIC_COOKIE);
+        memcpy(key + 4, msg->txn_id, STUN_TXN_ID_SIZE);
+        for (size_t i = 0; i < sizeof(key); i++)
+            val[4 + i] = sin6->sin6_addr.s6_addr[i] ^ key[i];
+        int rc = msg_append_attr(msg, STUN_ATTR_XOR_PEER_ADDRESS, val, sizeof(val));
         if (rc == RTC_OK)
             msg_update_header(msg);
         return rc;
@@ -654,6 +685,18 @@ int rtc_stun_get_relayed_address(const rtc_stun_msg_t *msg, rtc_addr_t *addr) {
         uint32_t ip = read_u32(val + 4) ^ STUN_MAGIC_COOKIE;
         sin->sin_addr.s_addr = htonl(ip);
         addr->len = sizeof(struct sockaddr_in);
+        return RTC_OK;
+    }
+    if (family == 0x02 && alen >= 20) {
+        struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&addr->addr;
+        sin6->sin6_family = AF_INET6;
+        sin6->sin6_port = htons(port);
+        uint8_t key[16];
+        write_u32(key, STUN_MAGIC_COOKIE);
+        memcpy(key + 4, msg->txn_id, STUN_TXN_ID_SIZE);
+        for (size_t i = 0; i < sizeof(key); i++)
+            sin6->sin6_addr.s6_addr[i] = val[4 + i] ^ key[i];
+        addr->len = sizeof(struct sockaddr_in6);
         return RTC_OK;
     }
     return RTC_ERR_INVALID;

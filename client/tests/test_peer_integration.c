@@ -1,6 +1,8 @@
 #include <rtc/rtc_client.h>
 #include <rtc/rtc_sdp.h>
 #include "test_harness.h"
+#include "rtc_peer_internal.h"
+#include <rtc/rtc_transport.h>
 #include <stdatomic.h>
 
 #ifdef _WIN32
@@ -11,11 +13,20 @@
 #  define SLEEP_MS(ms) usleep((ms) * 1000)
 #endif
 
+static const uint8_t opus_silence[] = {0xf8, 0xff, 0xfe};
+/* A 16x16 black keyframe, encoded and decode-checked with libvpx. */
+static const uint8_t vp8_black[] = {0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0x10, 0x00,
+                                    0x10, 0x00, 0x00, 0x47, 0x08, 0x85, 0x85, 0x88,
+                                    0x99, 0x84, 0x88, 0x02, 0x02, 0x00, 0x0c, 0x0d,
+                                    0x60, 0x00, 0xfe, 0xff, 0xab, 0x50, 0x80};
+
 typedef struct {
     rtc_peer_connection_t *peer;
     rtc_data_channel_t *remote_channel;
     _Atomic unsigned messages;
     _Atomic unsigned frames;
+    _Atomic unsigned opus_frames, vp8_frames;
+    _Atomic unsigned channels;
     uint8_t message[4096];
     size_t message_len;
     rtc_ice_candidate_desc_t candidates[16];
@@ -35,17 +46,20 @@ static void received_channel(rtc_data_channel_t *channel, void *user) {
     endpoint_t *endpoint = user;
     endpoint->remote_channel = channel;
     rtc_data_channel_on_message(channel, received_message, endpoint);
+    atomic_fetch_add(&endpoint->channels, 1);
 }
 
 static void received_frame(const uint8_t *data, size_t len, uint16_t seq, uint32_t timestamp,
                            uint32_t ssrc, bool marker, void *user) {
-    (void)data;
-    (void)len;
     (void)seq;
     (void)timestamp;
     (void)ssrc;
     (void)marker;
     endpoint_t *endpoint = user;
+    if (len == sizeof(opus_silence) && !memcmp(data, opus_silence, len))
+        atomic_fetch_add(&endpoint->opus_frames, 1);
+    if (len == sizeof(vp8_black) && !memcmp(data, vp8_black, len))
+        atomic_fetch_add(&endpoint->vp8_frames, 1);
     atomic_fetch_add(&endpoint->frames, 1);
 }
 
@@ -72,31 +86,40 @@ static bool exchange(rtc_peer_connection_t *offerer, rtc_peer_connection_t *answ
            rtc_peer_connection_set_remote_desc(offerer, &answer) == RTC_OK;
 }
 
-static bool exchange_relay(rtc_peer_connection_t *offerer, rtc_peer_connection_t *answerer) {
-    rtc_desc_t offer, answer;
-    if (rtc_peer_connection_create_offer(offerer, &offer) != RTC_OK ||
-        rtc_peer_connection_set_local_desc(offerer, &offer) != RTC_OK ||
-        rtc_peer_connection_set_remote_desc(answerer, &offer) != RTC_OK ||
-        rtc_peer_connection_create_answer(answerer, &answer) != RTC_OK)
-        return false;
+static bool loopback_description(rtc_desc_t *description) {
     rtc_sdp_t loopback = {0};
-    bool ok = rtc_sdp_parse(&loopback, answer.sdp, answer.sdp_len) == RTC_OK;
-    loopback.type = RTC_SDP_ANSWER;
+    bool ok = rtc_sdp_parse(&loopback, description->sdp, description->sdp_len) == RTC_OK;
+    loopback.type = description->type;
     for (size_t i = 0; ok && i < rtc_sdp_candidate_count(&loopback); i++) {
         rtc_ice_candidate_t *candidate = rtc_vec_at(&loopback.candidates, i);
         char ip[64];
         uint16_t port;
         ok = rtc_addr_to_string(&candidate->addr, ip, sizeof(ip), &port) == RTC_OK &&
-             rtc_addr_from_string(&candidate->addr, "127.0.0.1", port) == RTC_OK;
+             rtc_addr_from_string(&candidate->addr,
+                                  getenv("MRTC_TEST_TURN_RELAY") ? getenv("MRTC_TEST_TURN_RELAY")
+                                                                 : "127.0.0.1",
+                                  port) == RTC_OK;
     }
     if (ok)
         ok = rtc_sdp_generate(&loopback) == RTC_OK;
     if (ok) {
-        memcpy(answer.sdp, loopback.raw, loopback.raw_len + 1);
-        answer.sdp_len = loopback.raw_len;
+        memcpy(description->sdp, loopback.raw, loopback.raw_len + 1);
+        description->sdp_len = loopback.raw_len;
     }
     rtc_sdp_close(&loopback);
-    return ok && rtc_peer_connection_set_local_desc(answerer, &answer) == RTC_OK &&
+    return ok;
+}
+
+static bool exchange_relay(rtc_peer_connection_t *offerer, rtc_peer_connection_t *answerer) {
+    rtc_desc_t offer, answer;
+    if (rtc_peer_connection_create_offer(offerer, &offer) != RTC_OK ||
+        (!offerer->relay_only && !loopback_description(&offer)) ||
+        rtc_peer_connection_set_local_desc(offerer, &offer) != RTC_OK ||
+        rtc_peer_connection_set_remote_desc(answerer, &offer) != RTC_OK ||
+        rtc_peer_connection_create_answer(answerer, &answer) != RTC_OK ||
+        (!answerer->relay_only && !loopback_description(&answer)))
+        return false;
+    return rtc_peer_connection_set_local_desc(answerer, &answer) == RTC_OK &&
            rtc_peer_connection_set_remote_desc(offerer, &answer) == RTC_OK;
 }
 
@@ -267,16 +290,48 @@ TEST(peer_turn_relay_sctp_refresh_and_restart) {
     char url[128];
     const char *transport = getenv("MRTC_TEST_TURN_TRANSPORT");
     bool tls = transport && !strcmp(transport, "tls");
-    snprintf(url, sizeof(url), "%s:localhost:%s?transport=%s", tls ? "turns" : "turn", port,
+    const char *host = getenv("MRTC_TEST_TURN_HOST");
+    const char *relay_host = getenv("MRTC_TEST_TURN_RELAY");
+    bool ipv6 = relay_host && !strcmp(relay_host, "::1");
+    snprintf(url, sizeof(url), "%s:%s:%s?transport=%s", tls ? "turns" : "turn",
+             host && !strcmp(host, "::1") ? "[::1]" : "localhost", port,
              tls || (transport && !strcmp(transport, "tcp")) ? "tcp" : "udp");
     rtc_config_t ac = {.ice_server_count = 1};
     ac.turn_tls_ca_file = getenv("MRTC_TEST_TURN_CA");
-    ac.ice_servers[0] = (rtc_ice_server_t){
-        .urls = {url}, .url_count = 1, .username = "mrtc", .credential = "runtime"};
+    ac.ice_servers[0] = (rtc_ice_server_t){.urls = {url},
+                                           .url_count = 1,
+                                           .username = "mrtc",
+                                           .credential = "runtime",
+                                           .relay_family = ipv6 ? AF_INET6 : AF_INET};
+    char wrong_name_url[128];
+    if (getenv("MRTC_TEST_TURN_IDENTITIES")) {
+        snprintf(wrong_name_url, sizeof(wrong_name_url), "%s:127.0.0.1:%s?transport=tcp",
+                 tls ? "turns" : "turn", port);
+        ac.ice_server_count = 4;
+        ac.turn_tls_ca_file = NULL;
+        for (int i = 0; i < 4; i++) {
+            ac.ice_servers[i] = ac.ice_servers[0];
+            ac.ice_servers[i].tls_ca_file = getenv("MRTC_TEST_TURN_CA");
+        }
+        ac.ice_servers[0].urls[0] = wrong_name_url;
+        ac.ice_servers[0].username = "wrong-user";
+        ac.ice_servers[0].credential = "wrong-password";
+        ac.ice_servers[1].credential = "wrong-password";
+        ac.ice_servers[2].tls_ca_file = NULL;
+        if (!tls)
+            ac.ice_servers[2].username = "wrong-user";
+    }
     rtc_config_t bc = {.stun_server = "127.0.0.1", .stun_port = 9};
     endpoint_t a = {.peer = rtc_peer_connection_create(&ac)};
     endpoint_t b = {.peer = rtc_peer_connection_create(&bc)};
     ASSERT(a.peer && b.peer);
+    rtc_peer_connection_on_track(b.peer, received_track, &b);
+    rtc_codec_t opus = {
+        .payload_type = 111, .mime_type = "audio/opus", .clock_rate = 48000, .channels = 2};
+    rtc_codec_t vp8 = {.payload_type = 96, .mime_type = "video/VP8", .clock_rate = 90000};
+    rtc_rtp_sender_t *audio_sender = rtc_peer_connection_add_track(a.peer, RTC_KIND_AUDIO, &opus);
+    rtc_rtp_sender_t *video_sender = rtc_peer_connection_add_track(a.peer, RTC_KIND_VIDEO, &vp8);
+    ASSERT(audio_sender && video_sender);
     rtc_peer_connection_on_data_channel(b.peer, received_channel, &b);
     rtc_peer_connection_on_ice_candidate(a.peer, gathered_candidate, &a);
     rtc_data_channel_t *channel = rtc_peer_connection_create_data_channel(a.peer, "relay", NULL);
@@ -293,16 +348,74 @@ TEST(peer_turn_relay_sctp_refresh_and_restart) {
         ASSERT_EQ(rtc_peer_connection_add_ice_candidate(b.peer, &a.candidates[i]), RTC_OK);
     }
     ASSERT(wait_connected(&a, &b, channel));
+    ASSERT_EQ(rtc_rtp_sender_send(audio_sender, opus_silence, sizeof(opus_silence), 960, true),
+              RTC_OK);
+    ASSERT_EQ(rtc_rtp_sender_send(video_sender, vp8_black, sizeof(vp8_black), 3000, true), RTC_OK);
+    ASSERT(wait_count(&b.frames, 2, 3000));
+    ASSERT_EQ(atomic_load(&b.opus_frames), 1);
+    ASSERT_EQ(atomic_load(&b.vp8_frames), 1);
     ASSERT_EQ(rtc_data_channel_send_text(channel, "authenticated relay"), RTC_OK);
     ASSERT(wait_count(&b.messages, 1, 3000));
     SLEEP_MS(3300);
     ASSERT_EQ(rtc_data_channel_send_text(channel, "after allocation refresh"), RTC_OK);
     ASSERT(wait_count(&b.messages, 2, 3000));
-    ASSERT_EQ(rtc_peer_connection_restart_ice(a.peer), RTC_OK);
-    ASSERT(exchange_relay(a.peer, b.peer));
+    rtc_transport_candidate_t published, recovered;
+    ASSERT_EQ(rtc_transport_get_relay_candidate(a.peer->runtime_transport, &published), RTC_OK);
+    const char *restart = getenv("MRTC_TEST_TURN_RESTART");
+    if (restart) {
+        FILE *request = fopen(restart, "w");
+        ASSERT(request != NULL);
+        ASSERT_EQ(fclose(request), 0);
+        uint64_t end = rtc_time_ms() + 10000;
+        bool failed = false, ready = false;
+        do {
+            FILE *ack = fopen(getenv("MRTC_TEST_TURN_READY"), "r");
+            if (ack) {
+                fclose(ack);
+                ready = true;
+            }
+            rtc_transport_stats_t stats;
+            ASSERT_EQ(rtc_transport_get_stats(a.peer->runtime_transport, &stats), RTC_OK);
+            failed = stats.turn_failed;
+            if (failed && ready)
+                break;
+            SLEEP_MS(10);
+        } while (rtc_time_ms() < end);
+        ASSERT(failed && ready);
+    }
+    rtc_ice_parameters_t before, after;
+    ASSERT_EQ(rtc_transport_get_ice_parameters(a.peer->runtime_transport, &before), RTC_OK);
+    atomic_store(&a.candidate_count, 0);
+    bool remote_restart = getenv("MRTC_TEST_TURN_REMOTE_RESTART") != NULL;
+    ASSERT_EQ(rtc_peer_connection_restart_ice(remote_restart ? b.peer : a.peer), RTC_OK);
+    ASSERT(remote_restart ? exchange_relay(b.peer, a.peer) : exchange_relay(a.peer, b.peer));
+    ASSERT_EQ(rtc_transport_get_ice_parameters(a.peer->runtime_transport, &after), RTC_OK);
+    ASSERT(strcmp(before.username_fragment, after.username_fragment) != 0);
+    deadline = rtc_time_ms() + 10000;
+    while (rtc_time_ms() < deadline &&
+           rtc_peer_connection_ice_gathering_state(a.peer) != RTC_ICE_GATHERING_COMPLETE)
+        SLEEP_MS(10);
+    ASSERT_EQ(rtc_peer_connection_ice_gathering_state(a.peer), RTC_ICE_GATHERING_COMPLETE);
+    ASSERT(atomic_load(&a.candidate_count) > 0);
+    for (unsigned i = 0; i < atomic_load(&a.candidate_count); i++) {
+        ASSERT(strstr(a.candidates[i].candidate, after.username_fragment) != NULL);
+        ASSERT_EQ(rtc_peer_connection_add_ice_candidate(b.peer, &a.candidates[i]), RTC_OK);
+    }
     ASSERT(wait_connected(&a, &b, channel));
+    ASSERT_EQ(rtc_transport_get_relay_candidate(a.peer->runtime_transport, &recovered), RTC_OK);
+    if (!restart) {
+        ASSERT_EQ(strcmp(published.address, recovered.address), 0);
+        ASSERT_EQ(published.port, recovered.port);
+    }
     ASSERT_EQ(rtc_data_channel_send_text(channel, "same SCTP association"), RTC_OK);
     ASSERT(wait_count(&b.messages, 3, 3000));
+    ASSERT_EQ(rtc_rtp_sender_send(audio_sender, opus_silence, sizeof(opus_silence), 1920, true),
+              RTC_OK);
+    ASSERT_EQ(rtc_rtp_sender_send(video_sender, vp8_black, sizeof(vp8_black), 6000, true), RTC_OK);
+    ASSERT(wait_count(&b.frames, 4, 3000));
+    ASSERT_EQ(atomic_load(&b.opus_frames), 2);
+    ASSERT_EQ(atomic_load(&b.vp8_frames), 2);
+    ASSERT_EQ(atomic_load(&b.channels), 1);
     rtc_peer_connection_close(a.peer);
     rtc_peer_connection_close(b.peer);
     rtc_peer_connection_destroy(a.peer);

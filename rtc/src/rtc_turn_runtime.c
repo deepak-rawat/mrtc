@@ -156,12 +156,17 @@ static int turn_build(rtc_turn_runtime_t *turn, uint16_t method, uint32_t lifeti
             rtc_stun_add_realm(r, c->realm) != RTC_OK || rtc_stun_add_nonce(r, c->nonce) != RTC_OK)
             return RTC_ERR_INVALID;
     }
-    if (method == STUN_METHOD_ALLOCATE)
-        rtc_stun_add_requested_transport(r, 17);
+    if (method == STUN_METHOD_ALLOCATE) {
+        if (rtc_stun_add_requested_transport(r, 17) != RTC_OK ||
+            (c->cfg.relay_family == AF_INET6 &&
+             rtc_stun_add_requested_address_family(r, AF_INET6) != RTC_OK))
+            return RTC_ERR_INVALID;
+    }
     if (method == STUN_METHOD_REFRESH)
         rtc_stun_add_lifetime(r, lifetime);
-    if (method == STUN_METHOD_CREATE_PERM || method == STUN_METHOD_CHANNEL_BIND)
-        rtc_stun_add_xor_peer_address(r, &turn->peer);
+    if ((method == STUN_METHOD_CREATE_PERM || method == STUN_METHOD_CHANNEL_BIND) &&
+        rtc_stun_add_xor_peer_address(r, &turn->peer) != RTC_OK)
+        return RTC_ERR_INVALID;
     if (method == STUN_METHOD_CHANNEL_BIND)
         rtc_stun_add_channel_number(r, TURN_CHANNEL_MIN);
     rc = rtc_stun_finalize_key(r, c->has_credentials ? c->lt_key : NULL,
@@ -286,6 +291,11 @@ static void turn_receive(rtc_pkt_type_t type, const uint8_t *data, size_t len,
             return;
         }
         c->allocated = true;
+        if (c->relay_addr.addr.ss_family !=
+            (c->cfg.relay_family == AF_INET6 ? AF_INET6 : AF_INET)) {
+            turn_fail(turn, "server returned the wrong relay address family");
+            return;
+        }
         atomic_store(&turn->allocation_expires_ms, rtc_time_ms() + (uint64_t)c->lifetime * 1000);
         uint64_t refresh = (uint64_t)c->lifetime * 500;
         if (refresh > 120000)
@@ -600,7 +610,8 @@ rtc_turn_runtime_t *rtc_turn_runtime_create(rtc_worker_t *worker, const rtc_turn
                                .credential = turn->credential,
                                .protocol = cfg->protocol,
                                .ca_file = cfg->ca_file,
-                               .resolved_address = cfg->resolved_address};
+                               .resolved_address = cfg->resolved_address,
+                               .relay_family = cfg->relay_family};
     if (rtc_mutex_init(&turn->mutex) != RTC_OK) {
         free(turn);
         return NULL;
@@ -656,6 +667,8 @@ int rtc_turn_runtime_candidate(rtc_turn_runtime_t *turn, rtc_addr_t *relay) {
 
 int rtc_turn_runtime_set_peer(rtc_turn_runtime_t *turn, const rtc_addr_t *peer) {
     if (!turn || !peer || turn->failed)
+        return RTC_ERR_INVALID;
+    if (peer->addr.ss_family != (turn->client.cfg.relay_family == AF_INET6 ? AF_INET6 : AF_INET))
         return RTC_ERR_INVALID;
     if (turn->peer_set && turn_same_addr(peer, &turn->peer))
         return RTC_OK;

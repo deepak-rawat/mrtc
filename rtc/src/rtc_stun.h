@@ -43,14 +43,15 @@
 #define STUN_CHANNEL_BIND_RESPONSE   0x0109
 
 /* TURN attribute types */
-#define STUN_ATTR_CHANNEL_NUMBER      0x000C
-#define STUN_ATTR_LIFETIME            0x000D
-#define STUN_ATTR_XOR_PEER_ADDRESS    0x0012
-#define STUN_ATTR_DATA                0x0013
-#define STUN_ATTR_REALM               0x0014
-#define STUN_ATTR_NONCE               0x0015
-#define STUN_ATTR_XOR_RELAYED_ADDR    0x0016
-#define STUN_ATTR_REQUESTED_TRANSPORT 0x0019
+#define STUN_ATTR_CHANNEL_NUMBER           0x000C
+#define STUN_ATTR_LIFETIME                 0x000D
+#define STUN_ATTR_XOR_PEER_ADDRESS         0x0012
+#define STUN_ATTR_DATA                     0x0013
+#define STUN_ATTR_REALM                    0x0014
+#define STUN_ATTR_NONCE                    0x0015
+#define STUN_ATTR_XOR_RELAYED_ADDR         0x0016
+#define STUN_ATTR_REQUESTED_TRANSPORT      0x0019
+#define STUN_ATTR_REQUESTED_ADDRESS_FAMILY 0x0017
 
 #define STUN_MAGIC_COOKIE 0x2112A442
 #define STUN_HEADER_SIZE  20
@@ -116,6 +117,7 @@ int rtc_stun_build_request(rtc_stun_msg_t *msg, uint16_t method, const char *use
 
 /* Add REQUESTED-TRANSPORT attribute (for Allocate: 17 = UDP) */
 int rtc_stun_add_requested_transport(rtc_stun_msg_t *msg, uint8_t protocol);
+int rtc_stun_add_requested_address_family(rtc_stun_msg_t *msg, int family);
 
 /* Add LIFETIME attribute (seconds) */
 int rtc_stun_add_lifetime(rtc_stun_msg_t *msg, uint32_t seconds);

@@ -813,6 +813,8 @@ int rtc_listener_candidate_to_ice(const rtc_transport_candidate_t *candidate, in
     out->component = 1;
     out->priority = rtc_ice_candidate_priority(out->type, local_pref, out->component);
     copy_string(out->foundation, sizeof(out->foundation), candidate->foundation);
+    copy_string(out->username_fragment, sizeof(out->username_fragment),
+                candidate->username_fragment);
     int rc = rtc_addr_from_string(&out->addr, candidate->address, candidate->port);
     if (rc != RTC_OK)
         return rc;

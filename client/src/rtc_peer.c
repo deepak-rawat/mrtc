@@ -150,7 +150,9 @@ static int peer_runtime_init(rtc_peer_connection_t *pc, const rtc_config_t *conf
         return RTC_ERR_GENERIC;
     }
     if (config) {
-        bool configured_turn = false;
+        rtc_turn_server_t relays[RTC_TURN_MAX_ADDRESSES] = {0};
+        char hosts[RTC_TURN_MAX_ADDRESSES][256];
+        size_t relay_count = 0;
         if (config->ice_server_count < 0 || config->ice_server_count > 4)
             goto invalid_config;
         for (int i = 0; i < config->ice_server_count; i++) {
@@ -164,14 +166,15 @@ static int peer_runtime_init(rtc_peer_connection_t *pc, const rtc_config_t *conf
                 if (strncmp(url, "stun:", 5) == 0)
                     continue;
                 bool tls = strncmp(url, "turns:", 6) == 0;
-                if ((!tls && strncmp(url, "turn:", 5) != 0) || configured_turn ||
-                    !server->username || !server->credential)
+                if ((!tls && strncmp(url, "turn:", 5) != 0) ||
+                    relay_count == RTC_TURN_MAX_ADDRESSES || !server->username ||
+                    !server->credential)
                     goto invalid_config;
-                char host[256];
+                char *host = hosts[relay_count];
                 const char *authority = url + (tls ? 6 : 5);
-                if (strlen(authority) >= sizeof(host))
+                if (strlen(authority) >= sizeof(hosts[0]))
                     goto invalid_config;
-                copy_string(host, sizeof(host), authority);
+                copy_string(host, sizeof(hosts[0]), authority);
                 rtc_turn_protocol_t protocol = tls ? RTC_TURN_TLS : RTC_TURN_UDP;
                 char *query = strchr(host, '?');
                 if (query) {
@@ -210,13 +213,21 @@ static int peer_runtime_init(rtc_peer_connection_t *pc, const rtc_config_t *conf
                                            .username = server->username,
                                            .credential = server->credential,
                                            .protocol = protocol,
-                                           .ca_file = tls ? config->turn_tls_ca_file : NULL};
-                if (!name[0] ||
-                    rtc_transport_set_turn_server_ex(pc->runtime_transport, &relay) != RTC_OK)
+                                           .ca_file = tls ? (server->tls_ca_file
+                                                                 ? server->tls_ca_file
+                                                                 : config->turn_tls_ca_file)
+                                                          : NULL,
+                                           .relay_family = server->relay_family};
+                if (!name[0])
                     goto invalid_config;
-                configured_turn = true;
-                pc->relay_only = true;
+                relays[relay_count++] = relay;
             }
+        }
+        if (relay_count) {
+            if (rtc_transport_set_turn_servers(pc->runtime_transport, relays, relay_count) !=
+                RTC_OK)
+                goto invalid_config;
+            pc->relay_only = true;
         }
     }
     rtc_transport_on_data(pc->runtime_transport, peer_runtime_on_data, pc);
@@ -1203,8 +1214,11 @@ static int peer_set_remote_desc(rtc_peer_connection_t *pc, const rtc_desc_t *des
     rtc_sdp_close(&pc->remote_sdp);
     pc->remote_sdp = sdp;
 
-    if (restart)
+    if (restart) {
         pc->ice_restart_pending = true;
+        if (pc->relay_only)
+            pc->relay_candidate_emitted = false;
+    }
     for (int i = 0; i < sdp.media_count; i++) {
         const rtc_sdp_media_t *m = &sdp.media[i];
         if (m->mid_index >= pc->next_mid)
@@ -1366,8 +1380,11 @@ static int peer_restart_ice(rtc_peer_connection_t *pc) {
     if (!pc->runtime_transport)
         return RTC_ERR_INVALID;
     int rc = rtc_transport_restart_ice(pc->runtime_transport);
-    if (rc == RTC_OK)
+    if (rc == RTC_OK) {
         pc->ice_restart_pending = true;
+        if (pc->relay_only)
+            pc->relay_candidate_emitted = false;
+    }
     return rc;
 }
 

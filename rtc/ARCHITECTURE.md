@@ -237,15 +237,27 @@ requires numeric UDP inputs; browser connections use the active runtime path.
 - Hostname resolution occurs on the configuring caller, never the media
   worker. Up to four unique results are retained, placing an alternate address
   family second. Core callers may supply a copied numeric list instead.
-- Before allocation, alternatives are tried sequentially with a five-second
-  per-address budget and 100 ms worker checks. The host, credentials and CA path
-  are owned across retries; TLS verifies the original identity on every attempt.
+- `rtc_transport_set_turn_servers()` accepts four endpoint identities with
+  independent host, credentials, protocol and CA trust. Before allocation,
+  alternatives are interleaved by identity then address/family within four
+  total attempts, each with a five-second budget and 100 ms worker checks.
+  Successive attempts prefer a different server address family when available.
+  Configuration remains owned until close, including across ICE restarts;
+  TLS verifies each endpoint's original identity on every attempt.
   Failed I/O is removed before replacement, without increasing registered I/O
   slots per logical transport. Pending retry timers are cancelled on close.
 - Exhaustion retains a failed relay runtime rather than enabling a direct path.
   Stats expose attempted-address count and terminal failure. The first
-  allocation pins the address; multiple-server selection, post-allocation
-  migration and RFC 8489 authentication v2 remain separate work.
+  allocation pins the address. Only an explicit local or remote ICE restart
+  replaces a failed allocation, without rebuilding DTLS/SRTP/SCTP state.
+  Its relay candidate carries the new generation's ufrag.
+- RFC 6156 REQUESTED-ADDRESS-FAMILY supports IPv6 relay allocation independently
+  of the client-to-server address family. Zero/AF_INET preserves IPv4 defaults;
+  AF_INET6 requests IPv6. Incompatible peer candidates are ineligible, not sent
+  to the wrong permission family. All alternative endpoints must request the
+  same relay family (mixed lists return RTC_ERR_INVALID). Simultaneous
+  dual-family allocation, NAT64 synthesis, healthy-allocation migration and
+  RFC 8489 authentication v2 are not implemented.
 
 ### DTLS (`rtc_dtls.h/c`)
 
@@ -554,9 +566,11 @@ callback. Core RTP callback teardown is covered by the network-runtime tests.
 
 ## Known Limitations
 
-- TURN supports bounded pre-allocation address failover for one identity over
-  UDP/TCP/verified TLS. Multiple-server failover, live allocation migration and
-  authentication v2 are not implemented.
+- TURN supports four total endpoint attempts over UDP/TCP/verified TLS and
+  failed-allocation recovery on explicit ICE restart. Transparent migration,
+  simultaneous dual-family allocation and authentication v2 are not implemented.
+  IPv6 and cross-family server/relay tests use local coturn loopback, not
+  external NAT/WAN or cross-platform qualification.
 - Reports and feedback are compound SR/RR + SDES, with feedback capability
   intersection in SDP. Reports use bounded live membership, sender expiry and
   timer/reverse reconsideration for the supported unicast profile.

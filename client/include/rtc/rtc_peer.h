@@ -39,12 +39,14 @@ typedef struct {
     int url_count;
     const char *username;
     const char *credential;
+    const char *tls_ca_file; /* NULL: use configuration default */
+    int relay_family;        /* zero/AF_INET: IPv4; AF_INET6: IPv6 */
 } rtc_ice_server_t;
 
 typedef struct {
-    /* STUN and one authenticated turn:/turns: URL are supported.
+    /* STUN and up to four authenticated turn:/turns: URLs are supported.
      * Configuring TURN enforces relay-only routing; unsupported URLs,
-     * transports and multiple TURN URLs fail creation explicitly. */
+     * transports and more than four TURN URLs fail creation explicitly. */
     rtc_ice_server_t ice_servers[4];
     int ice_server_count;
     const char *stun_server;

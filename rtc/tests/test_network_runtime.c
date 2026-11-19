@@ -439,14 +439,22 @@ TEST(runtime_relay_only_coturn) {
         ASSERT(strlen(ca) < sizeof(ca_file));
         strcpy(ca_file, ca);
     }
-    rtc_turn_server_t server = {.host = "127.0.0.1",
+    const char *host = getenv("MRTC_TEST_TURN_HOST");
+    if (!host)
+        host = "127.0.0.1";
+    const char *relay_host = getenv("MRTC_TEST_TURN_RELAY");
+    bool ipv6 = relay_host && !strcmp(relay_host, "::1");
+    bool identities = getenv("MRTC_TEST_TURN_IDENTITIES") != NULL;
+    bool family_fair = getenv("MRTC_TEST_TURN_FAMILY_FAIR") != NULL;
+    rtc_turn_server_t server = {.host = host,
                                 .port = port,
                                 .username = username_text,
                                 .credential = credential_text,
                                 .protocol = protocol && !strcmp(protocol, "tls")   ? RTC_TURN_TLS
                                             : protocol && !strcmp(protocol, "tcp") ? RTC_TURN_TCP
                                                                                    : RTC_TURN_UDP,
-                                .ca_file = ca ? ca_file : NULL};
+                                .ca_file = ca ? ca_file : NULL,
+                                .relay_family = ipv6 ? AF_INET6 : AF_INET};
     bool failover = getenv("MRTC_TEST_TURN_FAILOVER") != NULL;
     bool exhausted = getenv("MRTC_TEST_TURN_EXHAUST") != NULL;
     bool stall = getenv("MRTC_TEST_TURN_STALL") != NULL;
@@ -485,8 +493,40 @@ TEST(runtime_relay_only_coturn) {
         ASSERT_EQ(listen(stalled, 4), 0);
     }
     uint64_t allocation_started = rtc_time_ms();
-    ASSERT_EQ(rtc_transport_set_turn_server_ex(a.transport, &server), RTC_OK);
-    ASSERT_EQ(rtc_transport_set_turn_server_ex(b.transport, &server), RTC_OK);
+    if (identities) {
+        rtc_addr_t resolved[2];
+        ASSERT_EQ(rtc_addr_from_string(&resolved[0], family_fair ? "::1" : host, port), RTC_OK);
+        ASSERT_EQ(rtc_addr_from_string(&resolved[1], host, port), RTC_OK);
+        rtc_turn_server_t alternatives[4] = {server, server, server, server};
+        for (unsigned i = 0; i < 4; i++) {
+            alternatives[i].addresses = resolved;
+            alternatives[i].address_count = family_fair ? 2 : 1;
+        }
+        alternatives[0].host = "wrong.example";
+        alternatives[0].username = "wrong-user";
+        alternatives[0].credential = "wrong-password";
+        alternatives[1].host = "localhost";
+        alternatives[1].credential = "wrong-password";
+        alternatives[2].host = "localhost";
+        alternatives[2].ca_file = NULL;
+        alternatives[3].host = "localhost";
+        if (server.protocol == RTC_TURN_UDP) {
+            if (!family_fair)
+                alternatives[0].protocol = RTC_TURN_TCP;
+            alternatives[2].username = "wrong-user";
+            alternatives[2].credential = "wrong-password";
+        }
+        if (family_fair)
+            alternatives[1].credential = credential_text;
+        size_t count = family_fair ? 2 : 4;
+        ASSERT_EQ(rtc_transport_set_turn_servers(a.transport, alternatives, count), RTC_OK);
+        ASSERT_EQ(rtc_transport_set_turn_servers(b.transport, alternatives, count), RTC_OK);
+        memset(alternatives, 0, sizeof(alternatives));
+        memset(&resolved, 0, sizeof(resolved));
+    } else {
+        ASSERT_EQ(rtc_transport_set_turn_server_ex(a.transport, &server), RTC_OK);
+        ASSERT_EQ(rtc_transport_set_turn_server_ex(b.transport, &server), RTC_OK);
+    }
     if (stall) {
         rtc_transport_destroy(b.transport);
         b.transport = rtc_transport_create(
@@ -577,9 +617,10 @@ TEST(runtime_relay_only_coturn) {
     if (dns)
         ASSERT(attempts >= 1 && attempts <= RTC_TURN_MAX_ADDRESSES);
     else
-        ASSERT_EQ(attempts, failover ? server.address_count : 1);
+        ASSERT_EQ(attempts, family_fair ? 2 : identities ? 4 : failover ? server.address_count : 1);
     ASSERT(!state.turn_failed);
     ASSERT(ac.port != bc.port);
+    ASSERT_EQ(strchr(ac.address, ':') != NULL, ipv6);
     ASSERT(exchange_ice(&a, &b, true));
     ASSERT(exchange_dtls(&a, &b, false));
     ASSERT_EQ(rtc_transport_start_ice(a.transport), RTC_OK);
@@ -610,15 +651,78 @@ TEST(runtime_relay_only_coturn) {
     ASSERT_EQ(atomic_load(&b.data_count), 2);
     ASSERT_EQ(rtc_transport_get_stats(a.transport, &state), RTC_OK);
     ASSERT_EQ(state.turn_address_attempts, attempts);
+    const char *restart = getenv("MRTC_TEST_TURN_RESTART");
+    if (restart) {
+        rtc_ice_parameters_t before, after;
+        ASSERT_EQ(rtc_transport_get_ice_parameters(a.transport, &before), RTC_OK);
+        FILE *request = fopen(restart, "w");
+        ASSERT(request != NULL);
+        ASSERT_EQ(fclose(request), 0);
+        deadline = rtc_time_ms() + 10000;
+        bool ready = false;
+        do {
+            FILE *ack = fopen(getenv("MRTC_TEST_TURN_READY"), "r");
+            if (ack) {
+                fclose(ack);
+                ready = true;
+            }
+            rtc_transport_stats_t bs;
+            ASSERT_EQ(rtc_transport_get_stats(a.transport, &state), RTC_OK);
+            ASSERT_EQ(rtc_transport_get_stats(b.transport, &bs), RTC_OK);
+            if (ready && state.turn_failed && bs.turn_failed)
+                break;
+            SLEEP_MS(10);
+        } while (rtc_time_ms() < deadline);
+        ASSERT(ready && state.turn_failed);
+        ASSERT(rtc_transport_get_relay_candidate(a.transport, &ac) != RTC_OK);
+        ASSERT_EQ(rtc_transport_restart_ice(b.transport), RTC_OK);
+        if (getenv("MRTC_TEST_TURN_REMOTE_RESTART")) {
+            rtc_ice_parameters_t bi;
+            ASSERT_EQ(rtc_transport_get_ice_parameters(b.transport, &bi), RTC_OK);
+            ASSERT_EQ(rtc_transport_set_remote_ice_parameters(a.transport, &bi), RTC_OK);
+        } else {
+            ASSERT_EQ(rtc_transport_restart_ice(a.transport), RTC_OK);
+        }
+        ASSERT_EQ(rtc_transport_get_ice_parameters(a.transport, &after), RTC_OK);
+        ASSERT(strcmp(before.username_fragment, after.username_fragment) != 0);
+        deadline = rtc_time_ms() + 5000;
+        do {
+            if (rtc_transport_get_relay_candidate(a.transport, &ac) == RTC_OK &&
+                rtc_transport_get_relay_candidate(b.transport, &bc) == RTC_OK)
+                break;
+            SLEEP_MS(10);
+        } while (rtc_time_ms() < deadline);
+        ASSERT_EQ(rtc_transport_get_relay_candidate(a.transport, &ac), RTC_OK);
+        ASSERT_EQ(strcmp(ac.username_fragment, after.username_fragment), 0);
+        ASSERT(exchange_ice(&a, &b, true));
+        ASSERT_EQ(rtc_transport_start_ice(a.transport), RTC_OK);
+        ASSERT_EQ(rtc_transport_start_ice(b.transport), RTC_OK);
+        ASSERT(wait_selected(&a, &b));
+        ASSERT(wait_dtls(&a, RTC_TRANSPORT_DTLS_CONNECTED));
+        ASSERT(wait_dtls(&b, RTC_TRANSPORT_DTLS_CONNECTED));
+        ASSERT_EQ(rtc_rtp_build(&media, 96, 12346, 93000, 0x1234, true, (const uint8_t *)"rtp!", 4),
+                  RTC_OK);
+        wire_len = media.buf_len;
+        ASSERT_EQ(rtc_transport_send_rtp(a.transport, media.buf, &wire_len, sizeof(media.buf)),
+                  RTC_OK);
+        ASSERT_EQ(rtc_transport_send_data(a.transport, (const uint8_t *)"test", 4), RTC_OK);
+        deadline = rtc_time_ms() + 3000;
+        while ((atomic_load(&b.data_count) < 3 || atomic_load(&b.rtp_count) < 2) &&
+               rtc_time_ms() < deadline)
+            SLEEP_MS(10);
+        ASSERT_EQ(atomic_load(&b.data_count), 3);
+        ASSERT_EQ(atomic_load(&b.rtp_count), 2);
+    }
+    unsigned before_destroy = atomic_load(&b.rtp_count);
     rtc_transport_on_rtp(b.transport, destroy_transport_on_rtp, &b);
-    ASSERT_EQ(rtc_rtp_build(&media, 96, 12346, 93000, 0x1234, true, (const uint8_t *)"rtp!", 4),
+    ASSERT_EQ(rtc_rtp_build(&media, 96, 12347, 96000, 0x1234, true, (const uint8_t *)"rtp!", 4),
               RTC_OK);
     wire_len = media.buf_len;
     ASSERT_EQ(rtc_transport_send_rtp(a.transport, media.buf, &wire_len, sizeof(media.buf)), RTC_OK);
     deadline = rtc_time_ms() + 1000;
-    while (atomic_load(&b.rtp_count) < 2 && rtc_time_ms() < deadline)
+    while (atomic_load(&b.rtp_count) < before_destroy + 1 && rtc_time_ms() < deadline)
         SLEEP_MS(1);
-    ASSERT_EQ(atomic_load(&b.rtp_count), 2);
+    ASSERT_EQ(atomic_load(&b.rtp_count), before_destroy + 1);
     endpoint_close(&b);
     endpoint_close(&a);
 }

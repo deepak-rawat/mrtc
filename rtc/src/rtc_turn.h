@@ -28,6 +28,7 @@ typedef struct {
     rtc_turn_protocol_t protocol;
     const char *ca_file;
     const rtc_addr_t *resolved_address;
+    int relay_family;
 } rtc_turn_config_t;
 
 typedef struct {

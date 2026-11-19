@@ -122,7 +122,9 @@ if(MRTC_BUILD_TESTS)
         foreach(mode IN ITEMS tcp tls tls-untrusted tls-wrong-name
                 udp-failover tcp-failover tls-failover tls-failover-untrusted
                 tls-failover-wrong-name udp-exhausted tcp-stall-failover tls-stall-failover
-                tls-dns udp-four-failover)
+                tls-dns udp-four-failover udp-identities tls-identities udp-family-identities
+                udp-ipv6 tcp-ipv6 tls-ipv6 udp-v4-v6 udp-v6-v4
+                udp-restart tcp-restart tls-restart udp-remote-restart)
             string(REPLACE "-" "_" test_mode "${mode}")
             add_test(NAME test_network_turn_${test_mode}
                 COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_turn_runtime.sh
