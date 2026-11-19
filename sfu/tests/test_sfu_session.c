@@ -7,6 +7,7 @@
 #include <stdatomic.h>
 #include <media/video_codec.h>
 #include "vp8_packetizer.h"
+#include "rtc_transport_internal.h"
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -732,6 +733,21 @@ TEST(paced_real_vp8_both_sfu_legs_bound_queue_age_and_recover) {
     }
     ASSERT(atomic_load(&subscriber.decoded_frames) >= 3);
     ASSERT_EQ(atomic_load(&subscriber.decode_errors), 0);
+    ASSERT_EQ(rtc_transport_get_stats(subscription->transport, &down), RTC_OK);
+    rtc_consumer_stats_t consumer_stats;
+    ASSERT_EQ(rtc_consumer_get_stats(subscription->consumers[0], &consumer_stats), RTC_OK);
+    ASSERT_EQ(consumer_stats.packets_sent, down.rtp_packets_sent);
+    ASSERT_EQ(consumer_stats.packets_queued, down.rtp_packets_queued);
+    rtc_rtp_parameters_t params;
+    ASSERT_EQ(rtc_consumer_get_rtp_parameters(subscription->consumers[0], &params), RTC_OK);
+    rtc_rtcp_stats_t sender_stats = {.ssrc = params.ssrc, .send_clock_rate = 90000};
+    ASSERT(rtc_transport_sync_rtp_stats(subscription->transport, &sender_stats, NULL));
+    rtc_rtcp_packet_t report, parsed;
+    ASSERT_EQ(rtc_rtcp_build_sr(&report, &sender_stats), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_parse(&parsed, report.buf, report.buf_len), RTC_OK);
+    ASSERT_EQ(parsed.sr.sender_pkt_count, down.rtp_packets_sent);
+    ASSERT_EQ(parsed.sr.sender_oct_count, consumer_stats.bytes_sent);
+    ASSERT(consumer_stats.packets_dropped > 0);
     rtc_peer_connection_destroy(publisher.pc);
     rtc_peer_connection_destroy(subscriber.pc);
     rtc_sfu_destroy(fixture.sfu);

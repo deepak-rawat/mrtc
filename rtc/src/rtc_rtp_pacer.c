@@ -224,6 +224,30 @@ bool rtc_rtp_pacer_pending(const rtc_rtp_pacer_t *p) {
     return p->packets != 0;
 }
 
+uint32_t rtc_rtp_pacer_delay_ms(const rtc_rtp_pacer_t *p, uint64_t now) {
+    if (!p->head)
+        return 5;
+    if (!p->clock_valid || now - p->head->ready_ms >= RTC_PACER_MAX_AGE_MS)
+        return 1;
+    uint64_t rate = (p->bitrate_bps ? p->bitrate_bps : 1500000ULL) * 5 / 2;
+    uint64_t elapsed = now > p->last_ms ? now - p->last_ms : 0;
+    if (elapsed > 1000)
+        elapsed = 1000;
+    uint64_t credit = p->credit + elapsed * rate;
+    uint64_t cost = p->head->head->len * 8000ULL;
+    if (credit >= cost)
+        return 1;
+    uint64_t delay = (cost - credit + rate - 1) / rate;
+    uint64_t remaining = RTC_PACER_MAX_AGE_MS - (now - p->head->ready_ms);
+    if (delay > remaining)
+        delay = remaining;
+    /* A stage can complete on another sending thread; keep that latency
+     * bounded without cancelling a timer already popped by the worker. */
+    if (delay > 5)
+        delay = 5;
+    return (uint32_t)(delay ? delay : 1);
+}
+
 void rtc_rtp_pacer_discard(rtc_rtp_pacer_t *p, uint32_t ssrc) {
     rtc_pacer_source_t **slot = &p->sources;
     while (*slot && (*slot)->ssrc != ssrc)
@@ -261,6 +285,18 @@ void rtc_rtp_pacer_forget(rtc_rtp_pacer_t *p, uint32_t ssrc) {
     *slot = s->next;
     p->source_count--;
     free(s);
+}
+
+void rtc_rtp_pacer_abort(rtc_rtp_pacer_t *p, uint32_t ssrc, bool rejected_queued) {
+    rtc_pacer_source_t *s = source(p, ssrc);
+    rtc_rtp_pacer_discard(p, ssrc);
+    if (!rejected_queued)
+        p->packets_dropped++;
+    if (s) {
+        if (!rejected_queued)
+            s->sent.packets_dropped++;
+        s->sent.packets_rejected++;
+    }
 }
 
 void rtc_rtp_pacer_close(rtc_rtp_pacer_t *p) {

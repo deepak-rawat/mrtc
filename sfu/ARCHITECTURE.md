@@ -80,7 +80,15 @@ creates new epoch-scoped sessions.
   sequence space rather than blindly forwarding sequence numbers.
 - Negotiated publisher TWCC drives real transport estimates for the client
   encoder path.
-- Subscriber-wide bitrate allocation and simulcast selection are not provided.
+- Every 200 ms, subscription sessions pool active video legs for the same
+  room, subscriber and epoch, excluding publishing sessions. The routing
+  allocator shares the aggregate fresh AIMD/REMB budget fairly. New normal
+  legs each contribute the existing 500 kbps default rather than dividing a
+  fixed per-connection budget. Stale/paused/ended legs do not consume shares.
+  This coordinates leg estimates, not independent shared-path capacity
+  measurement. Simulcast selection is not provided.
+- Native publisher streams and SFU consumer streams use bounded, frame-aware
+  transport pacing by default; audio and control bypass video staging.
 - Negotiated single-source REMB and receiver-report AIMD estimates propagate
   the lowest fresh active-subscriber video bound upstream. This deliberately
   chooses common source quality rather than independent subscriber layers;
@@ -96,7 +104,12 @@ addressing and routes room messages; it is not part of RTP forwarding.
 ## Validation
 
 `test_sfu_session` exercises real encrypted media/data, live publisher changes,
-restart continuity, codec rejection and actual TWCC feedback. Routing tests
+restart continuity, codec rejection and actual TWCC feedback. Its real VP8
+regression uses negotiated PT 117, checks both paced legs' actual writes, and
+forces low-rate backlog expiry/recovery while audio and SCTP remain available.
+Deterministic pacer tests verify token spacing, burst limits, resource bounds,
+partial-frame expiry and repair cancellation without wall-clock sleeps.
+Routing tests
 cover loss/retransmission and wire-history wrap behavior. The real UI
 interoperability suite exercises the engine through the unified server in
 fixed SFU and automatic migration modes, including a configurable 4→5→4

@@ -1878,8 +1878,11 @@ static int transport_pacer_schedule_locked(rtc_transport_t *transport) {
     if (!rtc_rtp_pacer_pending(&transport->pacer) ||
         transport->pacer_timer != RTC_WORKER_TIMER_INVALID)
         return RTC_OK;
+    uint64_t now = rtc_time_ms();
     transport->pacer_timer =
-        rtc_worker_add_timer(transport->worker, rtc_time_ms() + 1, transport_pacer_tick, transport);
+        rtc_worker_add_timer(transport->worker,
+                             now + rtc_rtp_pacer_delay_ms(&transport->pacer, now),
+                             transport_pacer_tick, transport);
     if (transport->pacer_timer == RTC_WORKER_TIMER_INVALID) {
         rtc_rtp_pacer_clear(&transport->pacer);
         RTC_LOG_ERR("RTP pacing timer exhausted; pending frames discarded");
@@ -2010,8 +2013,10 @@ int rtc_transport_send_rtp_media(rtc_transport_t *transport, uint8_t *buf, size_
     size_t payload_len = 0;
     if (video && transport->enable_rtp_pacing) {
         rtc_rtp_packet_t packet;
-        if (rtc_rtp_parse(&packet, buf, *len) != RTC_OK)
+        if (rtc_rtp_parse(&packet, buf, *len) != RTC_OK) {
+            rtc_transport_discard_rtp(transport, ssrc);
             return RTC_ERR_INVALID;
+        }
         payload_len = packet.payload_len;
     }
     rtc_mutex_lock(&transport->send_mutex);
@@ -2021,17 +2026,23 @@ int rtc_transport_send_rtp_media(rtc_transport_t *transport, uint8_t *buf, size_
         transport_expire_members_locked(transport, rtc_time_ms());
         if (!rtc_rtcp_membership_can_add(&transport->rtcp_membership, ssrc, true)) {
             RTC_LOG_ERR("Local RTP membership capacity exhausted");
+            if (video && transport->enable_rtp_pacing)
+                rtc_rtp_pacer_abort(&transport->pacer, ssrc, false);
             rtc_mutex_unlock(&transport->send_mutex);
             return RTC_ERR_NOMEM;
         }
         rc = rtc_srtp_protect(&transport->srtp_send, buf, len, buf_cap);
+        if (rc != RTC_OK && video && transport->enable_rtp_pacing)
+            rtc_rtp_pacer_abort(&transport->pacer, ssrc, false);
         if (rc == RTC_OK && video && transport->enable_rtp_pacing) {
             if (bitrate_bps)
                 transport->pacer.bitrate_bps = bitrate_bps;
             rc = rtc_rtp_pacer_enqueue(&transport->pacer, buf, *len, payload_len, rtc_time_ms());
-            if (rc == RTC_OK)
+            if (rc == RTC_OK) {
                 rc = transport_pacer_schedule_locked(transport);
-            else if (rtc_time_ms() - transport->pacer_last_log_ms >= 1000) {
+                if (rc != RTC_OK)
+                    rtc_rtp_pacer_abort(&transport->pacer, ssrc, true);
+            } else if (rtc_time_ms() - transport->pacer_last_log_ms >= 1000) {
                 RTC_LOG_WARN("RTP pacing frame rejected: %d", rc);
                 transport->pacer_last_log_ms = rtc_time_ms();
             }

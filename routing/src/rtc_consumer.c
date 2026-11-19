@@ -46,6 +46,7 @@ struct rtc_consumer {
     _Atomic uint32_t estimated_bitrate_bps;
     _Atomic uint64_t bitrate_feedback_ms;
     _Atomic uint32_t allocated_bitrate_bps;
+    _Atomic bool allocation_excluded;
     _Atomic uint64_t last_packet_ms;
     rtc_worker_t *worker;
     rtc_worker_timer_t report_timer;
@@ -290,6 +291,7 @@ int rtc_consumer_get_stats(rtc_consumer_t *consumer, rtc_consumer_stats_t *out) 
     out->bitrate_feedback_ms = atomic_load(&consumer->bitrate_feedback_ms);
     out->last_packet_ms = atomic_load(&consumer->last_packet_ms);
     out->allocated_bitrate_bps = atomic_load(&consumer->allocated_bitrate_bps);
+    out->allocation_excluded = atomic_load(&consumer->allocation_excluded);
     rtc_pacer_sent_t snapshot;
     if (rtc_transport_rtp_sent(consumer->transport, consumer->rtp.ssrc, &snapshot)) {
         out->packets_sent = snapshot.packets_sent;
@@ -303,8 +305,9 @@ int rtc_consumer_get_stats(rtc_consumer_t *consumer, rtc_consumer_stats_t *out) 
 int rtc_consumer_set_bitrate_allocation(rtc_consumer_t *consumer, uint32_t bitrate_bps) {
     if (!consumer || consumer->kind != RTC_MEDIA_KIND_VIDEO || atomic_load(&consumer->closed))
         return RTC_ERR_INVALID;
+    bool excluded = atomic_exchange(&consumer->allocation_excluded, false);
     uint32_t previous = atomic_exchange(&consumer->allocated_bitrate_bps, bitrate_bps);
-    if (previous == bitrate_bps)
+    if (previous == bitrate_bps && !excluded)
         return RTC_OK;
     if (bitrate_bps == 0) {
         rtc_mutex_lock(&consumer->media_mutex);
@@ -353,7 +356,8 @@ int rtc_consumer_allocate_video(rtc_consumer_t *const *consumers, size_t count, 
             continue;
         uint32_t allocation = active[i] ? share : UINT32_MAX;
         uint32_t previous = atomic_exchange(&c->allocated_bitrate_bps, allocation);
-        changed[i] = previous != allocation;
+        bool excluded = atomic_exchange(&c->allocation_excluded, !active[i]);
+        changed[i] = previous != allocation || excluded != !active[i];
         if (!changed[i])
             continue;
         if (allocation == 0) {
@@ -378,7 +382,8 @@ int rtc_consumer_allocate_video(rtc_consumer_t *const *consumers, size_t count, 
 
 uint32_t rtc_consumer_bitrate_limit(rtc_consumer_t *consumer, uint64_t now_ms) {
     if (!consumer || atomic_load(&consumer->closed) || atomic_load(&consumer->source_ended) ||
-        atomic_load(&consumer->paused) || consumer->kind != RTC_MEDIA_KIND_VIDEO)
+        atomic_load(&consumer->paused) || atomic_load(&consumer->allocation_excluded) ||
+        consumer->kind != RTC_MEDIA_KIND_VIDEO)
         return UINT32_MAX;
     uint32_t allocation = atomic_load(&consumer->allocated_bitrate_bps);
     if (allocation == 0)

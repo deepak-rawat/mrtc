@@ -10,6 +10,7 @@
 #include <rtc/rtc_worker.h>
 
 #include "test_harness.h"
+#include "rtc_transport_internal.h"
 
 #include <string.h>
 #include <stdatomic.h>
@@ -184,7 +185,7 @@ static bool wait_for_data(data_rec_t *rec, int target, int timeout_ms) {
     return true;
 }
 
-static bool make_endpoint(loop_endpoint_t *endpoint, rtc_ice_mode_t mode) {
+static bool make_endpoint_ex(loop_endpoint_t *endpoint, rtc_ice_mode_t mode, bool paced) {
     memset(endpoint, 0, sizeof(*endpoint));
     endpoint->worker = rtc_worker_create(NULL);
     if (!endpoint->worker)
@@ -195,8 +196,13 @@ static bool make_endpoint(loop_endpoint_t *endpoint, rtc_ice_mode_t mode) {
     endpoint->transport = rtc_transport_create(endpoint->worker, &(rtc_transport_config_t){
                                                                      .listener = endpoint->listener,
                                                                      .ice_mode = mode,
+                                                                     .enable_rtp_pacing = paced,
                                                                  });
     return endpoint->transport != NULL;
+}
+
+static bool make_endpoint(loop_endpoint_t *endpoint, rtc_ice_mode_t mode) {
+    return make_endpoint_ex(endpoint, mode, false);
 }
 
 static void close_endpoint(loop_endpoint_t *endpoint) {
@@ -587,10 +593,87 @@ TEST(loopback_full_to_lite_media_feedback_and_data) {
     frame_rec_destroy(&full_frames);
 }
 
+typedef struct {
+    rtc_transport_t *transport;
+    rtc_mutex_t mutex;
+    rtc_cond_t cond;
+    bool ready, go;
+    _Atomic unsigned unexpected;
+} paced_producer_t;
+
+static void *paced_producer(void *user) {
+    paced_producer_t *producer = user;
+    rtc_mutex_lock(&producer->mutex);
+    producer->ready = true;
+    rtc_cond_signal(&producer->cond);
+    while (!producer->go)
+        rtc_cond_wait_timeout(&producer->cond, &producer->mutex, 1000);
+    rtc_mutex_unlock(&producer->mutex);
+    uint8_t payload[1000] = {0x10};
+    for (uint16_t seq = 100; seq < 612; seq++) {
+        rtc_rtp_packet_t packet;
+        if (rtc_rtp_build(&packet, 117, seq, (uint32_t)(seq / 10) * 3000, 0x11223344, seq % 10 == 9,
+                          payload, sizeof(payload)) != RTC_OK) {
+            atomic_fetch_add(&producer->unexpected, 1);
+            break;
+        }
+        size_t len = packet.buf_len;
+        int rc = rtc_transport_send_rtp_media(producer->transport, packet.buf, &len,
+                                              sizeof(packet.buf), true, 1000);
+        if (rc != RTC_OK && rc != RTC_ERR_INVALID && rc != RTC_ERR_NOMEM)
+            atomic_fetch_add(&producer->unexpected, 1);
+    }
+    rtc_transport_release(producer->transport);
+    return NULL;
+}
+
+TEST(paced_producer_races_discard_and_owner_destruction) {
+    loop_endpoint_t full, lite;
+    ASSERT(make_endpoint_ex(&full, RTC_ICE_MODE_FULL, true));
+    ASSERT(make_endpoint(&lite, RTC_ICE_MODE_LITE));
+    ASSERT(connect_endpoints(&full, &lite));
+    paced_producer_t producer = {.transport = full.transport};
+    ASSERT_EQ(rtc_mutex_init(&producer.mutex), RTC_OK);
+    ASSERT_EQ(rtc_cond_init(&producer.cond), RTC_OK);
+    rtc_transport_retain(producer.transport);
+    rtc_thread_t thread;
+    ASSERT_EQ(rtc_thread_create(&thread, paced_producer, &producer), RTC_OK);
+    rtc_mutex_lock(&producer.mutex);
+    while (!producer.ready)
+        rtc_cond_wait_timeout(&producer.cond, &producer.mutex, 1000);
+    uint8_t payload[1000] = {0x10};
+    for (uint16_t seq = 0; seq < 10; seq++) {
+        rtc_rtp_packet_t packet;
+        ASSERT_EQ(rtc_rtp_build(&packet, 117, seq, 3000, 0x11223344, seq == 9, payload,
+                                sizeof(payload)),
+                  RTC_OK);
+        size_t len = packet.buf_len;
+        ASSERT_EQ(rtc_transport_send_rtp_media(full.transport, packet.buf, &len, sizeof(packet.buf),
+                                               true, 1000),
+                  RTC_OK);
+    }
+    rtc_transport_stats_t stats;
+    ASSERT_EQ(rtc_transport_get_stats(full.transport, &stats), RTC_OK);
+    ASSERT(stats.rtp_packets_queued > 0);
+    producer.go = true;
+    rtc_cond_signal(&producer.cond);
+    rtc_mutex_unlock(&producer.mutex);
+    rtc_transport_discard_rtp(full.transport, 0x11223344);
+    rtc_transport_destroy(full.transport);
+    full.transport = NULL;
+    rtc_thread_join(&thread);
+    ASSERT_EQ(atomic_load(&producer.unexpected), 0);
+    close_endpoint(&full);
+    close_endpoint(&lite);
+    rtc_cond_destroy(&producer.cond);
+    rtc_mutex_destroy(&producer.mutex);
+}
+
 int main(void) {
     rtc_init();
     RUN_TEST(loopback_full_to_lite_media_feedback_and_data);
     RUN_TEST(loopback_bye_expiry_and_replay_preserve_source_isolation);
+    RUN_TEST(paced_producer_races_discard_and_owner_destruction);
     rtc_cleanup();
     TEST_SUMMARY();
 }

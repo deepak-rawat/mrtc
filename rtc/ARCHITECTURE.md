@@ -104,6 +104,42 @@ reuses the internal AIMD controller for downstream receiver-report estimates,
 instead of duplicating its algorithm; this is a private build dependency, not
 an additional public protocol API.
 
+### Bounded video pacing
+
+The native facade and SFU enable `enable_rtp_pacing`. Raw core and generic
+routing transports default to immediate sends. Composed streams explicitly
+identify video from negotiated media kind, never a fixed payload type.
+Audio, RTCP, ICE, DTLS and SCTP bypass the video queue.
+
+The transport protects RTP once, returns that ciphertext to the caller's
+bounded NACK history, and stages video until its marker. Dynamic storage is
+limited to 256 KiB of wire data, 1,024 packets, 128 KiB per frame and 32 live
+source records per transport. There are no preallocated packet arrays per
+transport. Partial frames expire after 200 ms; complete frames have a separate
+200 ms queue deadline. Expiry or a write/resource failure discards the frame's
+remaining packets and disables repair for that frame, including any prefix
+already written. It cannot retract a prefix already on the network.
+
+A monotonic token bucket runs at 2.5 times the current video target, with a
+2,400-byte burst and worker timers while work remains. It never sleeps on a
+sender or worker thread. Repair reuses protected bytes, shares this credit,
+and is allowed only for successful initial writes within 200 ms. Admission
+errors are explicit; asynchronous drops have transport/source counters and
+rate-limited warnings. `RTC_OK` from a paced send means accepted, not delivered.
+Transport statistics separate actual initial writes, queued wire bytes/packets,
+frame/packet drops and repair outcomes. Consumer statistics and SR packet/octet
+counts use successful writes, not admission. TWCC records actual write times;
+RTP/NTP sampling anchors and publisher clock mappings are preserved.
+
+Queue nodes contain bytes and transport-owned source metadata, not borrowed
+stream/consumer pointers. Close cancels pacing on the worker under the send
+mutex. Composed senders/consumers retain their attached transport using the
+internal lifetime API. `rtc_transport_discard_rtp(t, ssrc)` takes the send mutex
+itself: call it **outside** that mutex at source rotation/retirement. It purges
+staging, scheduling and repair eligibility while retaining sent counters.
+Outgoing BYE and pause also discard queued source data. Actor destruction
+forgets the source's bounded metadata and releases its transport reference.
+
 ## Module Details
 
 ### Runtime Transport Core

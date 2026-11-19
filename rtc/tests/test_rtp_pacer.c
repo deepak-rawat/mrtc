@@ -45,6 +45,7 @@ TEST(frame_staging_two_mtu_burst_and_deterministic_spacing) {
     rtc_rtp_pacer_run(&p, 100, write_packet, &w);
     ASSERT_EQ(w.packets, 2);
     ASSERT_EQ(p.packets, 3);
+    ASSERT_EQ(rtc_rtp_pacer_delay_ms(&p, 109), 1);
     rtc_rtp_pacer_run(&p, 109, write_packet, &w);
     ASSERT_EQ(w.packets, 2);
     rtc_rtp_pacer_run(&p, 110, write_packet, &w);
@@ -172,6 +173,59 @@ TEST(transport_and_source_bounds_and_selective_cancellation) {
     ASSERT_EQ(p.source_count, 0);
 }
 
+TEST(shared_wire_and_packet_limits_cancel_the_whole_failed_frame) {
+    rtc_rtp_pacer_t p = {0};
+    uint8_t wire[1200];
+    bool rejected = false;
+    for (uint32_t ssrc = 1; ssrc <= 3; ssrc++) {
+        for (uint16_t seq = 0; seq < 100; seq++) {
+            packet(wire, ssrc, 9000, seq, false);
+            int rc = rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, 100);
+            ASSERT(p.bytes <= RTC_PACER_MAX_BYTES);
+            if (rc != RTC_OK) {
+                rejected = true;
+                break;
+            }
+        }
+    }
+    ASSERT(rejected);
+    ASSERT_EQ(p.bytes, 240000);
+    rtc_rtp_pacer_close(&p);
+    for (uint16_t seq = 0; seq < 1024; seq++) {
+        packet(wire, 42, seq, seq, true);
+        ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, 12, 0, 100), RTC_OK);
+    }
+    packet(wire, 42, 1024, 1024, true);
+    ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, 12, 0, 100), RTC_ERR_NOMEM);
+    ASSERT_EQ(p.packets, 1024);
+    rtc_rtp_pacer_clear(&p);
+    ASSERT_EQ(p.packets, 0);
+    rtc_rtp_pacer_close(&p);
+}
+
+TEST(protection_failure_aborts_staging_without_double_counting_the_rejection) {
+    rtc_rtp_pacer_t p = {0};
+    uint8_t wire[1200];
+    packet(wire, 42, 9000, 0, false);
+    ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, 100), RTC_OK);
+    rtc_rtp_pacer_abort(&p, 42, false);
+    rtc_pacer_sent_t sent;
+    ASSERT(rtc_rtp_pacer_sent(&p, 42, &sent));
+    ASSERT_EQ(sent.packets_sent, 0);
+    ASSERT_EQ(sent.packets_queued, 0);
+    ASSERT_EQ(sent.packets_dropped, 2);
+    ASSERT_EQ(sent.packets_rejected, 1);
+    wire[1] |= 0x80;
+    ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, 101), RTC_ERR_NOMEM);
+    packet(wire, 42, 18000, 2, true);
+    ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, 102), RTC_OK);
+    rtc_rtp_pacer_abort(&p, 42, true);
+    ASSERT(rtc_rtp_pacer_sent(&p, 42, &sent));
+    ASSERT_EQ(sent.packets_queued, 0);
+    ASSERT_EQ(sent.packets_dropped - sent.packets_rejected, 1);
+    rtc_rtp_pacer_close(&p);
+}
+
 int main(void) {
     RUN_TEST(frame_staging_two_mtu_burst_and_deterministic_spacing);
     RUN_TEST(orphan_and_failed_frames_expire_without_resurrection);
@@ -179,5 +233,7 @@ int main(void) {
     RUN_TEST(socket_failure_cancels_unsent_frame_and_invalidates_repairs);
     RUN_TEST(stale_queue_deadline_drops_remainder_and_recovers);
     RUN_TEST(transport_and_source_bounds_and_selective_cancellation);
+    RUN_TEST(shared_wire_and_packet_limits_cancel_the_whole_failed_frame);
+    RUN_TEST(protection_failure_aborts_staging_without_double_counting_the_rejection);
     TEST_SUMMARY();
 }

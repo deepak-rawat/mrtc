@@ -61,7 +61,7 @@ gaps, reordering and wraparound remain visible downstream; compacting every
 received packet into a contiguous sequence would hide an incomplete VP8 frame.
 Discontinuous source restarts require a new producer/consumer.
 
-The consumer caches successful **protected wire packets** in 128 sequence
+The consumer caches accepted **protected wire packets** in 128 sequence
 positions. NACK retransmission uses `rtc_transport_retransmit_rtp()` rather
 than re-encrypting old packets across rollover counters. Retransmission attempts
 are bounded; missing history can request an upstream keyframe through the
@@ -94,8 +94,11 @@ legs have independent activity; downstream reporting context can remain while
 the upstream source is inactive.
 
 There is no unbounded per-subscriber queue. Closed/not-ready transports and
-failed sends produce checked failures and drop counters. This is a simple
-forwarder, not a simulcast selector or a full subscriber bitrate allocator.
+failed sends produce checked failures and drop counters. Opt-in transport
+pacing stages complete video frames with bounded dynamic storage; the generic
+routing default remains immediate. Queued packets do not inflate public sent
+counters or sender-report packet/octet counts. Dropped/retired queued frames
+cannot be repaired from cached ciphertext.
 
 Video consumers reuse the core AIMD controller for receiver-report loss/RTT
 estimates and accept single-source REMB when offered. Producers aggregate the
@@ -103,11 +106,24 @@ minimum fresh active-consumer limit and send negotiated REMB for the original
 publisher SSRC, never the downstream rewritten SSRC. Paused/closed consumers
 and estimates older than ten seconds do not hold back the source.
 
+`rtc_consumer_allocate_video` fairly splits a subscriber's aggregate video
+budget across up to 64 legs, including separate transports/workers. The caller
+supplies the room/subscriber/epoch-scoped set and owns the consumers throughout
+the call. The default pool sums fresh leg estimates, capped at 2.5 Mbps per
+leg, with 500 kbps per new leg or expired estimate. Thus adding normal sources
+does not divide a fixed 500 kbps between them. An explicit aggregate cap,
+including zero, is also supported. Paused/ended sources and sources idle ten
+seconds are excluded; feedback is stale after ten seconds. Audio is untouched.
+Zero allocation suppresses only that subscriber's video and excludes its
+bound from shared publisher adaptation. Resumption requests a keyframe.
+
 This is conservative shared-source adaptation: one weak receiver can lower
-video quality for all subscribers of that source. It leaves audio untouched,
-does not add a media queue and is not per-subscriber layer selection, pacing or
-allocation across all of a subscriber's connections. Bounds are exposed in
-producer/consumer statistics for qualification.
+video quality for all subscribers of that source. The pool coordinates existing
+per-leg estimates; their sum is not an independently measured shared-bottleneck
+capacity estimate. There is no simulcast or independent per-subscriber source
+quality. Allocations are atomically published before producer feedback, and
+producer worker invocation occurs without any consumer media mutex held.
+Bounds and allocation/feedback timestamps are exposed in consumer statistics.
 
 Consumer SR timestamps use the publisher's RTP/NTP mapping once received,
 advancing both clocks at the negotiated rate without substituting the SFU wall

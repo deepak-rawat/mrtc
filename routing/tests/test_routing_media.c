@@ -217,6 +217,7 @@ TEST(subscriber_allocation_pools_connections_and_recovers_without_muting_audio) 
 
     ASSERT_EQ(rtc_consumer_allocate_video(legs, 2, 600000, after.last_packet_ms + 10000), RTC_OK);
     ASSERT_EQ(rtc_consumer_bitrate_limit(legs[1], rtc_time_ms()), 600000);
+    ASSERT_EQ(rtc_consumer_bitrate_limit(legs[0], rtc_time_ms()), UINT32_MAX);
     ASSERT_EQ(rtc_consumer_allocate_video(legs, 2, 0, rtc_time_ms()), RTC_OK);
     ASSERT_EQ(rtc_consumer_get_stats(legs[1], &after), RTC_OK);
     ASSERT_EQ(after.allocated_bitrate_bps, 0);

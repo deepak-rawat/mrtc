@@ -36,8 +36,10 @@ int rtc_rtp_pacer_enqueue(rtc_rtp_pacer_t *p, const uint8_t *wire, size_t len, s
                           uint64_t now);
 void rtc_rtp_pacer_run(rtc_rtp_pacer_t *p, uint64_t now, rtc_pacer_write_fn write, void *user);
 bool rtc_rtp_pacer_pending(const rtc_rtp_pacer_t *p);
+uint32_t rtc_rtp_pacer_delay_ms(const rtc_rtp_pacer_t *p, uint64_t now);
 void rtc_rtp_pacer_discard(rtc_rtp_pacer_t *p, uint32_t ssrc);
 void rtc_rtp_pacer_forget(rtc_rtp_pacer_t *p, uint32_t ssrc);
+void rtc_rtp_pacer_abort(rtc_rtp_pacer_t *p, uint32_t ssrc, bool rejected_queued);
 void rtc_rtp_pacer_close(rtc_rtp_pacer_t *p);
 void rtc_rtp_pacer_clear(rtc_rtp_pacer_t *p);
 bool rtc_rtp_pacer_sent(const rtc_rtp_pacer_t *p, uint32_t ssrc, rtc_pacer_sent_t *out);

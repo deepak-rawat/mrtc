@@ -33,6 +33,7 @@ typedef struct {
     uint64_t bitrate_feedback_ms;
     uint64_t last_packet_ms;
     uint32_t allocated_bitrate_bps; /* UINT32_MAX: independent/default policy */
+    bool allocation_excluded;       /* managed leg is stale/paused/ended */
 } rtc_consumer_stats_t;
 
 rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
