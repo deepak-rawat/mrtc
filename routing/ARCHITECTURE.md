@@ -71,7 +71,11 @@ consumer SSRC.
 Reports run on independent owning-worker timers, including during idle or
 paused media, rather than waiting for another RTP packet. Report intervals use
 the shared RFC 3550 A.7 calculation with randomized initial/steady minima and a
-5% media-target budget in the four-SSRC connection model. Publisher SR timing
+5% media-target budget with live per-transport member/sender counts. Healthy
+timers recheck within 100 ms so reverse reconsideration can advance reports
+after departures. Shared packet-size averaging and sender/member expiry live
+in the transport, not independent per-producer membership estimates.
+Publisher SR timing
 is retained for RR LSR/DLSR. Closing consumers cancels report callbacks and
 attempts BYE before freeing their state; the SFU retires them before closing
 their transport.
@@ -104,6 +108,12 @@ video quality for all subscribers of that source. It leaves audio untouched,
 does not add a media queue and is not per-subscriber layer selection, pacing or
 allocation across all of a subscriber's connections. Bounds are exposed in
 producer/consumer statistics for qualification.
+
+Consumer SR timestamps advance at the negotiated clock rate from the newest
+transmitted media timestamp, including when media becomes idle. Late reordered
+packets and equal-timestamp fragments do not rebase this anchor. This is a
+send-time approximation, not preservation of the publisher's original
+capture-clock/NTP correlation across legs.
 
 ## Tests
 

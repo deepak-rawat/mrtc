@@ -252,13 +252,28 @@ static void report_intercept_tick(rtc_interceptor_t *it, uint64_t now_ms) {
     rtc_u32_map_iter_t mi = {0};
     uint32_t ssrc;
     void *val;
-    while (rtc_u32_map_next(&s->send_streams, &mi, &ssrc, &val))
-        rtc_rtp_send_stream_emit_sr((rtc_rtp_send_stream_t *)val, s->transport);
     size_t n = rtc_vec_len(&s->recv_streams);
+    while (rtc_u32_map_next(&s->send_streams, &mi, &ssrc, &val)) {
+        rtc_rtp_recv_stream_t *receiver = NULL;
+        for (size_t i = 0; i < n; i++) {
+            rtc_rtp_recv_stream_t **slot = rtc_vec_at(&s->recv_streams, i);
+            if (slot && *slot && rtc_rtp_recv_stream_stats(*slot)->ssrc == ssrc) {
+                receiver = *slot;
+                break;
+            }
+        }
+        rtc_rtp_send_stream_emit_report(val, receiver, s->transport);
+    }
     for (size_t i = 0; i < n; i++) {
         rtc_rtp_recv_stream_t **slot = (rtc_rtp_recv_stream_t **)rtc_vec_at(&s->recv_streams, i);
-        if (slot && *slot)
+        if (slot && *slot) {
+            rtc_rtp_send_stream_t *sender =
+                rtc_u32_map_get(&s->send_streams, rtc_rtp_recv_stream_stats(*slot)->ssrc);
+            if (rtc_rtp_send_stream_is_active(sender) &&
+                rtc_rtp_send_stream_stats(sender)->packets_sent)
+                continue;
             rtc_rtp_recv_stream_emit_rr(*slot, s->transport);
+        }
     }
 }
 

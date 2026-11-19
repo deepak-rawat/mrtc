@@ -96,6 +96,7 @@ rtc_rtp_send_stream_t *rtc_rtp_send_stream_create(const rtc_rtp_send_stream_conf
         free(stream);
         return NULL;
     }
+    stream->rtcp_stats.send_clock_rate = cfg->clock_rate;
     return stream;
 }
 
@@ -449,9 +450,39 @@ static void emit_rtcp_report(rtc_rtcp_stats_t *stats, rtc_transport_t *transport
 }
 
 void rtc_rtp_send_stream_emit_sr(rtc_rtp_send_stream_t *stream, rtc_transport_t *transport) {
+    rtc_rtp_send_stream_emit_report(stream, NULL, transport);
+}
+
+void rtc_rtp_send_stream_emit_report(rtc_rtp_send_stream_t *stream, rtc_rtp_recv_stream_t *receiver,
+                                     rtc_transport_t *transport) {
     if (!stream || !stream->active || !transport || stream->rtcp_stats.packets_sent == 0)
         return;
-    emit_rtcp_report(&stream->rtcp_stats, transport, true);
+    if (!receiver) {
+        rtc_rtcp_stats_reset_source(&stream->rtcp_stats);
+        emit_rtcp_report(&stream->rtcp_stats, transport, true);
+        return;
+    }
+    if (receiver->rtcp_stats.ssrc != stream->rtcp_stats.ssrc) {
+        RTC_LOG_ERR("Cannot combine reports for different local SSRCs");
+        return;
+    }
+    rtc_rtcp_stats_t *report = &receiver->rtcp_stats;
+    report->packets_sent = stream->rtcp_stats.packets_sent;
+    report->octets_sent = stream->rtcp_stats.octets_sent;
+    report->rtp_timestamp = stream->rtcp_stats.rtp_timestamp;
+    report->send_clock_rate = stream->rtcp_stats.send_clock_rate;
+    report->send_time_ms = stream->rtcp_stats.send_time_ms;
+    report->send_clock_valid = stream->rtcp_stats.send_clock_valid;
+    uint32_t remote_ssrc = report->remote_ssrc;
+    bool first_packet = report->first_packet;
+    if (!receiver->active) {
+        report->remote_ssrc = 0;
+        report->first_packet = true;
+    }
+    emit_rtcp_report(report, transport, true);
+    report->remote_ssrc = remote_ssrc;
+    report->first_packet = first_packet;
+    stream->rtcp_stats = *report;
 }
 
 void rtc_rtp_recv_stream_set_active(rtc_rtp_recv_stream_t *stream, bool active) {
@@ -753,5 +784,5 @@ void rtc_rtp_recv_stream_on_sr(rtc_rtp_recv_stream_t *stream, const rtc_rtcp_sr_
 void rtc_rtp_recv_stream_emit_rr(rtc_rtp_recv_stream_t *stream, rtc_transport_t *transport) {
     if (!stream || !stream->active || !transport || stream->rtcp_stats.packets_received == 0)
         return;
-    emit_rtcp_report(&stream->rtcp_stats, transport, false);
+    emit_rtcp_report(&stream->rtcp_stats, transport, stream->rtcp_stats.packets_sent != 0);
 }

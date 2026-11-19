@@ -133,9 +133,9 @@ TEST(rtcp_randomized_bandwidth_intervals_and_bye) {
     ASSERT(rtc_rtcp_interval_ms(6400, 100, 4, 2, true, true, UINT32_MAX) < minimum * 2);
     rtc_rtcp_stats_t stats;
     ASSERT_EQ(rtc_rtcp_stats_init(&stats, 0x12345678), RTC_OK);
-    ASSERT_EQ(rtc_rtcp_report_due(&stats, 128000, 100, 10000), RTC_ERR_TIMEOUT);
+    ASSERT_EQ(rtc_rtcp_report_due_at(&stats, 128000, 100, 10000, 0), RTC_ERR_TIMEOUT);
     ASSERT(stats.next_report_time > 10000 && stats.next_report_time <= 13079);
-    ASSERT_EQ(rtc_rtcp_report_due(&stats, 128000, 100, stats.next_report_time), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_report_due_at(&stats, 128000, 100, stats.next_report_time, 0), RTC_OK);
     uint8_t wire[128];
     size_t length;
     ASSERT_EQ(rtc_rtcp_build_bye(wire, sizeof(wire), &length, 0x12345678), RTC_OK);
@@ -422,6 +422,152 @@ TEST(rtcp_sr_recv_and_rtt_helpers) {
     printf("    SR receive + RTT helpers: rtt=%dms\n", rtt_ms);
 }
 
+TEST(rtcp_membership_activity_bye_and_atomic_sdes) {
+    rtc_rtcp_membership_t group = {0};
+    ASSERT_EQ(rtc_rtcp_membership_touch(&group, 11, true, true, 1000), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_membership_touch(&group, 22, false, true, 1000), RTC_OK);
+    rtc_rtcp_stats_t source;
+    rtc_rtcp_stats_init(&source, 33);
+    source.remote_ssrc = 99;
+    source.first_packet = false;
+    rtc_rtcp_packet_t packet;
+    ASSERT_EQ(rtc_rtcp_build_report(&packet, &source, false), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_membership_on_rtcp(&group, packet.buf, packet.buf_len, false,
+                                          packet.buf_len + 68, 2000),
+              RTC_OK);
+    ASSERT_EQ(group.members, 3);
+    ASSERT_EQ(group.senders, 2);
+    rtc_rtcp_membership_t before = group;
+    packet.buf[packet.buf_len - 1] = 1;
+    ASSERT_EQ(rtc_rtcp_membership_on_rtcp(&group, packet.buf, packet.buf_len, false,
+                                          packet.buf_len + 68, 3000),
+              RTC_ERR_INVALID);
+    ASSERT_MEM_EQ(&group, &before, sizeof(group));
+    uint8_t bye[8];
+    size_t len;
+    ASSERT_EQ(rtc_rtcp_build_bye(bye, sizeof(bye), &len, 22), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_membership_on_rtcp(&group, bye, len, false, len + 68, 4000), RTC_OK);
+    ASSERT_EQ(group.members, 2);
+    ASSERT_EQ(group.senders, 1);
+    ASSERT(group.average_size > 0 && group.average_size < before.average_size);
+    ASSERT_EQ(rtc_rtcp_membership_on_rtcp(&group, bye, len, false, len + 68, 4001), RTC_OK);
+    ASSERT_EQ(group.members, 2);
+
+    ASSERT_EQ(rtc_rtcp_membership_touch(&group, 33, true, false, 4002), RTC_OK);
+    ASSERT_EQ(group.members, 3);
+    rtc_rtcp_membership_expire(&group, 500000, 11000);
+    ASSERT_EQ(group.senders, 0);
+    rtc_rtcp_membership_expire(&group, 500000, 26000);
+    ASSERT_EQ(group.members, 2);
+    ASSERT_EQ(rtc_rtcp_membership_touch(&group, 33, false, true, 26001), RTC_OK);
+    ASSERT_EQ(group.senders, 1);
+    memset(&group, 0, sizeof(group));
+    for (unsigned i = 0; i < 16; i++)
+        ASSERT_EQ(rtc_rtcp_membership_touch(&group, i, i == 0, i == 0, 1), RTC_OK);
+    group.average_size = 1000;
+    rtc_rtcp_stats_init(&source, 0);
+    rtc_rtcp_stats_set_membership(&source, &group, 1);
+    ASSERT(source.report_we_sent);
+    rtc_rtcp_membership_expire(&group, 8000, 160000);
+    ASSERT_EQ(group.senders, 1);
+    rtc_rtcp_membership_expire(&group, 8000, 160001);
+    ASSERT_EQ(group.senders, 0);
+    ASSERT_EQ(group.members, 16);
+    rtc_rtcp_stats_set_membership(&source, &group, 160001);
+    ASSERT(!source.report_we_sent);
+}
+
+TEST(rtcp_membership_reconsideration_and_capacity) {
+    rtc_rtcp_membership_t group = {0};
+    for (unsigned i = 1; i <= 4; i++)
+        ASSERT_EQ(rtc_rtcp_membership_touch(&group, i, i == 1, false, 10000), RTC_OK);
+    group.average_size = 1000;
+    rtc_rtcp_stats_t stats;
+    rtc_rtcp_stats_init(&stats, 1);
+    rtc_rtcp_stats_set_membership(&stats, &group, 10000);
+    ASSERT_EQ(rtc_rtcp_report_due_at(&stats, 8000, 1000, 10000, 0), RTC_ERR_TIMEOUT);
+    uint64_t original = stats.next_report_time;
+    for (unsigned i = 5; i <= 8; i++)
+        ASSERT_EQ(rtc_rtcp_membership_touch(&group, i, false, false, 11000), RTC_OK);
+    rtc_rtcp_stats_set_membership(&stats, &group, 11000);
+    ASSERT_EQ(stats.next_report_time, original);
+    ASSERT_EQ(rtc_rtcp_report_due_at(&stats, 8000, 1000, original, 0), RTC_ERR_TIMEOUT);
+    uint64_t grown = stats.next_report_time;
+    ASSERT(grown > original);
+    for (unsigned i = 3; i <= 8; i++) {
+        uint8_t bye[8];
+        size_t len;
+        ASSERT_EQ(rtc_rtcp_build_bye(bye, sizeof(bye), &len, i), RTC_OK);
+        ASSERT_EQ(rtc_rtcp_membership_on_rtcp(&group, bye, len, false, 1000, original), RTC_OK);
+    }
+    rtc_rtcp_stats_set_membership(&stats, &group, original);
+    ASSERT_EQ(stats.next_report_time, (uint64_t)(original + 0.25 * (grown - original)));
+    ASSERT(stats.report_previous_ms > 10000);
+    ASSERT_EQ(stats.report_pmembers, 2);
+    stats.next_report_time = 50000;
+    stats.report_pmembers = 4;
+    stats.report_previous_ms = 40000;
+    rtc_rtcp_stats_set_membership(&stats, &group, 60000);
+    ASSERT_EQ(stats.next_report_time, 55000);
+    ASSERT_EQ((uint64_t)stats.report_previous_ms, 50000);
+    ASSERT_EQ(rtc_rtcp_report_due_at(&stats, 8000, 1000, 1000000, 0), RTC_OK);
+
+    memset(&group, 0, sizeof(group));
+    for (unsigned i = 0; i < RTC_RTCP_MAX_MEMBERS; i++)
+        ASSERT_EQ(rtc_rtcp_membership_touch(&group, i, false, true, 1), RTC_OK);
+    ASSERT(rtc_rtcp_membership_can_add(&group, 0, false));
+    ASSERT(!rtc_rtcp_membership_can_add(&group, RTC_RTCP_MAX_MEMBERS, false));
+    ASSERT_EQ(rtc_rtcp_membership_touch(&group, RTC_RTCP_MAX_MEMBERS, false, true, 2),
+              RTC_ERR_NOMEM);
+    rtc_rtcp_membership_t before = group;
+    rtc_rtcp_packet_t report;
+    rtc_rtcp_stats_init(&stats, RTC_RTCP_MAX_MEMBERS);
+    ASSERT_EQ(rtc_rtcp_build_report(&report, &stats, false), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_membership_on_rtcp(&group, report.buf, report.buf_len, false,
+                                          report.buf_len + 68, 2),
+              RTC_ERR_NOMEM);
+    ASSERT_MEM_EQ(&group, &before, sizeof(group));
+    rtc_rtcp_membership_expire(&group, 500000, 25001);
+    ASSERT_EQ(group.members, RTC_RTCP_MAX_MEMBERS);
+    rtc_rtcp_membership_expire(&group, 500000, 34001);
+    ASSERT_EQ(group.members, RTC_RTCP_MAX_MEMBERS);
+    rtc_rtcp_membership_expire(&group, 500000, 35001);
+    ASSERT_EQ(group.members, 0);
+    ASSERT_EQ(group.senders, 0);
+}
+
+TEST(rtcp_sender_clock_idle_reordering_and_wrap) {
+    rtc_rtcp_stats_t stats;
+    rtc_rtcp_stats_init(&stats, 11);
+    stats.send_clock_rate = 90000;
+    uint32_t initial = UINT32_MAX - 44999;
+    rtc_rtcp_stats_on_rtp_send_at(&stats, initial, 10, 1000);
+    rtc_rtcp_stats_on_rtp_send_at(&stats, initial - 3000, 10, 1500);
+    rtc_rtcp_stats_on_rtp_send_at(&stats, initial, 10, 1700);
+    stats.remote_ssrc = 22;
+    stats.first_packet = false;
+    stats.last_sr_recv_time = 1500;
+    rtc_rtcp_packet_t packet, parsed;
+    ASSERT_EQ(rtc_rtcp_build_sr_at(&packet, &stats, 2000, 1700000000500ULL), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_parse(&parsed, packet.buf, packet.buf_len), RTC_OK);
+    ASSERT_EQ(parsed.sr.rtp_timestamp, 45000);
+    ASSERT_EQ(parsed.sr.ntp_sec, 3908988800u);
+    ASSERT_EQ(parsed.sr.ntp_frac, 0x80000000u);
+    ASSERT_EQ(parsed.sr.sender_pkt_count, 3);
+    ASSERT_EQ(parsed.reports[0].delay_since_sr, 32768);
+    ASSERT_EQ(stats.rtp_timestamp, initial);
+    ASSERT_EQ(rtc_rtcp_build_sr_at(&packet, &stats, 11000, 1700000009500ULL), RTC_OK);
+    ASSERT_EQ(packet.sr.rtp_timestamp, (uint32_t)(initial + 900000u));
+    rtc_rtcp_stats_on_rtp_send_at(&stats, 45000, 10, 2000);
+    ASSERT_EQ(rtc_rtcp_stats_reset_source(&stats), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_build_sr_at(&packet, &stats, 2500, 1700000001000ULL), RTC_OK);
+    ASSERT_EQ(packet.sr.rtp_timestamp, 90000);
+    ASSERT_EQ(packet.sr.sender_pkt_count, 4);
+    ASSERT_EQ(packet.report_count, 0);
+    ASSERT_EQ(rtc_rtcp_build_sr_at(&packet, &stats, 1999, 1700000000499ULL), RTC_OK);
+    ASSERT_EQ(packet.sr.rtp_timestamp, 45000);
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  RTCP Component Tests\n");
@@ -437,6 +583,9 @@ int main(void) {
     RUN_TEST(rtcp_feedback_is_compound_without_reduced_size);
     RUN_TEST(rtcp_compound_cname_and_report_boundaries);
     RUN_TEST(rtcp_interval_loss_and_late_rollover);
+    RUN_TEST(rtcp_membership_activity_bye_and_atomic_sdes);
+    RUN_TEST(rtcp_membership_reconsideration_and_capacity);
+    RUN_TEST(rtcp_sender_clock_idle_reordering_and_wrap);
     RUN_TEST(rtcp_build_rr);
     RUN_TEST(rtcp_sr_roundtrip);
     RUN_TEST(rtcp_rr_roundtrip);

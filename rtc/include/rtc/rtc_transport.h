@@ -96,6 +96,8 @@ typedef struct {
     uint32_t remote_candidates_deferred;
     uint32_t remote_candidates_ineligible;
     uint32_t target_bitrate_bps; /* configured/estimated target, not measured capacity */
+    unsigned rtcp_members;
+    unsigned rtcp_senders;
 } rtc_transport_stats_t;
 
 rtc_transport_t *rtc_transport_create(rtc_worker_t *worker, const rtc_transport_config_t *cfg);

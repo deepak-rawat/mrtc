@@ -30,10 +30,24 @@
 #define RTCP_NACK_MAX_SEQS (RTCP_NACK_MAX_FCIS * 17)
 
 /* RTCP header size (common part: V, P, RC, PT, length) */
-#define RTCP_HEADER_SIZE   4
-#define RTCP_SR_SIZE       20 /* Sender info (NTP ts + RTP ts + counts), not including SSRC */
-#define RTCP_RR_BLOCK_SIZE 24 /* Per-source reception report block */
-#define RTCP_MAX_PACKET    1400
+#define RTCP_HEADER_SIZE     4
+#define RTCP_SR_SIZE         20 /* Sender info (NTP ts + RTP ts + counts), not including SSRC */
+#define RTCP_RR_BLOCK_SIZE   24 /* Per-source reception report block */
+#define RTCP_MAX_PACKET      1400
+#define RTC_RTCP_MAX_MEMBERS 128
+#define RTC_RTCP_RECONSIDER_POLL_MS 100
+
+typedef struct {
+    uint32_t ssrc;
+    bool used, local, sender;
+    uint64_t activity_ms, rtp_ms;
+} rtc_rtcp_member_t;
+
+typedef struct {
+    rtc_rtcp_member_t entries[RTC_RTCP_MAX_MEMBERS];
+    unsigned members, senders;
+    double average_size;
+} rtc_rtcp_membership_t;
 
 /* RTCP common header */
 typedef struct {
@@ -89,6 +103,9 @@ typedef struct {
     uint32_t packets_sent;
     uint32_t octets_sent;
     uint32_t rtp_timestamp; /* last RTP timestamp sent */
+    uint32_t send_clock_rate;
+    uint64_t send_time_ms;
+    bool send_clock_valid;
 
     /* Receiver stats (tracking a single remote source) */
     uint32_t remote_ssrc; /* SSRC of remote source we're receiving */
@@ -112,6 +129,10 @@ typedef struct {
     uint64_t next_report_time;
     uint32_t report_target_bps;
     size_t last_report_size;
+    unsigned report_members, report_senders, report_pmembers;
+    bool report_we_sent, report_initial;
+    double report_previous_ms;
+    double report_average_size;
 } rtc_rtcp_stats_t;
 
 /* Initialize RTCP statistics context */
@@ -126,6 +147,8 @@ void rtc_rtcp_stats_on_rtp_recv(rtc_rtcp_stats_t *stats, uint16_t seq, uint32_t 
 
 /* Update sender stats when an RTP packet is sent */
 void rtc_rtcp_stats_on_rtp_send(rtc_rtcp_stats_t *stats, uint32_t timestamp, size_t payload_len);
+void rtc_rtcp_stats_on_rtp_send_at(rtc_rtcp_stats_t *stats, uint32_t timestamp, size_t payload_len,
+                                   uint64_t monotonic_ms);
 
 /* Update receiver stats when an RTCP Sender Report is received. */
 void rtc_rtcp_stats_on_sr_recv(rtc_rtcp_stats_t *stats, const rtc_rtcp_sr_t *sr);
@@ -135,6 +158,9 @@ int rtc_rtcp_rtt_from_rr(const rtc_rtcp_rr_block_t *rr);
 
 /* Build a Sender Report */
 int rtc_rtcp_build_sr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats);
+/* Explicit clock pair; monotonic_ms and unix_ms describe the same instant. */
+int rtc_rtcp_build_sr_at(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats,
+                         uint64_t monotonic_ms, uint64_t unix_ms);
 
 /* Build a Receiver Report */
 int rtc_rtcp_build_rr(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats);
@@ -148,10 +174,23 @@ int rtc_rtcp_stats_report_sent(rtc_rtcp_stats_t *stats);
 /* RFC 3550 A.7 interval calculation, including initial minimum/randomization. */
 uint32_t rtc_rtcp_interval_ms(uint32_t bandwidth_bps, size_t average_packet_bytes, unsigned members,
                               unsigned senders, bool sending, bool initial, uint32_t random_value);
-/* Small one-camera/one-microphone connection timing model (four SSRCs).
- * RTC_ERR_TIMEOUT means the report is not due yet. */
+/* RTC_ERR_TIMEOUT means the report is not due yet, including reconsideration. */
 int rtc_rtcp_report_due(rtc_rtcp_stats_t *stats, uint32_t media_target_bps, size_t report_size,
                         uint64_t now_ms);
+/* Explicit random draw for deterministic RFC 3550 A.7 scheduling. */
+int rtc_rtcp_report_due_at(rtc_rtcp_stats_t *stats, uint32_t media_target_bps, size_t report_size,
+                           uint64_t now_ms, uint32_t random_value);
+/* Serialize membership access with the owning transport's send mutex.
+ * Only authenticated input belongs here; sender=true denotes RTP activity. */
+bool rtc_rtcp_membership_can_add(const rtc_rtcp_membership_t *group, uint32_t ssrc, bool local);
+int rtc_rtcp_membership_touch(rtc_rtcp_membership_t *group, uint32_t ssrc, bool local, bool sender,
+                              uint64_t now_ms);
+int rtc_rtcp_membership_on_rtcp(rtc_rtcp_membership_t *group, const uint8_t *data, size_t len,
+                                bool local, size_t wire_size, uint64_t now_ms);
+void rtc_rtcp_membership_expire(rtc_rtcp_membership_t *group, uint32_t media_target_bps,
+                                uint64_t now_ms);
+void rtc_rtcp_stats_set_membership(rtc_rtcp_stats_t *stats, const rtc_rtcp_membership_t *group,
+                                   uint64_t now_ms);
 int rtc_rtcp_build_bye(uint8_t *buf, size_t capacity, size_t *len, uint32_t ssrc);
 typedef struct {
     uint32_t ssrcs[31];

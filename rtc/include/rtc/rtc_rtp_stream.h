@@ -83,6 +83,9 @@ void rtc_rtp_send_stream_handle_pli(rtc_rtp_send_stream_t *stream);
 bool rtc_rtp_send_stream_on_rr(rtc_rtp_send_stream_t *stream, const rtc_rtcp_rr_block_t *rr,
                                int rtt_ms);
 void rtc_rtp_send_stream_emit_sr(rtc_rtp_send_stream_t *stream, rtc_transport_t *transport);
+/* A shared local SSRC uses one report timer and includes the receiver's RR block. */
+void rtc_rtp_send_stream_emit_report(rtc_rtp_send_stream_t *stream, rtc_rtp_recv_stream_t *receiver,
+                                     rtc_transport_t *transport);
 
 void rtc_rtp_recv_stream_set_active(rtc_rtp_recv_stream_t *stream, bool active);
 bool rtc_rtp_recv_stream_is_active(const rtc_rtp_recv_stream_t *stream);

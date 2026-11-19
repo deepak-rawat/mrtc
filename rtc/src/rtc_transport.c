@@ -42,6 +42,9 @@ struct rtc_transport {
     rtc_dtls_transport_t dtls;
     rtc_srtp_ctx_t srtp_send;
     rtc_srtp_ctx_t srtp_recv;
+    rtc_rtcp_membership_t rtcp_membership; /* guarded by send_mutex */
+    uint64_t rtcp_next_membership_check;
+    uint32_t rtcp_target_bps;
     rtc_transport_rtp_fn on_rtp;
     void *on_rtp_user;
     rtc_rtp_demux_t rtp_demux;
@@ -95,6 +98,15 @@ struct rtc_transport {
     void *on_bitrate_user;
 #endif
 };
+
+static void transport_expire_members_locked(rtc_transport_t *transport, uint64_t now) {
+    if (now < transport->rtcp_next_membership_check)
+        return;
+    uint32_t target = transport->rtcp_target_bps ? transport->rtcp_target_bps
+                                                 : transport->initial_outgoing_bitrate_bps;
+    rtc_rtcp_membership_expire(&transport->rtcp_membership, target, now);
+    transport->rtcp_next_membership_check = now + RTC_RTCP_RECONSIDER_POLL_MS;
+}
 
 static void transport_on_packet(rtc_pkt_type_t type, const uint8_t *data, size_t len,
                                 const rtc_addr_t *from, void *user);
@@ -394,6 +406,23 @@ static void transport_handle_rtp(rtc_transport_t *transport, const uint8_t *data
     if (rtc_rtp_parse(&pkt, buf, pkt_len) != RTC_OK)
         return;
 
+    rtc_mutex_lock(&transport->send_mutex);
+    uint64_t now = rtc_time_ms();
+    transport_expire_members_locked(transport, now);
+    int membership_rc =
+        rtc_rtcp_membership_touch(&transport->rtcp_membership, pkt.header.ssrc, false, true, now);
+    for (unsigned i = 0; membership_rc == RTC_OK && i < pkt.header.csrc_count; i++) {
+        uint32_t csrc;
+        memcpy(&csrc, buf + RTP_HEADER_SIZE + i * 4, sizeof(csrc));
+        membership_rc =
+            rtc_rtcp_membership_touch(&transport->rtcp_membership, ntohl(csrc), false, false, now);
+    }
+    rtc_mutex_unlock(&transport->send_mutex);
+    if (membership_rc != RTC_OK) {
+        rtc_transport_close(transport);
+        return;
+    }
+
     bool delivered = false;
     if (transport->rtp_demux.ready)
         delivered = rtc_rtp_demux_dispatch(&transport->rtp_demux, &pkt);
@@ -409,16 +438,20 @@ static void transport_handle_rtcp(rtc_transport_t *transport, const uint8_t *dat
     if (!atomic_load_explicit(&transport->srtp_ready, memory_order_acquire) ||
         len > SRTP_MAX_PACKET)
         return;
-    bool want = transport->on_rtcp != NULL;
-#ifdef MRTC_ENABLE_TWCC
-    want = want || transport->twcc_enabled;
-#endif
-    if (!want)
-        return;
     uint8_t buf[SRTP_MAX_PACKET];
     memcpy(buf, data, len);
     size_t pkt_len = len;
     int rc = rtc_srtp_unprotect_rtcp(&transport->srtp_recv, buf, &pkt_len);
+    if (rc != RTC_OK) {
+        if (rc == RTC_ERR_NOMEM)
+            rtc_transport_close(transport);
+        return;
+    }
+    rtc_mutex_lock(&transport->send_mutex);
+    transport_expire_members_locked(transport, rtc_time_ms());
+    rc = rtc_rtcp_membership_on_rtcp(&transport->rtcp_membership, buf, pkt_len, false, len + 48,
+                                     rtc_time_ms());
+    rtc_mutex_unlock(&transport->send_mutex);
     if (rc != RTC_OK) {
         if (rc == RTC_ERR_NOMEM)
             rtc_transport_close(transport);
@@ -1081,6 +1114,11 @@ static int tx_get_stats_impl(rtc_transport_t *transport, void *arg) {
     rtc_transport_stats_t *out = (rtc_transport_stats_t *)arg;
     memset(out, 0, sizeof(*out));
     out->closed = atomic_load_explicit(&transport->closed, memory_order_acquire);
+    rtc_mutex_lock(&transport->send_mutex);
+    transport_expire_members_locked(transport, rtc_time_ms());
+    out->rtcp_members = transport->rtcp_membership.members;
+    out->rtcp_senders = transport->rtcp_membership.senders;
+    rtc_mutex_unlock(&transport->send_mutex);
     out->ice_mode = transport->ice_mode;
     out->selected_tuple_valid =
         atomic_load_explicit(&transport->selected_remote_valid, memory_order_acquire);
@@ -1477,15 +1515,29 @@ int rtc_transport_retransmit_rtp(rtc_transport_t *transport, const uint8_t *wire
 }
 
 int rtc_transport_send_rtp(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t buf_cap) {
-    if (!transport || !buf || !len)
+    if (!transport || !buf || !len || *len < RTP_HEADER_SIZE)
         return RTC_ERR_INVALID;
+    if (*len > buf_cap)
+        return RTC_ERR_NOMEM;
+    uint32_t ssrc;
+    memcpy(&ssrc, buf + 8, sizeof(ssrc));
+    ssrc = ntohl(ssrc);
     rtc_mutex_lock(&transport->send_mutex);
     int rc = RTC_ERR_INVALID;
     if (!atomic_load(&transport->closed) && atomic_load(&transport->srtp_ready) &&
         atomic_load(&transport->selected_remote_valid)) {
+        transport_expire_members_locked(transport, rtc_time_ms());
+        if (!rtc_rtcp_membership_can_add(&transport->rtcp_membership, ssrc, true)) {
+            RTC_LOG_ERR("Local RTP membership capacity exhausted");
+            rtc_mutex_unlock(&transport->send_mutex);
+            return RTC_ERR_NOMEM;
+        }
         rc = rtc_srtp_protect(&transport->srtp_send, buf, len, buf_cap);
         if (rc == RTC_OK)
             rc = transport_send_raw_locked(transport, buf, *len);
+        if (rc == RTC_OK)
+            rc = rtc_rtcp_membership_touch(&transport->rtcp_membership, ssrc, true, true,
+                                           rtc_time_ms());
     }
     rtc_mutex_unlock(&transport->send_mutex);
     return rc;
@@ -1499,10 +1551,21 @@ int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *le
     if (!atomic_load(&transport->closed) && atomic_load(&transport->srtp_ready) &&
         atomic_load(&transport->selected_remote_valid)) {
         rc = rtc_rtcp_compound_feedback(buf, len, buf_cap - 20);
+        transport_expire_members_locked(transport, rtc_time_ms());
+        rtc_rtcp_membership_t updated = transport->rtcp_membership;
+        if (rc == RTC_OK) {
+            size_t tag = transport->srtp_send.profile == RTC_SRTP_PROFILE_AES128_CM_SHA1_80
+                             ? SRTP_AUTH_TAG_LEN
+                             : SRTP_GCM_TAG_LEN;
+            rc = rtc_rtcp_membership_on_rtcp(&updated, buf, *len, true, *len + tag + 4 + 48,
+                                             rtc_time_ms());
+        }
         if (rc == RTC_OK)
             rc = rtc_srtp_protect_rtcp(&transport->srtp_send, buf, len, buf_cap);
         if (rc == RTC_OK)
             rc = transport_send_raw_locked(transport, buf, *len);
+        if (rc == RTC_OK)
+            transport->rtcp_membership = updated;
     }
     rtc_mutex_unlock(&transport->send_mutex);
     return rc;
@@ -1515,11 +1578,21 @@ int rtc_transport_send_report(rtc_transport_t *transport, rtc_rtcp_stats_t *stat
     int rc = rtc_transport_get_stats(transport, &state);
     if (rc != RTC_OK || state.closed || !state.srtp_ready)
         return rc != RTC_OK ? rc : RTC_ERR_INVALID;
-    rtc_rtcp_packet_t packet;
-    rc = rtc_rtcp_build_report(&packet, stats, sender);
+    uint64_t now = rtc_time_ms();
+    rtc_mutex_lock(&transport->send_mutex);
+    transport->rtcp_target_bps = state.target_bitrate_bps;
+    rtc_rtcp_membership_expire(&transport->rtcp_membership, state.target_bitrate_bps, now);
+    rc = rtc_rtcp_membership_touch(&transport->rtcp_membership, stats->ssrc, true, false, now);
+    if (rc == RTC_OK)
+        rtc_rtcp_stats_set_membership(stats, &transport->rtcp_membership, now);
+    rtc_mutex_unlock(&transport->send_mutex);
     if (rc != RTC_OK)
         return rc;
-    rc = rtc_rtcp_report_due(stats, state.target_bitrate_bps, packet.buf_len + 20, rtc_time_ms());
+    rtc_rtcp_packet_t packet;
+    rc = rtc_rtcp_build_report(&packet, stats, sender && stats->report_we_sent);
+    if (rc != RTC_OK)
+        return rc;
+    rc = rtc_rtcp_report_due(stats, state.target_bitrate_bps, packet.buf_len + 20 + 48, now);
     if (rc != RTC_OK)
         return rc;
     uint8_t wire[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
@@ -1527,7 +1600,10 @@ int rtc_transport_send_report(rtc_transport_t *transport, rtc_rtcp_stats_t *stat
     size_t length = packet.buf_len;
     rc = rtc_transport_send_rtcp(transport, wire, &length, sizeof(wire));
     if (rc == RTC_OK) {
-        stats->last_report_size = length;
+        stats->last_report_size = length + 48;
+        rtc_mutex_lock(&transport->send_mutex);
+        rtc_rtcp_stats_set_membership(stats, &transport->rtcp_membership, rtc_time_ms());
+        rtc_mutex_unlock(&transport->send_mutex);
         rc = rtc_rtcp_stats_report_sent(stats);
     }
     return rc;

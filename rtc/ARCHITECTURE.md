@@ -361,6 +361,30 @@ each nonzero binding advances a source generation. Neither retirement nor
 expiry resets SRTP replay/nonce state. Session start/stop and report timer
 publication/cancellation are serialized on the owning worker.
 
+The transport owns bounded RTCP membership under its send mutex. Authenticated
+RTP SSRCs/CSRCs, report/feedback senders and validated SDES chunks add remote
+members; successful outgoing packets record local activity. BYE removes only
+the listed sources. There are at most 128 entries; input exhaustion closes the
+transport, while local exhaustion returns a logged resource error.
+
+Reports use live member/sender counts and shared protected-packet-size EWMA
+(including conservative IPv6/UDP overhead), not a fixed four-source estimate.
+Sender roles expire after two sender intervals and members after five
+deterministic receiver intervals. Timer/reverse reconsideration handles group
+growth/shrinkage; healthy routing report drivers poll deadlines within 100 ms.
+Idle local sources switch from SR to RR after losing sender status. The
+transport stats snapshot exposes the live counts.
+When native send/receive streams share a local SSRC, the media session combines
+their report state: one schedule emits SR plus the receiver's RR block (or RR
+once idle), rather than counting two independent reporters for one SSRC.
+
+SR RTP/NTP pairs advance from the newest transmitted RTP timestamp and its
+monotonic anchor at the configured codec clock rate. Equal-timestamp fragments
+and reordered packets do not rebase that anchor. Explicit clock/random-draw
+primitives support deterministic rollover, idle and reconsideration tests.
+Original publisher capture-clock correlation across SFU legs is not yet
+preserved by this send-anchor approximation.
+
 SRTP retains up to 64 SSRC contexts in each send-RTP, receive-RTP and
 receive-SRTCP table for the entire key lifetime. It never evicts replay windows
 or rollover counters. Receive entries are allocated only after authentication;
@@ -514,9 +538,10 @@ Client-facade tests (`test_peer`, `test_data_channel`,
 - TURN uses long-term credentials over UDP/TCP/verified TLS; server/address
   failover and authentication v2 are not implemented.
 - Reports and feedback are compound SR/RR + SDES, with feedback capability
-  intersection in SDP. Reports use randomized bandwidth-aware scheduling for
-  the four-SSRC one-camera/one-microphone connection, not full dynamic RTP-group
-  reconsideration. Incoming/outgoing BYE and inactivity expiry are implemented;
-  SSRC collision recovery remains incomplete.
+  intersection in SDP. Reports use bounded live membership, sender expiry and
+  timer/reverse reconsideration for the supported unicast profile.
+  Incoming/outgoing BYE and inactivity expiry are implemented; SSRC collision
+  recovery, original publisher capture-clock correlation across SFU legs and
+  large-group BYE backoff remain incomplete.
 - Replay windows and fingerprint checks are implemented, but this educational
   stack has not undergone an independent production security audit.

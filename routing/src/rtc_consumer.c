@@ -64,6 +64,9 @@ static void consumer_report_timer(void *user) {
     if (rc != RTC_OK && rc != RTC_ERR_TIMEOUT)
         RTC_LOG_WARN("Consumer sender report failed: %d", rc);
     uint64_t now = rtc_time_ms();
+    if ((rc == RTC_OK || rc == RTC_ERR_TIMEOUT) &&
+        (next <= now || next > now + RTC_RTCP_RECONSIDER_POLL_MS))
+        next = now + RTC_RTCP_RECONSIDER_POLL_MS;
     consumer->report_timer = rtc_worker_add_timer(consumer->worker, next > now ? next : now + 1000,
                                                   consumer_report_timer, consumer);
     if (consumer->report_timer == RTC_WORKER_TIMER_INVALID)
@@ -144,6 +147,7 @@ rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
     }
 #endif
     rtc_rtcp_stats_init(&consumer->rtcp, consumer->rtp.ssrc);
+    consumer->rtcp.send_clock_rate = consumer->rtp.codecs[0].clock_rate;
     atomic_store_explicit(&consumer->paused, opts->paused, memory_order_release);
     if (rtc_producer_add_consumer(opts->producer, consumer) != RTC_OK) {
         rtc_rate_control_destroy(consumer->rate_controller);

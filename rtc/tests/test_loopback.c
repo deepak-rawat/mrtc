@@ -317,7 +317,8 @@ static bool setup_media(loop_endpoint_t *endpoint, uint8_t send_pt, uint8_t recv
     endpoint->recv_stream = rtc_rtp_recv_stream_create(&(rtc_rtp_recv_stream_config_t){
         .payload_type = recv_pt,
         .clock_rate = 90000,
-        .local_ssrc = recv_local_ssrc,
+        .local_ssrc =
+            recv_local_ssrc ? recv_local_ssrc : rtc_rtp_send_stream_ssrc(endpoint->send_stream),
     });
     if (!endpoint->send_stream || !endpoint->recv_stream)
         return false;
@@ -384,12 +385,25 @@ TEST(loopback_bye_expiry_and_replay_preserve_source_isolation) {
     rtc_transport_on_data(lite.transport, data_callback, &data);
     ASSERT(connect_endpoints(&full, &lite));
     const uint8_t payload[] = {0x10, 0};
+    uint8_t short_header[8] = {0};
+    size_t invalid_length = RTP_HEADER_SIZE;
+    ASSERT_EQ(rtc_transport_send_rtp(full.transport, short_header, &invalid_length,
+                                     sizeof(short_header)),
+              RTC_ERR_NOMEM);
     ASSERT_EQ(rtc_rtp_send_stream_send(full.send_stream, payload, sizeof(payload), 3000, true),
               RTC_OK);
     ASSERT(wait_for_frame(&frames, 1, 1000));
     uint32_t original = rtc_rtp_send_stream_ssrc(full.send_stream);
+    rtc_transport_stats_t membership;
+    ASSERT_EQ(rtc_transport_get_stats(lite.transport, &membership), RTC_OK);
+    ASSERT(membership.rtcp_members >= 1);
+    ASSERT_EQ(membership.rtcp_senders, 1);
     ASSERT_EQ(rtc_transport_send_bye(full.transport, original), RTC_OK);
     ASSERT(wait_for_source_end(&source, 1));
+    ASSERT_EQ(rtc_transport_get_stats(lite.transport, &membership), RTC_OK);
+    ASSERT_EQ(membership.rtcp_senders, 0);
+    ASSERT_EQ(rtc_transport_get_stats(full.transport, &membership), RTC_OK);
+    ASSERT_EQ(membership.rtcp_senders, 0);
     ASSERT_EQ(atomic_load(&source.previous), original);
     for (unsigned i = 0; i < 10; i++)
         ASSERT_EQ(rtc_rtp_send_stream_send(full.send_stream, payload, sizeof(payload), 3000, true),
@@ -429,6 +443,24 @@ TEST(loopback_bye_expiry_and_replay_preserve_source_isolation) {
     frame_rec_destroy(&unused_frames);
 }
 
+typedef struct {
+    loop_endpoint_t *endpoint;
+    rtc_rtcp_stats_t sender, receiver;
+    rtc_rtcp_packet_t packet;
+    int rc;
+} shared_report_t;
+
+static void snapshot_shared_report(void *user) {
+    shared_report_t *report = user;
+    rtc_interceptor_chain_tick(&report->endpoint->media.chain, rtc_time_ms());
+    report->sender = *rtc_rtp_send_stream_stats(report->endpoint->send_stream);
+    report->receiver = *rtc_rtp_recv_stream_stats(report->endpoint->recv_stream);
+    rtc_rtcp_packet_t wire;
+    report->rc = rtc_rtcp_build_sr(&wire, &report->sender);
+    if (report->rc == RTC_OK)
+        report->rc = rtc_rtcp_parse(&report->packet, wire.buf, wire.buf_len);
+}
+
 TEST(loopback_full_to_lite_media_feedback_and_data) {
     frame_rec_t full_frames;
     frame_rec_t lite_frames;
@@ -445,8 +477,8 @@ TEST(loopback_full_to_lite_media_feedback_and_data) {
     loop_endpoint_t lite;
     ASSERT(make_endpoint(&full, RTC_ICE_MODE_FULL));
     ASSERT(make_endpoint(&lite, RTC_ICE_MODE_LITE));
-    ASSERT(setup_media(&full, 96, 97, 0xF0F0F0F0u, &full_frames, &full_feedback));
-    ASSERT(setup_media(&lite, 97, 96, 0xB0B0B0B0u, &lite_frames, NULL));
+    ASSERT(setup_media(&full, 96, 97, 0, &full_frames, &full_feedback));
+    ASSERT(setup_media(&lite, 97, 96, 0, &lite_frames, NULL));
     ASSERT(connect_endpoints(&full, &lite));
 
     const uint8_t payload_full_to_lite[] = {0xFE, 0xED, 0xFA, 0xCE};
@@ -479,6 +511,15 @@ TEST(loopback_full_to_lite_media_feedback_and_data) {
     ASSERT_EQ(full_frames.payload_len, sizeof(payload_lite_to_full));
     ASSERT_MEM_EQ(full_frames.payload, payload_lite_to_full, sizeof(payload_lite_to_full));
     ASSERT_EQ(full_frames.ssrc, rtc_rtp_send_stream_ssrc(lite.send_stream));
+
+    shared_report_t report = {.endpoint = &full};
+    ASSERT_EQ(rtc_transport_invoke(full.transport, snapshot_shared_report, &report), RTC_OK);
+    ASSERT_EQ(report.rc, RTC_OK);
+    ASSERT_EQ(report.packet.sr.sender_pkt_count, 2);
+    ASSERT_EQ(report.packet.report_count, 1);
+    ASSERT_EQ(report.packet.reports[0].ssrc, rtc_rtp_send_stream_ssrc(lite.send_stream));
+    ASSERT_EQ(report.sender.next_report_time, report.receiver.next_report_time);
+    ASSERT_EQ(report.sender.packets_received, report.receiver.packets_received);
 
     const rtc_rtcp_stats_t *full_send_stats = rtc_rtp_send_stream_stats(full.send_stream);
     const rtc_rtcp_stats_t *lite_recv_stats = rtc_rtp_recv_stream_stats(lite.recv_stream);

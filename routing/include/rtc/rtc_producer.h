@@ -38,7 +38,7 @@ int rtc_producer_get_stats(rtc_producer_t *producer, rtc_producer_stats_t *out);
 int rtc_producer_request_keyframe(rtc_producer_t *producer);
 /* Configure negotiated upstream feedback on the owning transport worker. */
 void rtc_producer_set_rtcp_feedback(rtc_producer_t *producer, uint8_t feedback);
-/* Feed publisher reports on the owning worker to retain SR timing for RRs. */
+/* Feed publisher compounds, including reports/BYE, on the owning worker. */
 int rtc_producer_handle_rtcp(rtc_producer_t *producer, const uint8_t *data, size_t len);
 
 #endif /* RTC_PRODUCER_H */

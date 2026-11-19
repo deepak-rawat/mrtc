@@ -46,6 +46,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         (void)rtc_rtcp_parse_remb(&remb, data, size);
         (void)rtc_rtcp_parse_bye(&bye, data, size);
         (void)rtc_rtcp_validate_compound(data, size);
+        rtc_rtcp_membership_t group = {0};
+        (void)rtc_rtcp_membership_touch(&group, 1, true, true, 1);
+        (void)rtc_rtcp_membership_on_rtcp(&group, data, size, false, size + 68, 2);
+        rtc_rtcp_membership_expire(&group, 8000, 1000000);
     } else if (parser == 5) {
         size_t length;
         (void)rtc_turn_stream_frame_length(data, size, &length);

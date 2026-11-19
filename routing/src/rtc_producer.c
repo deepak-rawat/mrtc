@@ -66,6 +66,8 @@ static void producer_report_timer(void *user) {
         producer->rtcp.next_report_time > now ? producer->rtcp.next_report_time : now + 1000;
     if (!producer->rtcp.packets_received || expiry < next)
         next = expiry;
+    if ((rc == RTC_OK || rc == RTC_ERR_TIMEOUT) && next > now + RTC_RTCP_RECONSIDER_POLL_MS)
+        next = now + RTC_RTCP_RECONSIDER_POLL_MS;
     producer->report_timer =
         rtc_worker_add_timer(producer->worker, next, producer_report_timer, producer);
     if (producer->report_timer == RTC_WORKER_TIMER_INVALID)
