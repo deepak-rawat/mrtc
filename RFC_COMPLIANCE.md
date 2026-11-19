@@ -19,7 +19,7 @@ changes there alone do not change client or SFU connectivity.
 | RFC 8445 — ICE | Full/lite operation, controlling/controlled roles, conflicts, nomination, consent and active restart on the runtime | Not a complete implementation of every checklist/dual-stack extension |
 | RFC 7675 — consent | Authenticated consent requests and expiration of an unresponsive selected path | Application reconnect policy remains application-owned |
 | RFC 8838 / RFC 8839 — trickle ICE and SDP | Asynchronous candidates, remote ingestion, end-of-candidates, ICE-lite signaling and retained browser candidate metadata | mDNS is deferred to authenticated peer-reflexive checks, not resolved by a multicast-DNS service |
-| RFC 8656 / RFC 5766 — TURN | Worker-owned UDP relay allocation over UDP/TCP/verified TLS, permissions/channels, refresh and relay-only connectivity | One server/peer per logical transport; no server/address failover or authentication v2 |
+| RFC 8656 / RFC 5766 — TURN | Worker-owned UDP relay allocation over UDP/TCP/verified TLS, bounded pre-allocation address failover, permissions/channels, refresh and relay-only connectivity | One server identity/peer per logical transport; no multiple-server failover, live allocation migration or authentication v2; IPv6 relay qualification remains open |
 | RFC 6347 / RFC 9147 — DTLS | Minimum DTLS 1.2; newer versions negotiated when supported by OpenSSL; datagram-preserving BIOs on OpenSSL 3.2+ | Older OpenSSL uses the existing memory-BIO fallback |
 | RFC 5764 — DTLS-SRTP | Profile negotiation, key export and remote SHA-256 fingerprint pinning | Signaling authenticity is not provided by fingerprint pinning alone |
 | RFC 7983 — packet demultiplexing | Shared UDP classification and logical-transport routing | Distinct DTLS associations still require distinct network tuples |
@@ -114,7 +114,12 @@ the client-to-server leg; relay candidates remain UDP. Stream I/O is nonblocking
 framed and bounded (64 KiB send queue, 500 ms queued-write deadline after
 connection, five-second connect/TLS deadline). TCP_NODELAY prevents small
 control messages waiting behind Nagle/delayed acknowledgements. Multiple-server
-configurations fail explicitly; DNS currently selects one resolved address.
+configurations fail explicitly. One identity may try up to four resolved
+addresses before allocation, with a five-second budget per attempt when
+alternatives exist. Address-family alternatives are retained, and callers may
+provide a copied numeric address list. TLS always verifies the original host.
+Successful allocations are pinned; exhausting addresses never enables a direct
+path. Retry timers and failed sockets are worker-owned and cancelled on close.
 Candidates and end-of-candidates can arrive after the initial SDP.
 
 **Validation:** [network runtime tests](rtc/tests/test_network_runtime.c),
@@ -178,7 +183,7 @@ success does not certify every SDL device/launch configuration.
 
 - SSRC collision recovery, cross-leg capture-clock synchronization and large-group BYE backoff; broader fault qualification of membership reconsideration and BYE/source expiry.
 - FEC/RTX, simulcast/SVC and additional codecs.
-- TURN server/address failover, dual-stack completeness and STUN authentication v2.
+- Multiple TURN servers, post-allocation recovery, dual-stack completeness and STUN authentication v2; hostile-network qualification of pre-allocation address failover.
 - Full SDP/Unified Plan coverage and established codec changes.
 - Production authentication, authorization, HTTPS/WSS deployment, quotas,
   sophisticated per-subscriber bitrate allocation and independent security review.

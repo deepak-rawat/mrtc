@@ -178,8 +178,9 @@ The retained changes are a tested foundation, not completion of work items 0–6
    backoff is outside this profile and remains unimplemented.
 3. Qualify conservative shared-source bitrate adaptation under impairments,
    then complete pacing and subscriber-wide allocation across media legs.
-4. Qualify TURN under hostile networks and complete server/address failover and
-   dual-stack selection. Nonblocking read/write readiness and TCP/TLS TURN are
+4. Qualify TURN under hostile networks and complete multiple-server failover,
+   post-allocation recovery and dual-stack relay/candidate selection. Bounded
+   pre-allocation address failover, nonblocking readiness and TCP/TLS TURN are
    now implemented, with verified certificates, bounded framing/partial writes,
    refresh and coturn runtime/client tests.
 5. Add broader allocation-failure/stateful fuzz/concurrency coverage, hostile
@@ -293,6 +294,53 @@ Local validation of these changes:
   post-warmup growth was at most 0.53125 MiB for the server and 0.4375 MiB
   for any client. This short sampled run is not long-soak/capacity certification.
 
+## TURN pre-allocation address failover
+
+One TURN server identity can now use up to four address alternatives. DNS runs
+on the configuring caller; the runtime retains unique results and puts an
+alternate address family second when available. Core callers may instead
+provide `rtc_turn_server_t.addresses` / `address_count`, with matching service
+ports, to use their own resolver without worker-side DNS.
+
+Retries are sequential and worker-owned, not parallel socket races. With
+alternatives, each address gets a five-second allocation budget, checked every
+100 ms; immediate failure advances sooner. A single address retains the
+existing transaction deadlines. DNS and process scheduling are outside those
+allocation budgets. The transport copies addresses, host, credentials and CA
+path before returning, so retries do not borrow caller storage.
+
+Every attempt uses the same protocol and configured server identity. TLS still
+verifies that original name/IP and trust chain, including on an alternate IP;
+there is no plaintext or certificate-verification fallback. Each attempt starts
+fresh TURN challenge/channel state. Failed I/O is unregistered before
+replacement, and retry timers are cancelled on close. A failed runtime remains
+in place on exhaustion so relay-only traffic cannot fall through to the direct
+listener. Core transport stats expose attempts and terminal `turn_failed`.
+
+The first successful allocation pins the address, even before candidate
+publication. It is not replaced after permission/refresh failure or ICE restart.
+Recovery then requires a new transport; multiple server URLs, live allocation
+migration, DNS re-resolution and full IPv6 relay/candidate qualification remain
+open. Address-family fallback for the TURN connection is not complete
+dual-stack ICE support.
+
+Local qualification:
+
+- Warning-free native build; 21 distinct targeted runtime/native-peer CTests
+  passed across focused Debug, ASan/UBSan and TSan runs.
+- Real coturn UDP/TCP/verified TLS, fallback after refused/unresponsive endpoints,
+  all four address slots, DNS hostnames and caller-buffer lifetime.
+- Accepted-but-silent TCP/TLS endpoints verify the five-second budget and
+  cancellation while the shared worker remains alive. Original normal
+  allocation deadlines were not extended.
+- Exhaustion cannot accept even a correctly authenticated direct nomination;
+  untrusted/wrong-name certificates remain rejected after fallback.
+- Media/data survive short allocation/permission/channel refresh; successful
+  allocations stay pinned beyond the retry budget. Native peer tests cover
+  hostname URLs, SCTP, refresh and ICE restart.
+- The four real native mesh/SFU/AUTO conference E2E scenarios pass. This does
+  not establish browser-forced-relay, hostile-WAN or external-platform coverage.
+
 ## Latest transport implementation
 
 The project code is now MIT-licensed; dependencies retain their own licenses.
@@ -301,8 +349,9 @@ UDP/TCP/TLS client-to-server legs without blocking the media worker; TLS has
 strict trust-chain and server-name/IP verification. Library users configure
 `rtc_transport_set_turn_server_ex()` or a single peer `turn:`/`turns:` URL.
 Stream sends are bounded to 64 KiB and 500 ms after connection; connection/TLS
-setup is bounded to five seconds. DNS uses the calling thread and selects one
-address. This is not server/address failover.
+setup is bounded to five seconds. DNS uses the calling thread; bounded address
+alternatives are described above. This is not multiple-server or in-call
+allocation failover.
 
 Local UDP/TCP/TLS runtime and native peer tests pass, including real SRTP,
 DTLS data, SCTP, allocation refresh and ICE restart. Trusted-CA/wrong-identity

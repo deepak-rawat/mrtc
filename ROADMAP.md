@@ -18,7 +18,7 @@ The P0–P2 work is organized into independently testable areas:
 | Trickle ICE | Forward local candidates and end-of-candidates, apply delayed remote candidates, and surface signaling errors |
 | Transport identity | Pin remote SDP fingerprints, reject mismatches, enforce DTLS 1.2 minimum, and preserve datagram boundaries |
 | ICE lifecycle | Full/lite roles, role conflicts, nomination, consent expiration and active restart with media/data continuity |
-| TURN | Runtime relay-only connectivity with authenticated UDP allocation, permissions/channels, refresh and cleanup against coturn |
+| TURN | Runtime relay-only UDP/TCP/verified TLS, bounded pre-allocation address retries, permissions/channels, refresh and cleanup against coturn |
 | Live negotiation | Track/direction updates, explicit glare rejection/rollback and safe rejection of unsupported codec changes |
 | Standard data channels | usrsctp SCTP/DCEP, partial reliability, fragmentation, backpressure and stream reset, verified with a browser |
 | Congestion and forwarding | Apply transport estimates to encoders; bounded send/retransmission state; explicit failure/drop reporting |
@@ -70,7 +70,9 @@ working NACK, PLI, RTP extensions or replay windows.
 
 ### 3. Expand hostile-network and deployment coverage
 
-- TURN server/address failover and STUN long-term authentication v2.
+- Multiple TURN servers, post-allocation recovery and STUN long-term
+  authentication v2. Pre-allocation address failover is implemented and needs
+  broader hostile-network qualification.
 - IPv6/dual-stack relay and candidate selection.
 - Network changes and NAT behavior against independent implementations.
 - Fault injection across both SFU media legs, keeping queues and caches bounded.
