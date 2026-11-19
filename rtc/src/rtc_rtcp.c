@@ -72,6 +72,24 @@ int rtc_rtcp_stats_init(rtc_rtcp_stats_t *stats, uint32_t ssrc) {
     return RTC_OK;
 }
 
+int rtc_rtcp_stats_reset_source(rtc_rtcp_stats_t *stats) {
+    if (!stats)
+        return RTC_ERR_INVALID;
+    rtc_rtcp_stats_t reset = {
+        .ssrc = stats->ssrc,
+        .packets_sent = stats->packets_sent,
+        .octets_sent = stats->octets_sent,
+        .rtp_timestamp = stats->rtp_timestamp,
+        .last_report_time = stats->last_report_time,
+        .next_report_time = stats->next_report_time,
+        .report_target_bps = stats->report_target_bps,
+        .last_report_size = stats->last_report_size,
+        .first_packet = true,
+    };
+    *stats = reset;
+    return RTC_OK;
+}
+
 void rtc_rtcp_stats_on_rtp_recv(rtc_rtcp_stats_t *stats, uint16_t seq, uint32_t timestamp,
                                 uint32_t ssrc, uint32_t clock_rate) {
     if (!stats)
@@ -351,8 +369,9 @@ int rtc_rtcp_build_report(rtc_rtcp_packet_t *pkt, const rtc_rtcp_stats_t *stats,
     return RTC_OK;
 }
 
-uint32_t rtc_rtcp_interval_ms(uint32_t bandwidth_bps, size_t average_packet_bytes, unsigned members,
-                              unsigned senders, bool sending, bool initial, uint32_t random_value) {
+static double deterministic_interval_ms(uint32_t bandwidth_bps, size_t average_packet_bytes,
+                                        unsigned members, unsigned senders, bool sending,
+                                        bool initial) {
     if (!bandwidth_bps || !average_packet_bytes || !members || senders > members ||
         (sending && !senders)) {
         RTC_LOG_ERR("Invalid RTCP interval parameters");
@@ -373,8 +392,24 @@ uint32_t rtc_rtcp_interval_ms(uint32_t bandwidth_bps, size_t average_packet_byte
     double minimum = initial ? 2500.0 : 5000.0;
     if (interval < minimum)
         interval = minimum;
+    return interval;
+}
+
+uint32_t rtc_rtcp_interval_ms(uint32_t bandwidth_bps, size_t average_packet_bytes, unsigned members,
+                              unsigned senders, bool sending, bool initial, uint32_t random_value) {
+    double interval = deterministic_interval_ms(bandwidth_bps, average_packet_bytes, members,
+                                                senders, sending, initial);
     interval *= (0.5 + (double)random_value / UINT32_MAX) / 1.21828;
     return interval >= UINT32_MAX ? UINT32_MAX : (uint32_t)(interval + 0.5);
+}
+
+uint64_t rtc_rtcp_source_timeout_ms(const rtc_rtcp_stats_t *stats) {
+    uint32_t target = stats && stats->report_target_bps ? stats->report_target_bps : 500000;
+    size_t size = stats && stats->last_report_size ? stats->last_report_size : 128;
+    uint32_t budget = target / 20;
+    double interval = deterministic_interval_ms(budget ? budget : 1, size, 4, 2, false, false);
+    double timeout = interval * 5.0;
+    return timeout >= 0x1p64 ? UINT64_MAX : (uint64_t)(timeout + 0.5);
 }
 
 static int schedule_report(rtc_rtcp_stats_t *stats, uint64_t now, bool initial,
@@ -427,6 +462,68 @@ int rtc_rtcp_build_bye(uint8_t *buf, size_t capacity, size_t *len, uint32_t ssrc
     write_u16(buf + 2, 1);
     write_u32(buf + 4, ssrc);
     *len = 8;
+    return RTC_OK;
+}
+
+int rtc_rtcp_parse_bye(rtc_rtcp_bye_t *bye, const uint8_t *data, size_t len) {
+    if (!bye || !data || len < 4 || (data[0] >> 6) != 2 || data[1] != RTCP_PT_BYE)
+        return RTC_ERR_INVALID;
+    size_t size = ((size_t)read_u16(data + 2) + 1) * 4;
+    if (size > len)
+        return RTC_ERR_INVALID;
+    size_t end = size;
+    if (data[0] & 0x20) {
+        uint8_t padding = data[size - 1];
+        if (!padding || padding > size - 4)
+            return RTC_ERR_INVALID;
+        end -= padding;
+    }
+    unsigned count = data[0] & 31;
+    size_t sources_end = 4 + (size_t)count * 4;
+    if (sources_end > end)
+        return RTC_ERR_INVALID;
+    if (sources_end < end) {
+        size_t reason_end = sources_end + 1 + data[sources_end];
+        if (reason_end > end || ((reason_end + 3) & ~(size_t)3) != end)
+            return RTC_ERR_INVALID;
+        for (size_t i = reason_end; i < end; i++)
+            if (data[i])
+                return RTC_ERR_INVALID;
+    }
+    rtc_rtcp_bye_t parsed = {.count = count};
+    for (unsigned i = 0; i < count; i++)
+        parsed.ssrcs[i] = read_u32(data + 4 + i * 4);
+    *bye = parsed;
+    return RTC_OK;
+}
+
+int rtc_rtcp_validate_compound(const uint8_t *data, size_t len) {
+    if (!data || len < 4 || len % 4)
+        return RTC_ERR_INVALID;
+    size_t offset = 0;
+    while (offset < len) {
+        if (len - offset < 4 || (data[offset] >> 6) != 2 || data[offset + 1] < 192 ||
+            data[offset + 1] > 223)
+            return RTC_ERR_INVALID;
+        size_t size = ((size_t)read_u16(data + offset + 2) + 1) * 4;
+        if (size > len - offset)
+            return RTC_ERR_INVALID;
+        if (data[offset] & 0x20) {
+            uint8_t padding = data[offset + size - 1];
+            if (offset + size != len || !padding || padding > size - 4)
+                return RTC_ERR_INVALID;
+        }
+        if (data[offset + 1] == RTCP_PT_BYE) {
+            rtc_rtcp_bye_t bye;
+            if (rtc_rtcp_parse_bye(&bye, data + offset, size) != RTC_OK)
+                return RTC_ERR_INVALID;
+        } else if (data[offset + 1] == RTCP_PT_SR || data[offset + 1] == RTCP_PT_RR) {
+            rtc_rtcp_packet_t report;
+            if (rtc_rtcp_parse(&report, data + offset, size) != RTC_OK)
+                return RTC_ERR_INVALID;
+        }
+        offset += size;
+    }
     return RTC_OK;
 }
 

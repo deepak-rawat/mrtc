@@ -54,6 +54,48 @@ TEST(rtcp_interval_loss_and_late_rollover) {
     ASSERT_EQ(packet.reports[0].cumulative_lost, 1);
 }
 
+TEST(rtcp_bye_lists_reasons_padding_and_atomic_validation) {
+    uint8_t padded[] = {0xa2, RTCP_PT_BYE, 0,    6,    0,   0,   0,   11,  0,   0,
+                        0,    22,          7,    'l',  'e', 'a', 'v', 'i', 'n', 'g',
+                        0x11, 0x22,        0x33, 0x44, 0,   0,   0,   8};
+    rtc_rtcp_bye_t bye;
+    ASSERT_EQ(rtc_rtcp_parse_bye(&bye, padded, sizeof(padded)), RTC_OK);
+    ASSERT_EQ(bye.count, 2);
+    ASSERT_EQ(bye.ssrcs[0], 11);
+    ASSERT_EQ(bye.ssrcs[1], 22);
+    ASSERT_EQ(rtc_rtcp_validate_compound(padded, sizeof(padded)), RTC_OK);
+    ASSERT_EQ(rtc_rtcp_parse_bye(&bye, padded, sizeof(padded) - 1), RTC_ERR_INVALID);
+    bye.count = 7;
+    padded[0] = 0xa3;
+    ASSERT_EQ(rtc_rtcp_parse_bye(&bye, padded, sizeof(padded)), RTC_ERR_INVALID);
+    ASSERT_EQ(bye.count, 7);
+    padded[0] = 0xa2;
+    padded[27] = 0;
+    ASSERT_EQ(rtc_rtcp_parse_bye(&bye, padded, sizeof(padded)), RTC_ERR_INVALID);
+    padded[27] = 25;
+    ASSERT_EQ(rtc_rtcp_parse_bye(&bye, padded, sizeof(padded)), RTC_ERR_INVALID);
+    padded[27] = 8;
+    uint8_t compound[36];
+    memcpy(compound, padded, sizeof(padded));
+    const uint8_t rr[] = {0x80, RTCP_PT_RR, 0, 1, 0, 0, 0, 1};
+    memcpy(compound + sizeof(padded), rr, sizeof(rr));
+    ASSERT_EQ(rtc_rtcp_validate_compound(compound, sizeof(compound)), RTC_ERR_INVALID);
+
+    uint8_t reason[] = {0x81, RTCP_PT_BYE, 0, 3, 0, 0, 0, 1, 4, 'b', 'y', 'e', '!', 0, 0, 0};
+    ASSERT_EQ(rtc_rtcp_parse_bye(&bye, reason, sizeof(reason)), RTC_OK);
+    reason[15] = 1;
+    ASSERT_EQ(rtc_rtcp_parse_bye(&bye, reason, sizeof(reason)), RTC_ERR_INVALID);
+    const uint8_t empty[] = {0x80, RTCP_PT_BYE, 0, 0};
+    ASSERT_EQ(rtc_rtcp_parse_bye(&bye, empty, sizeof(empty)), RTC_OK);
+    ASSERT_EQ(bye.count, 0);
+    uint8_t maximum[128] = {0x9f, RTCP_PT_BYE, 0, 31};
+    for (unsigned i = 0; i < 31; i++)
+        maximum[7 + i * 4] = (uint8_t)(i + 1);
+    ASSERT_EQ(rtc_rtcp_parse_bye(&bye, maximum, sizeof(maximum)), RTC_OK);
+    ASSERT_EQ(bye.count, 31);
+    ASSERT_EQ(bye.ssrcs[30], 31);
+}
+
 TEST(rtcp_build_sr) {
     rtc_rtcp_stats_t stats;
     rtc_rtcp_stats_init(&stats, 0xDEADBEEF);
@@ -389,6 +431,7 @@ int main(void) {
     rtc_set_log_level(RTC_LOG_DEBUG);
 
     RUN_TEST(rtcp_build_sr);
+    RUN_TEST(rtcp_bye_lists_reasons_padding_and_atomic_validation);
     RUN_TEST(rtcp_randomized_bandwidth_intervals_and_bye);
     RUN_TEST(rtcp_remb_bounds_and_quantization);
     RUN_TEST(rtcp_feedback_is_compound_without_reduced_size);

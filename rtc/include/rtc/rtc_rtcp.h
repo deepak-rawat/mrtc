@@ -116,6 +116,9 @@ typedef struct {
 
 /* Initialize RTCP statistics context */
 int rtc_rtcp_stats_init(rtc_rtcp_stats_t *stats, uint32_t ssrc);
+/* Reset reception state for a new/retired remote source, retaining local
+ * sender counters and the existing RTCP scheduling budget/deadline. */
+int rtc_rtcp_stats_reset_source(rtc_rtcp_stats_t *stats);
 
 /* Update receiver stats when an RTP packet is received */
 void rtc_rtcp_stats_on_rtp_recv(rtc_rtcp_stats_t *stats, uint16_t seq, uint32_t timestamp,
@@ -150,6 +153,16 @@ uint32_t rtc_rtcp_interval_ms(uint32_t bandwidth_bps, size_t average_packet_byte
 int rtc_rtcp_report_due(rtc_rtcp_stats_t *stats, uint32_t media_target_bps, size_t report_size,
                         uint64_t now_ms);
 int rtc_rtcp_build_bye(uint8_t *buf, size_t capacity, size_t *len, uint32_t ssrc);
+typedef struct {
+    uint32_t ssrcs[31];
+    unsigned count;
+} rtc_rtcp_bye_t;
+/* Validates the optional reason/alignment and RTCP padding before returning
+ * the source list. A zero-source BYE is valid and has no lifecycle effect. */
+int rtc_rtcp_parse_bye(rtc_rtcp_bye_t *bye, const uint8_t *data, size_t len);
+/* Validate all framing/padding and report/BYE bodies before dispatch. */
+int rtc_rtcp_validate_compound(const uint8_t *data, size_t len);
+uint64_t rtc_rtcp_source_timeout_ms(const rtc_rtcp_stats_t *stats);
 /* Prefix standalone feedback/BYE with RR + SDES; reduced-size RTCP is not
  * advertised. Existing SR/RR compounds are left unchanged. */
 int rtc_rtcp_compound_feedback(uint8_t *buf, size_t *len, size_t capacity);
