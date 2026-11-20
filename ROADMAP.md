@@ -80,6 +80,10 @@ working NACK, PLI, RTP extensions or replay windows.
 
 - Measure and qualify subscriber-wide video allocation and bounded frame-aware
   packet scheduling informed by congestion, including their CPU/latency cost.
+- Profile the measured server-CPU regression against the original baseline
+  (+13.79%, above budget in all three pairs); resolve the failed RSS and
+  inconsistent transport-maximum-latency gates. See the comparative evidence
+  in [PRODUCTION.md](PRODUCTION.md); a no-regression result is not established.
 - Better operational counters and explicit resource limits.
 - Evaluate a single bidirectional bundled connection per participant before
   adding simulcast or more complex transport sharing.

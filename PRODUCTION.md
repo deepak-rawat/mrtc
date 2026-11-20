@@ -263,6 +263,77 @@ dimensions/bitrate rather than guessing them. The opt-in performance workflow
 and local commands are documented in
 [the interop benchmark guide](tests/interop/README.md).
 
+### Bounded comparative result
+
+The completed comparison used clean `9a9319b` and `0982ee1`, matched
+warning-free Release builds, AppleClang 21 on macOS arm64, and the same hashed
+OpenSSL 4.1.0, libvpx 1.17.0, Opus 1.6.1, usrsctp 0.9.5.0 and
+libwebsockets 5.1.0 dependencies. The media workload was eight native
+participants in one fixed-SFU room. Three chronological AB/BA/AB pairs each
+used 60 seconds of warmup and 120 seconds of measurement. The separate
+fingerprint-verified UDP/DTLS/SRTP transport workload used three pairs with
+five-second warmup and 15-second measurement intervals.
+
+All six media and six transport runs passed their functional assertions.
+The performance comparison exited **1: regression**, also reporting
+insufficient/noisy evidence. It is not a no-regression pass.
+
+The table gives independently calculated medians across the three runs per
+variant; totals need not equal sums of those medians. CPU is a percentage of
+one logical core, not the whole machine.
+
+| Metric | Baseline | Candidate | Relative delta |
+|---|---:|---:|---:|
+| Server CPU | 12.57% | 14.30% | **+13.79%** |
+| Combined client CPU | 76.95% | 78.59% | +2.13% |
+| Server + client CPU | 89.57% | 92.85% | +3.66% |
+| Controller CPU | 1.20% | 1.18% | -1.72% |
+| Server peak sampled RSS | 74.50 MiB | 83.02 MiB | **+11.43%** |
+| Combined client peak sampled RSS | 200.47 MiB | 225.48 MiB | **+12.48%** |
+| Total peak sampled RSS | 274.89 MiB | 303.50 MiB | **+10.41%** |
+| Decoded video | 810.80 frames/s | 811.60 frames/s | +0.10% |
+| Decoded audio | 2,425,133 samples/s | 2,421,589 samples/s | -0.15% |
+| Application SCTP/controller RTT p50 | 43.43 ms | 43.06 ms | -0.87% |
+| Application SCTP/controller RTT p95 | 56.89 ms | 56.05 ms | -1.49% |
+| Application SCTP/controller RTT maximum | 68.30 ms | 64.96 ms | -4.89% |
+| Transport CPU | 98.71% | 99.17% | +0.46% |
+| Transport peak sampled RSS | 21.47 MiB | 21.56 MiB | +0.44% |
+| Transport delivered packets | 93,152.74 packets/s | 92,606.17 packets/s | -0.59% |
+| Transport delivered payload | 93.15 MB/s | 92.61 MB/s | -0.59% |
+| Transport one-way p50 | 0.036 ms | 0.036 ms | 0% |
+| Transport one-way p95 | 0.050 ms | 0.051 ms | +2.00% |
+| Transport one-way maximum | 0.265 ms | 7.730 ms | **+2,816.98%** |
+
+Important qualifications:
+
+- Server CPU exceeded the 5% regression budget in all three pairs
+  (+19.72%, +13.34%, +14.98%), with nonoverlapping observed ranges.
+  The median increase is about 1.73 percentage points of one core.
+  This is a repeatable observed cost; its code-level cause has not been
+  established. Profiling and remediation remain open, not waived because
+  aggregate CPU stayed below its median threshold. One total-CPU pair
+  also exceeded 5% (+6.12%).
+- RSS exceeded the 10% budget. Combined client peak RSS exceeded it in all
+  three pairs; server/total peaks exceeded it in two pairs. Substantial
+  residency variability remains: baseline server peaks ranged from
+  38.86 to 79.95 MiB. These flags cannot be dismissed, but sampled RSS does
+  not identify live allocations, leaks or a proven cause.
+- Transport maximum latency was inconsistent: baseline run maxima were
+  0.265/9.829/0.228 ms; candidate maxima were 7.730/0.247/7.822 ms.
+  Two pairs exceeded budget and one improved. Retain the failed maximum
+  gate; stable p50/p95 do not establish an unchanged worst case.
+- Actual source dimensions and encoded bitrate were not exposed by runtime
+  stats. Matched configured defaults and decoded throughput do not establish
+  equal visual quality. Capture-to-render media latency was not measured.
+- The measurement window excluded this task's other loaded work, but
+  host-wide isolation on this shared machine was not established.
+
+The retained evidence includes the full 37-metric delta CSV (including every
+client), per-pair/noise flags, JSONL samples, comparison, manifest, executable
+and dependency hashes, host/load/VM-pressure snapshots and the earlier noisy
+baseline reports. Reproduction must preserve those qualifications rather than
+turning functional success or a noisy result into a performance pass.
+
 Application authentication remains deferred. No performance result can waive
 protocol correctness, transport verification or the external release gates.
 
