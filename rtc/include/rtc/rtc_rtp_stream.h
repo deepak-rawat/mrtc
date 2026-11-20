@@ -57,7 +57,9 @@ bool rtc_rtp_send_stream_is_active(const rtc_rtp_send_stream_t *stream);
 uint32_t rtc_rtp_send_stream_ssrc(const rtc_rtp_send_stream_t *stream);
 const rtc_rtcp_stats_t *rtc_rtp_send_stream_stats(const rtc_rtp_send_stream_t *stream);
 uint64_t rtc_rtp_send_stream_generation(const rtc_rtp_send_stream_t *stream);
-/* Configure negotiated one-byte MID before sending. Zero disables MID. */
+/* Configure negotiated one-byte MID before sending or on the transport worker.
+ * Permission changes discard stale protected packets without restarting RTP.
+ * Zero disables MID. */
 int rtc_rtp_send_stream_set_mid(rtc_rtp_send_stream_t *stream, uint8_t ext_id, const char *mid);
 void rtc_rtp_send_stream_on_source(rtc_rtp_send_stream_t *stream, rtc_rtp_recv_stream_source_fn fn,
                                    void *user);
@@ -110,6 +112,7 @@ const rtc_rtcp_stats_t *rtc_rtp_recv_stream_stats(const rtc_rtp_recv_stream_t *s
 void rtc_rtp_recv_stream_set_mid(rtc_rtp_recv_stream_t *stream, const char *mid);
 const char *rtc_rtp_recv_stream_mid(const rtc_rtp_recv_stream_t *stream);
 bool rtc_rtp_recv_stream_mid_matches(const rtc_rtp_recv_stream_t *stream, const char *mid);
+bool rtc_rtp_recv_stream_has_mid(const rtc_rtp_recv_stream_t *stream);
 
 void rtc_rtp_recv_stream_on_frame(rtc_rtp_recv_stream_t *stream, rtc_rtp_recv_stream_frame_fn fn,
                                   void *user);

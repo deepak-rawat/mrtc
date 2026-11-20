@@ -29,6 +29,7 @@ typedef struct sfu_session {
     bool offer_pending;
     bool refresh_pending;
     uint8_t twcc_id;
+    bool send_mid[SDP_MAX_MEDIA];
     bool publishing;
     struct rtc_sfu *sfu;
     rtc_sctp_t *sctp;
@@ -92,6 +93,19 @@ static void resume_live_consumer(rtc_consumer_t *consumer) {
     if (!stats.closed && !stats.source_ended)
         rtc_consumer_resume(consumer);
 }
+
+#ifdef MRTC_ENABLE_TWCC
+static bool sfu_twcc_rtp_allowed(const rtc_rtp_packet_t *packet, void *user) {
+    sfu_session_t *session = user;
+    for (int i = 0; i < session->remote.media_count; i++)
+        if (session->remote.media[i].ssrc == packet->header.ssrc)
+            return rtc_sdp_media_send_extmap_id(&session->remote.media[i],
+                                                RTC_EXT_URI_TRANSPORT_CC) &&
+                   rtc_sdp_media_recv_extmap_id(&session->description.media[i],
+                                                RTC_EXT_URI_TRANSPORT_CC);
+    return false;
+}
+#endif
 
 static void session_tick(void *user) {
     sfu_session_t *session = user;
@@ -404,6 +418,7 @@ static int subscribe(rtc_sfu_t *sfu, const char *subscriber, sfu_session_t *publ
         if (s->subscriptions[index] != wanted) {
             rtc_consumer_destroy(s->consumers[index]);
             s->consumers[index] = NULL;
+            s->send_mid[index] = false;
             s->subscriptions[index] = wanted;
             if (wanted)
                 s->consumers[index] = rtc_transport_consume(
@@ -417,10 +432,6 @@ static int subscribe(rtc_sfu_t *sfu, const char *subscriber, sfu_session_t *publ
             }
         }
         if (s->consumers[index]) {
-            char mid[17];
-            snprintf(mid, sizeof(mid), "%d", index);
-            if (rtc_consumer_set_mid(s->consumers[index], 1, mid) != RTC_OK)
-                return RTC_ERR_SDP;
             rtc_rtp_parameters_t rtp;
             if (rtc_consumer_get_rtp_parameters(s->consumers[index], &rtp) != RTC_OK)
                 return RTC_ERR_GENERIC;
@@ -480,8 +491,9 @@ static int validate_publisher(sfu_session_t *session, const rtc_sdp_t *remote, u
         if (old && (old->mid_index != media->mid_index || old->media_type != media->media_type))
             return RTC_ERR_SDP;
         if (media->media_type == RTC_MEDIA_APPLICATION) {
-            if (++applications > 1 || media->sctp_port != 5000 ||
-                (old && old->sctp_port != media->sctp_port))
+            if (++applications > 1 || (!media->rejected && media->sctp_port != 5000) ||
+                (session && session->sctp && media->rejected) ||
+                (old && !old->rejected && !media->rejected && old->sctp_port != media->sctp_port))
                 return RTC_ERR_SDP;
             continue;
         }
@@ -507,10 +519,19 @@ static int validate_publisher(sfu_session_t *session, const rtc_sdp_t *remote, u
                      old->clockrate != media->clockrate || old->channels != media->channels)))
             return RTC_ERR_SDP;
 #ifdef MRTC_ENABLE_TWCC
-        if (video && !*twcc_id && (media->rtcp_feedback & RTC_SDP_FB_TRANSPORT_CC))
-            *twcc_id = rtc_sdp_media_find_extmap_id(media, RTC_EXT_URI_TRANSPORT_CC);
+        if ((video || !*twcc_id) && (media->rtcp_feedback & RTC_SDP_FB_TRANSPORT_CC)) {
+            uint8_t id = rtc_sdp_media_find_extmap_id(media, RTC_EXT_URI_TRANSPORT_CC);
+            if (id)
+                *twcc_id = id;
+        }
 #endif
     }
+#ifdef MRTC_ENABLE_TWCC
+    for (int i = 0; session && session->twcc_id && i < remote->media_count; i++)
+        if (rtc_sdp_media_find_extmap_id(&remote->media[i], RTC_EXT_URI_TRANSPORT_CC) ==
+            session->twcc_id)
+            *twcc_id = session->twcc_id;
+#endif
     if (*twcc_id > 14 || (session && session->twcc_id && *twcc_id && session->twcc_id != *twcc_id))
         return RTC_ERR_SDP;
     return RTC_OK;
@@ -540,6 +561,8 @@ static int publish(rtc_sfu_t *sfu, const rtc_sfu_command_t *command) {
     for (int i = 0; i < remote.media_count; i++) {
         rtc_sdp_media_t *m = &remote.media[i];
         if (m->media_type == RTC_MEDIA_APPLICATION) {
+            if (m->rejected)
+                continue;
             if (!s->sctp)
                 s->sctp = rtc_sctp_create(send_sctp, s);
             if (!s->sctp) {
@@ -585,8 +608,14 @@ static int publish(rtc_sfu_t *sfu, const rtc_sfu_command_t *command) {
     if (rc != RTC_OK)
         goto fail;
 #ifdef MRTC_ENABLE_TWCC
-    if (twcc_id && (rc = rtc_transport_enable_twcc(s->transport, twcc_id, 1)) != RTC_OK)
+    bool cc_receive = false;
+    for (int i = 0; twcc_id && i < remote.media_count; i++)
+        cc_receive |=
+            (remote.media[i].rtcp_feedback & RTC_SDP_FB_TRANSPORT_CC) &&
+            rtc_sdp_media_send_extmap_id(&remote.media[i], RTC_EXT_URI_TRANSPORT_CC) == twcc_id;
+    if ((rc = rtc_transport_configure_twcc(s->transport, twcc_id, 0, false, cc_receive)) != RTC_OK)
         goto fail;
+    rtc_transport_on_twcc_rtp(s->transport, sfu_twcc_rtp_allowed, s);
 #endif
     /* Detach downstream consumers before retiring a replaced SSRC's producer. */
     for (int i = 0; i < SDP_MAX_MEDIA; i++) {
@@ -622,10 +651,15 @@ static int publish(rtc_sfu_t *sfu, const rtc_sfu_command_t *command) {
         if (s->producers[i])
             rtc_producer_set_rtcp_feedback(s->producers[i], s->description.media[i].rtcp_feedback);
         s->description.media[i].extmap_count = 0;
-        if (twcc_id && rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC) == twcc_id) {
-            rtc_sdp_media_add_extmap(&s->description.media[i], twcc_id, RTC_EXT_URI_TRANSPORT_CC);
+#ifdef MRTC_ENABLE_TWCC
+        uint8_t offered_cc = rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC);
+        if (offered_cc && (!twcc_id || offered_cc == twcc_id)) {
+            rtc_sdp_media_add_extmap(&s->description.media[i], offered_cc,
+                                     RTC_EXT_URI_TRANSPORT_CC);
+            rtc_sdp_media_answer_extmaps(&s->description.media[i], m);
             s->description.media[i].rtcp_feedback |= RTC_SDP_FB_TRANSPORT_CC;
         }
+#endif
         s->description.media[i].ssrc = 0;
     }
     if (twcc_id)
@@ -723,12 +757,28 @@ static int handle_worker(rtc_sfu_t *sfu, const rtc_sfu_command_t *message) {
                 remote.media[i].media_type != s->description.media[i].media_type ||
                 remote.media[i].payload_type != s->description.media[i].payload_type ||
                 strcmp(remote.media[i].codec_name, s->description.media[i].codec_name) != 0 ||
-                remote.media[i].extmap_count > 1 ||
-                (!remote.media[i].rejected &&
-                 rtc_sdp_media_find_extmap_id(&remote.media[i], RTC_EXT_URI_MID) != 1))
+                !rtc_sdp_media_answer_extmaps_valid(&s->description.media[i], &remote.media[i]))
                 rc = RTC_ERR_SDP;
         if (rc == RTC_OK)
             rc = apply_remote(s, &remote);
+        if (rc == RTC_OK) {
+            for (int i = 0; i < remote.media_count; i++) {
+                if (!s->consumers[i])
+                    continue;
+                bool send =
+                    rtc_sdp_media_send_extmap_id(&s->description.media[i], RTC_EXT_URI_MID) &&
+                    rtc_sdp_media_recv_extmap_id(&remote.media[i], RTC_EXT_URI_MID);
+                if (send != s->send_mid[i]) {
+                    char mid[17];
+                    snprintf(mid, sizeof(mid), "%d", s->description.media[i].mid_index);
+                    rtc_consumer_pause(s->consumers[i]);
+                    rc = rtc_consumer_set_mid(s->consumers[i], send ? 1 : 0, mid);
+                    if (rc != RTC_OK)
+                        break;
+                    s->send_mid[i] = send;
+                }
+            }
+        }
         if (rc == RTC_OK) {
             rtc_sdp_close(&s->remote);
             s->remote = remote;

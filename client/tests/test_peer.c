@@ -15,6 +15,7 @@
 #include <rtc/rtc_transport.h>
 #include <rtc/rtc_worker.h>
 #include <rtc/rtc_sdp.h>
+#include <rtc/rtc_rtp_ext.h>
 #include "test_harness.h"
 #include <stdatomic.h>
 
@@ -439,6 +440,13 @@ static bool build_runtime_answer(peer_remote_env_t *remote, const rtc_desc_t *of
     sdp.media_count = parsed_offer.media_count;
     if (sdp.media_count > 0)
         memcpy(sdp.media, parsed_offer.media, sizeof(rtc_sdp_media_t) * (size_t)sdp.media_count);
+    for (int i = 0; i < sdp.media_count; i++) {
+        rtc_sdp_media_t *m = &sdp.media[i];
+        m->direction = m->direction == 1 ? 2 : m->direction == 2 ? 1 : m->direction;
+        for (int j = 0; j < m->extmap_count; j++)
+            m->extmaps[j].direction = RTC_SDP_EXT_SENDRECV;
+        rtc_sdp_media_answer_extmaps(m, &parsed_offer.media[i]);
+    }
 
     rtc_ice_parameters_t ice;
     rtc_dtls_parameters_t dtls;
@@ -496,6 +504,113 @@ static void count_received_frame(const uint8_t *data, size_t len, uint16_t seq, 
 
 static void receive_runtime_track(rtc_rtp_receiver_t *receiver, void *user) {
     rtc_rtp_receiver_on_frame(receiver, count_received_frame, user);
+}
+
+typedef struct {
+    atomic_uint packets, feedback;
+    atomic_bool mid, cc;
+} extension_wire_t;
+
+static void extension_wire_packet(const rtc_rtp_packet_t *packet, void *user) {
+    extension_wire_t *wire = user;
+    rtc_rtp_ext_t ext[8];
+    size_t count = 8;
+    bool mid = false, cc = false;
+    if (packet->ext_data &&
+        rtc_rtp_ext_parse_body(packet->ext_data, packet->ext_len, ext, &count) == RTC_OK) {
+        mid = rtc_rtp_ext_find(ext, count, 4) != NULL;
+        cc = rtc_rtp_ext_find(ext, count, 5) != NULL;
+    }
+    atomic_store(&wire->mid, mid);
+    atomic_store(&wire->cc, cc);
+    atomic_fetch_add(&wire->packets, 1);
+}
+
+static void extension_wire_feedback(const uint8_t *data, size_t len, void *user) {
+    extension_wire_t *wire = user;
+    for (size_t off = 0; off + 4 <= len;) {
+        size_t size = ((size_t)data[off + 2] * 256 + data[off + 3] + 1) * 4;
+        if (size > len - off)
+            break;
+        if (data[off + 1] == RTCP_PT_RTPFB && (data[off] & 31) == 15)
+            atomic_fetch_add(&wire->feedback, 1);
+        off += size;
+    }
+}
+
+TEST(peer_extension_directions_govern_encrypted_wire_and_feedback) {
+    for (int direction = RTC_SDP_EXT_SENDONLY; direction <= RTC_SDP_EXT_INACTIVE; direction++) {
+        rtc_peer_connection_t *peer = rtc_peer_connection_create(NULL);
+        ASSERT(peer);
+        peer_remote_env_t remote;
+        ASSERT(make_remote_env(&remote));
+        extension_wire_t wire = {0};
+        rtc_transport_on_rtp(remote.transport, extension_wire_packet, &wire);
+        rtc_transport_on_rtcp(remote.transport, extension_wire_feedback, &wire);
+        atomic_uint received = 0;
+        rtc_peer_connection_on_track(peer, receive_runtime_track, &received);
+        rtc_codec_t opus = {
+            .payload_type = 111, .mime_type = "audio/opus", .clock_rate = 48000, .channels = 2};
+        rtc_rtp_sender_t *sender = rtc_peer_connection_add_track(peer, RTC_KIND_AUDIO, &opus);
+        ASSERT(sender);
+        rtc_desc_t offer, answer;
+        ASSERT_EQ(rtc_peer_connection_create_offer(peer, &offer), RTC_OK);
+        rtc_sdp_t parsed = {0};
+        ASSERT_EQ(rtc_sdp_parse(&parsed, offer.sdp, offer.sdp_len), RTC_OK);
+        for (int i = 0; i < parsed.media[0].extmap_count; i++)
+            parsed.media[0].extmaps[i].direction = (rtc_sdp_ext_direction_t)direction;
+        ASSERT_EQ(rtc_sdp_generate(&parsed), RTC_OK);
+        memcpy(offer.sdp, parsed.raw, parsed.raw_len + 1);
+        offer.sdp_len = parsed.raw_len;
+        rtc_sdp_close(&parsed);
+        ASSERT_EQ(rtc_peer_connection_set_local_desc(peer, &offer), RTC_OK);
+        ASSERT(build_runtime_answer(&remote, &offer, &answer));
+        memset(&parsed, 0, sizeof(parsed));
+        ASSERT_EQ(rtc_sdp_parse(&parsed, answer.sdp, answer.sdp_len), RTC_OK);
+        parsed.media[0].ssrc = 0x44556677;
+        ASSERT_EQ(rtc_sdp_generate(&parsed), RTC_OK);
+        memcpy(answer.sdp, parsed.raw, parsed.raw_len + 1);
+        answer.sdp_len = parsed.raw_len;
+        rtc_sdp_close(&parsed);
+        ASSERT_EQ(rtc_peer_connection_set_remote_desc(peer, &answer), RTC_OK);
+        uint64_t deadline = rtc_time_ms() + 3000;
+        while (rtc_peer_connection_connection_state(peer) != RTC_CONNECTION_CONNECTED &&
+               rtc_time_ms() < deadline)
+            SLEEP_MS(5);
+        ASSERT_EQ(rtc_peer_connection_connection_state(peer), RTC_CONNECTION_CONNECTED);
+        ASSERT(wait_for_runtime_connected(remote.transport, 1000));
+        const uint8_t audio[] = {0xf8, 0xff, 0xfe};
+        ASSERT_EQ(rtc_rtp_sender_send(sender, audio, sizeof(audio), 960, true), RTC_OK);
+        deadline = rtc_time_ms() + 1000;
+        while (!atomic_load(&wire.packets) && rtc_time_ms() < deadline)
+            SLEEP_MS(5);
+        ASSERT_EQ(atomic_load(&wire.packets), 1);
+        ASSERT_EQ(atomic_load(&wire.mid), direction == RTC_SDP_EXT_SENDONLY);
+#ifdef MRTC_ENABLE_TWCC
+        ASSERT_EQ(atomic_load(&wire.cc), direction == RTC_SDP_EXT_SENDONLY);
+#endif
+        rtc_rtp_ext_t ext[2];
+        rtc_rtp_ext_make_string(&ext[0], 4, "0");
+        rtc_rtp_ext_make_transport_cc(&ext[1], 5, 7);
+        rtc_rtp_packet_t packet;
+        ASSERT_EQ(rtc_rtp_build_with_ext(&packet, 111, 1, 960, 0x44556677, true, ext, 2, audio,
+                                         sizeof(audio)),
+                  RTC_OK);
+        size_t len = packet.buf_len;
+        ASSERT_EQ(rtc_transport_send_rtp(remote.transport, packet.buf, &len, sizeof(packet.buf)),
+                  RTC_OK);
+        deadline = rtc_time_ms() + 1000;
+        while (!atomic_load(&received) && rtc_time_ms() < deadline)
+            SLEEP_MS(5);
+        ASSERT_EQ(atomic_load(&received), 1);
+        SLEEP_MS(180);
+#ifdef MRTC_ENABLE_TWCC
+        ASSERT_EQ(atomic_load(&wire.feedback) > 0, direction == RTC_SDP_EXT_RECVONLY);
+#endif
+        rtc_peer_connection_close(peer);
+        rtc_peer_connection_destroy(peer);
+        close_remote_env(&remote);
+    }
 }
 
 typedef struct {
@@ -833,6 +948,7 @@ int main(void) {
     RUN_TEST(peer_ice_candidates);
     RUN_TEST(peer_add_ice_candidate);
     RUN_TEST(peer_shared_runtime_listener);
+    RUN_TEST(peer_extension_directions_govern_encrypted_wire_and_feedback);
     RUN_TEST(peer_connects_and_surfaces_source_retirement_exhaustion);
     RUN_TEST(peer_get_stats);
     RUN_TEST(peer_add_transceiver_remove_track);

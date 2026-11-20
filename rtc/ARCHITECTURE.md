@@ -631,6 +631,17 @@ callback. Core RTP callback teardown is covered by the network-runtime tests.
 
 ## Known Limitations
 
+SDP parsing uses bounded tokens and checked unsigned ranges for supported
+m-line ports/payloads, RTP clock/channel mappings, numeric MIDs, SSRCs, SCTP
+ports, message-size limits and extension identifiers. RTP sections require
+`UDP/TLS/RTP/SAVPF`; application sections require modern
+`UDP/DTLS/SCTP webrtc-datachannel`. Legacy/unsupported profiles, overflowing
+numbers and unknown extension direction modifiers fail explicitly. One-byte
+extension directions round-trip, default to sendrecv, and are relative to the
+SDP author. Answer helpers invert/intersect permissions with media direction.
+Directional TWCC configuration separates tagging/BWE from receive feedback,
+with an optional per-source receive permission filter.
+
 - TURN supports four total endpoint attempts over UDP/TCP/verified TLS and
   failed-allocation recovery on explicit ICE restart. Transparent migration,
   simultaneous dual-family allocation and authentication v2 are not implemented.

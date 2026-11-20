@@ -355,6 +355,99 @@ TEST(sdp_preserves_late_mid_and_rejects_extension_aliases) {
     rtc_sdp_close(&parsed);
 }
 
+TEST(sdp_extension_directions_and_bounded_tokens) {
+    const char *names[] = {"sendrecv", "sendonly", "recvonly", "inactive"};
+    const rtc_sdp_ext_direction_t inverse[] = {RTC_SDP_EXT_SENDRECV, RTC_SDP_EXT_RECVONLY,
+                                               RTC_SDP_EXT_SENDONLY, RTC_SDP_EXT_INACTIVE};
+    for (unsigned i = 0; i < 4; i++) {
+        char text[512];
+        snprintf(text, sizeof(text),
+                 "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+                 "a=rtpmap:111 opus/48000/2\r\na=extmap:4/%s "
+                 "urn:ietf:params:rtp-hdrext:sdes:mid\r\n",
+                 names[i]);
+        rtc_sdp_t offer = {0}, answer = {0}, roundtrip = {0};
+        ASSERT_EQ(rtc_sdp_parse(&offer, text, strlen(text)), RTC_OK);
+        ASSERT_EQ(offer.media[0].extmaps[0].direction, i);
+        answer.media_count = 1;
+        answer.media[0] = offer.media[0];
+        answer.media[0].extmaps[0].direction = RTC_SDP_EXT_SENDRECV;
+        rtc_sdp_media_answer_extmaps(&answer.media[0], &offer.media[0]);
+        ASSERT_EQ(answer.media[0].extmaps[0].direction, inverse[i]);
+        ASSERT(rtc_sdp_media_answer_extmaps_valid(&offer.media[0], &answer.media[0]));
+        ASSERT_EQ(rtc_sdp_generate(&answer), RTC_OK);
+        ASSERT_EQ(rtc_sdp_parse(&roundtrip, answer.raw, answer.raw_len), RTC_OK);
+        ASSERT_EQ(roundtrip.media[0].extmaps[0].direction, inverse[i]);
+        if (i) {
+            answer.media[0].extmaps[0].direction = RTC_SDP_EXT_SENDRECV;
+            ASSERT(!rtc_sdp_media_answer_extmaps_valid(&offer.media[0], &answer.media[0]));
+        }
+        rtc_sdp_close(&offer);
+        rtc_sdp_close(&answer);
+        rtc_sdp_close(&roundtrip);
+    }
+    const char *bad[] = {"4/nonsense", "4/",         "4/sendonly/recvonly",   "+4",
+                         "4junk",      "4294967300", "184467440737095516160", "0",
+                         "256"};
+    for (unsigned i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        char text[512];
+        snprintf(text, sizeof(text),
+                 "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+                 "a=extmap:%s urn:ietf:params:rtp-hdrext:sdes:mid\r\n",
+                 bad[i]);
+        rtc_sdp_t parsed = {0};
+        ASSERT_EQ(rtc_sdp_parse(&parsed, text, strlen(text)), RTC_ERR_SDP);
+        rtc_sdp_close(&parsed);
+    }
+    rtc_sdp_media_t full = {0};
+    for (unsigned i = 1; i <= 14; i++) {
+        char uri[40];
+        snprintf(uri, sizeof(uri), "urn:example:extension-%u", i);
+        ASSERT_EQ(rtc_sdp_media_add_extmap(&full, (uint8_t)i, uri), RTC_OK);
+    }
+    full.extmaps[13].direction = RTC_SDP_EXT_SENDONLY;
+    ASSERT_EQ(rtc_sdp_media_add_extmap(&full, 14, "urn:example:extension-14"), RTC_OK);
+    ASSERT_EQ(full.extmaps[13].direction, RTC_SDP_EXT_SENDONLY);
+    ASSERT_EQ(full.extmap_count, 14);
+}
+
+TEST(sdp_rejects_numeric_overflow_and_unsupported_profiles) {
+    const char *invalid[] = {"m=audio 65545 UDP/TLS/RTP/SAVPF 111",
+                             "m=video 9 RTP/AVP 96",
+                             "m=application 9 DTLS/SCTP 5000",
+                             "m=audio 9 UDP/DTLS/SCTP 111",
+                             "m=audio 9 UDP/TLS/RTP/SAVPF 4294967407",
+                             "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:4294967296",
+                             "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=ssrc:4294967297 cname:test",
+                             "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=ssrc:-1 cname:test",
+                             "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/4294967296/2",
+                             "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 "
+                             "opus/48000/4294967298",
+                             "m=application 9 UDP/DTLS/SCTP "
+                             "webrtc-datachannel\r\na=sctp-port:4294972296",
+                             "m=application 9 UDP/DTLS/SCTP "
+                             "webrtc-datachannel\r\na=sctp-port:5000junk",
+                             "m=application 9 UDP/DTLS/SCTP "
+                             "webrtc-datachannel\r\na=max-message-size:4294967296"};
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(*invalid); i++) {
+        rtc_sdp_t parsed = {0};
+        char text[512];
+        snprintf(text, sizeof(text), "v=0\r\n%s\r\n", invalid[i]);
+        ASSERT_EQ(rtc_sdp_parse(&parsed, text, strlen(text)), RTC_ERR_SDP);
+        rtc_sdp_close(&parsed);
+    }
+    const char rejected[] = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+                            "a=rtpmap:111 opus/48000/2\r\na=ssrc:4294967295 cname:test\r\n"
+                            "m=application 0 UDP/DTLS/SCTP webrtc-datachannel\r\n";
+    rtc_sdp_t parsed = {0};
+    ASSERT_EQ(rtc_sdp_parse(&parsed, rejected, strlen(rejected)), RTC_OK);
+    ASSERT_EQ(parsed.media[0].ssrc, UINT32_MAX);
+    ASSERT(parsed.media[1].rejected);
+    ASSERT_EQ(rtc_sdp_generate(&parsed), RTC_OK);
+    ASSERT(strstr(parsed.raw, "m=application 0 UDP/DTLS/SCTP") != NULL);
+    rtc_sdp_close(&parsed);
+}
+
 TEST(sdp_candidate_helpers) {
     ASSERT_EQ(rtc_ice_candidate_priority(ICE_CANDIDATE_HOST, 65535, 1), 2130706431u);
     ASSERT_EQ(rtc_ice_candidate_priority(ICE_CANDIDATE_SRFLX, 65535, 1), 1694498815u);
@@ -472,6 +565,8 @@ int main(void) {
     RUN_TEST(sdp_many_candidates);
     RUN_TEST(sdp_extmap_roundtrip);
     RUN_TEST(sdp_preserves_late_mid_and_rejects_extension_aliases);
+    RUN_TEST(sdp_extension_directions_and_bounded_tokens);
+    RUN_TEST(sdp_rejects_numeric_overflow_and_unsupported_profiles);
     RUN_TEST(sdp_candidate_helpers);
     RUN_TEST(browser_candidates_preserve_mdns_and_tcp_metadata);
     RUN_TEST(browser_candidate_rejection_is_not_blanket_filtering);

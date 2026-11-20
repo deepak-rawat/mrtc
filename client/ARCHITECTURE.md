@@ -355,3 +355,13 @@ duplicate/conflicting mappings and unsupported established mapping changes are
 validated before accepting SDP. The full one-byte ID space is retained so a
 MID late in a browser's extension list cannot be silently dropped. New offers
 retain established mappings.
+
+Extension directions are relative to the SDP author. Answers invert offered
+send/receive permissions and intersect them with local media direction; invalid
+answer widening is rejected before transport or active stream state changes.
+MID reception, MID emission, TWCC tagging and TWCC receive feedback have
+separate permissions, applied only when offer/answer becomes stable. Accepted
+permission changes discard stale protected packets without restarting RTP or
+crypto state. Rejected initial application sections stay port-zero and do not
+start SCTP; rejecting an existing association is explicitly unsupported and
+leaves the live connection unchanged.

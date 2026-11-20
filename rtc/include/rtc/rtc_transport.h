@@ -203,6 +203,15 @@ typedef void (*rtc_transport_bitrate_fn)(uint32_t bitrate_bps, void *user);
  * estimator (seeded by initial_outgoing_bitrate_bps). Requires cfg->enable_twcc
  * at create; `local_ssrc` identifies the feedback sender. */
 int rtc_transport_enable_twcc(rtc_transport_t *transport, uint8_t ext_id, uint32_t local_ssrc);
+/* Directional negotiation; zero id with both permissions false disables TWCC.
+ * Sender history survives permission changes. A live id remap is unsupported. */
+int rtc_transport_configure_twcc(rtc_transport_t *transport, uint8_t ext_id, uint32_t local_ssrc,
+                                 bool send, bool receive);
+/* Optional per-source receive permission, evaluated on the worker after RTP
+ * routing. Unset means all RTP sources may contribute TWCC arrivals. */
+typedef bool (*rtc_transport_rtp_filter_fn)(const rtc_rtp_packet_t *packet, void *user);
+void rtc_transport_on_twcc_rtp(rtc_transport_t *transport, rtc_transport_rtp_filter_fn fn,
+                               void *user);
 
 /* Subscribe to GCC bandwidth-estimate changes (fires on the worker loop). */
 void rtc_transport_on_bitrate_estimate(rtc_transport_t *transport, rtc_transport_bitrate_fn fn,

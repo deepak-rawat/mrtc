@@ -383,6 +383,156 @@ TEST(peer_authenticated_rtcp_collisions_exhaust_without_reusing_ids) {
     rtc_peer_connection_destroy(b.peer);
 }
 
+static bool description_extension_direction(rtc_desc_t *description,
+                                            rtc_sdp_ext_direction_t direction) {
+    rtc_sdp_t sdp = {0};
+    int rc = rtc_sdp_parse(&sdp, description->sdp, description->sdp_len);
+    if (rc == RTC_OK) {
+        for (int i = 0; i < sdp.media_count; i++)
+            for (int j = 0; j < sdp.media[i].extmap_count; j++)
+                sdp.media[i].extmaps[j].direction = direction;
+        rc = rtc_sdp_generate(&sdp);
+    }
+    if (rc == RTC_OK) {
+        memcpy(description->sdp, sdp.raw, sdp.raw_len + 1);
+        description->sdp_len = sdp.raw_len;
+    }
+    rtc_sdp_close(&sdp);
+    return rc == RTC_OK;
+}
+
+TEST(peer_directional_answers_and_invalid_negotiation_preserve_live_media) {
+    rtc_config_t ac = {.stun_server = "127.0.0.1", .stun_port = 9};
+    rtc_config_t bc = {.stun_server = "127.0.0.1", .stun_port = 10};
+    endpoint_t a = {.peer = rtc_peer_connection_create(&ac)};
+    endpoint_t b = {.peer = rtc_peer_connection_create(&bc)};
+    ASSERT(a.peer && b.peer);
+    rtc_codec_t opus = {
+        .payload_type = 111, .mime_type = "audio/opus", .clock_rate = 48000, .channels = 2};
+    rtc_rtp_sender_t *as = rtc_peer_connection_add_track(a.peer, RTC_KIND_AUDIO, &opus);
+    rtc_rtp_sender_t *bs = rtc_peer_connection_add_track(b.peer, RTC_KIND_AUDIO, &opus);
+    ASSERT(as && bs);
+    rtc_peer_connection_on_track(a.peer, received_track, &a);
+    rtc_peer_connection_on_track(b.peer, received_track, &b);
+    rtc_peer_connection_on_data_channel(b.peer, received_channel, &b);
+    rtc_data_channel_t *channel =
+        rtc_peer_connection_create_data_channel(a.peer, "directions", NULL);
+    ASSERT(channel && exchange(a.peer, b.peer));
+    ASSERT(wait_connected(&a, &b, channel));
+    const rtc_sdp_ext_direction_t inverse[] = {RTC_SDP_EXT_SENDRECV, RTC_SDP_EXT_RECVONLY,
+                                               RTC_SDP_EXT_SENDONLY, RTC_SDP_EXT_INACTIVE};
+    for (int direction = RTC_SDP_EXT_SENDONLY; direction <= RTC_SDP_EXT_INACTIVE; direction++) {
+        rtc_desc_t previous_a = *rtc_peer_connection_remote_desc(a.peer);
+        rtc_desc_t previous_b = *rtc_peer_connection_local_desc(b.peer);
+        rtc_desc_t offer, answer, invalid;
+        ASSERT_EQ(rtc_peer_connection_create_offer(a.peer, &offer), RTC_OK);
+        ASSERT(description_extension_direction(&offer, (rtc_sdp_ext_direction_t)direction));
+        ASSERT_EQ(rtc_peer_connection_set_local_desc(a.peer, &offer), RTC_OK);
+        ASSERT_EQ(rtc_peer_connection_set_remote_desc(b.peer, &offer), RTC_OK);
+        ASSERT_EQ(rtc_peer_connection_create_answer(b.peer, &answer), RTC_OK);
+        rtc_sdp_t parsed = {0};
+        ASSERT_EQ(rtc_sdp_parse(&parsed, answer.sdp, answer.sdp_len), RTC_OK);
+        ASSERT_EQ(parsed.media[0].extmaps[0].direction, inverse[direction]);
+        rtc_sdp_close(&parsed);
+        invalid = answer;
+        ASSERT(description_extension_direction(&invalid, RTC_SDP_EXT_SENDRECV));
+        ASSERT_EQ(rtc_peer_connection_set_local_desc(b.peer, &invalid), RTC_ERR_SDP);
+        ASSERT_EQ(rtc_peer_connection_set_remote_desc(a.peer, &invalid), RTC_ERR_SDP);
+        ASSERT_STR_EQ(rtc_peer_connection_remote_desc(a.peer)->sdp, previous_a.sdp);
+        ASSERT_STR_EQ(rtc_peer_connection_local_desc(b.peer)->sdp, previous_b.sdp);
+        ASSERT_EQ(rtc_peer_connection_connection_state(a.peer), RTC_CONNECTION_CONNECTED);
+        ASSERT_EQ(rtc_data_channel_state(channel), RTC_DC_OPEN);
+        ASSERT_EQ(rtc_peer_connection_set_local_desc(b.peer, &answer), RTC_OK);
+        ASSERT_EQ(rtc_peer_connection_set_remote_desc(a.peer, &answer), RTC_OK);
+        unsigned af = atomic_load(&a.frames), bf = atomic_load(&b.frames);
+        ASSERT_EQ(rtc_rtp_sender_send(as, opus_silence, sizeof(opus_silence), 960, true), RTC_OK);
+        ASSERT_EQ(rtc_rtp_sender_send(bs, opus_silence, sizeof(opus_silence), 960, true), RTC_OK);
+        ASSERT(wait_count(&a.frames, af + 1, 1000));
+        ASSERT(wait_count(&b.frames, bf + 1, 1000));
+    }
+    rtc_desc_t stable = *rtc_peer_connection_remote_desc(a.peer);
+    const char *invalid_lines[] = {"a=ssrc:4294967297 cname:test\r\n", "a=sctp-port:4294972296\r\n",
+                                   "a=max-message-size:4294967296\r\n",
+                                   "a=extmap:4/unsupported "
+                                   "urn:ietf:params:rtp-hdrext:sdes:mid\r\n"};
+    for (unsigned i = 0; i < sizeof(invalid_lines) / sizeof(*invalid_lines); i++) {
+        rtc_desc_t invalid = stable;
+        invalid.type = RTC_SDP_OFFER;
+        size_t extra = strlen(invalid_lines[i]);
+        ASSERT(invalid.sdp_len + extra < sizeof(invalid.sdp));
+        memcpy(invalid.sdp + invalid.sdp_len, invalid_lines[i], extra + 1);
+        invalid.sdp_len += extra;
+        ASSERT(rtc_peer_connection_set_remote_desc(a.peer, &invalid) != RTC_OK);
+        ASSERT_STR_EQ(rtc_peer_connection_remote_desc(a.peer)->sdp, stable.sdp);
+        ASSERT_EQ(rtc_peer_connection_signaling_state(a.peer), RTC_SIGNALING_STABLE);
+    }
+    rtc_desc_t unsupported = stable;
+    unsupported.type = RTC_SDP_OFFER;
+    char *profile = strstr(unsupported.sdp, "UDP/TLS/RTP/SAVPF");
+    ASSERT(profile);
+    memcpy(profile, "TCP", 3);
+    ASSERT_EQ(rtc_peer_connection_set_remote_desc(a.peer, &unsupported), RTC_ERR_SDP);
+    rtc_sdp_t rejected = {0};
+    ASSERT_EQ(rtc_sdp_parse(&rejected, stable.sdp, stable.sdp_len), RTC_OK);
+    for (int i = 0; i < rejected.media_count; i++)
+        if (rejected.media[i].media_type == RTC_MEDIA_APPLICATION)
+            rejected.media[i].rejected = true;
+    ASSERT_EQ(rtc_sdp_generate(&rejected), RTC_OK);
+    unsupported = (rtc_desc_t){.type = RTC_SDP_OFFER};
+    memcpy(unsupported.sdp, rejected.raw, rejected.raw_len + 1);
+    unsupported.sdp_len = rejected.raw_len;
+    rtc_sdp_close(&rejected);
+    ASSERT_EQ(rtc_peer_connection_set_remote_desc(a.peer, &unsupported), RTC_ERR_SDP);
+    ASSERT_STR_EQ(rtc_peer_connection_remote_desc(a.peer)->sdp, stable.sdp);
+    ASSERT_EQ(rtc_peer_connection_signaling_state(a.peer), RTC_SIGNALING_STABLE);
+    ASSERT_EQ(rtc_data_channel_send_text(channel, "unchanged association"), RTC_OK);
+    ASSERT(wait_count(&b.messages, 1, 1000));
+    ASSERT_EQ(atomic_load(&b.channels), 1);
+    rtc_peer_connection_close(a.peer);
+    rtc_peer_connection_close(b.peer);
+    rtc_peer_connection_destroy(a.peer);
+    rtc_peer_connection_destroy(b.peer);
+}
+
+TEST(peer_initial_rejected_application_keeps_rtp_without_sctp) {
+    rtc_config_t ac = {.stun_server = "127.0.0.1", .stun_port = 9};
+    rtc_config_t bc = {.stun_server = "127.0.0.1", .stun_port = 10};
+    endpoint_t a = {.peer = rtc_peer_connection_create(&ac)};
+    endpoint_t b = {.peer = rtc_peer_connection_create(&bc)};
+    ASSERT(a.peer && b.peer);
+    rtc_peer_connection_on_track(b.peer, received_track, &b);
+    rtc_codec_t opus = {
+        .payload_type = 111, .mime_type = "audio/opus", .clock_rate = 48000, .channels = 2};
+    rtc_rtp_sender_t *sender = rtc_peer_connection_add_track(a.peer, RTC_KIND_AUDIO, &opus);
+    ASSERT(sender && rtc_peer_connection_create_data_channel(a.peer, "rejected", NULL));
+    rtc_desc_t offer, answer;
+    ASSERT_EQ(rtc_peer_connection_create_offer(a.peer, &offer), RTC_OK);
+    rtc_sdp_t parsed = {0};
+    ASSERT_EQ(rtc_sdp_parse(&parsed, offer.sdp, offer.sdp_len), RTC_OK);
+    for (int i = 0; i < parsed.media_count; i++)
+        if (parsed.media[i].media_type == RTC_MEDIA_APPLICATION)
+            parsed.media[i].rejected = true;
+    ASSERT_EQ(rtc_sdp_generate(&parsed), RTC_OK);
+    memcpy(offer.sdp, parsed.raw, parsed.raw_len + 1);
+    offer.sdp_len = parsed.raw_len;
+    rtc_sdp_close(&parsed);
+    ASSERT_EQ(rtc_peer_connection_set_local_desc(a.peer, &offer), RTC_OK);
+    ASSERT_EQ(rtc_peer_connection_set_remote_desc(b.peer, &offer), RTC_OK);
+    ASSERT_EQ(rtc_peer_connection_create_answer(b.peer, &answer), RTC_OK);
+    ASSERT(strstr(answer.sdp, "m=application 0 UDP/DTLS/SCTP") != NULL);
+    ASSERT_EQ(rtc_peer_connection_set_local_desc(b.peer, &answer), RTC_OK);
+    ASSERT_EQ(rtc_peer_connection_set_remote_desc(a.peer, &answer), RTC_OK);
+    ASSERT(wait_connected(&a, &b, NULL));
+    ASSERT(a.peer->dc_manager.socket == NULL && b.peer->dc_manager.socket == NULL);
+    ASSERT_EQ(rtc_rtp_sender_send(sender, opus_silence, sizeof(opus_silence), 960, true), RTC_OK);
+    ASSERT(wait_count(&b.frames, 1, 1000));
+    ASSERT(a.peer->dc_manager.socket == NULL && b.peer->dc_manager.socket == NULL);
+    rtc_peer_connection_close(a.peer);
+    rtc_peer_connection_close(b.peer);
+    rtc_peer_connection_destroy(a.peer);
+    rtc_peer_connection_destroy(b.peer);
+}
+
 TEST(peer_answer_adopts_offered_payload_type_before_media) {
     rtc_config_t ac = {.stun_server = "127.0.0.1", .stun_port = 9};
     rtc_config_t bc = {.stun_server = "127.0.0.1", .stun_port = 10};
@@ -668,6 +818,8 @@ int main(int argc, char **argv) {
         RUN_TEST(peer_turn_relay_sctp_refresh_and_restart);
     } else {
         RUN_TEST(peer_answer_adopts_offered_payload_type_before_media);
+        RUN_TEST(peer_directional_answers_and_invalid_negotiation_preserve_live_media);
+        RUN_TEST(peer_initial_rejected_application_keeps_rtp_without_sctp);
         RUN_TEST(peer_authenticated_collision_preserves_bundle_and_sctp);
         RUN_TEST(peer_authenticated_rtcp_collisions_exhaust_without_reusing_ids);
         RUN_TEST(peer_sctp_live_renegotiation_glare_and_ice_restart);

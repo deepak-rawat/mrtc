@@ -84,14 +84,18 @@ rtc_rtp_recv_stream_t *rtc_media_session_resolve(rtc_media_session_t *s,
         char mid[RTC_RTP_MID_MAX];
         if (rtc_rtp_ext_get_string(pkt->ext_data, pkt->ext_len, s->mid_ext_id, mid, sizeof(mid)) >
             0) {
+            bool negotiated = false;
             for (size_t i = 0; i < n; i++) {
                 rtc_rtp_recv_stream_t *rs = session_recv_at(s, i);
+                negotiated |= rtc_rtp_recv_stream_has_mid(rs) &&
+                              rtc_rtp_recv_stream_can_receive(rs, pkt->header.payload_type);
                 if (rs && rtc_rtp_recv_stream_mid_matches(rs, mid) &&
                     rtc_rtp_recv_stream_can_receive(rs, pkt->header.payload_type)) {
                     return session_select_source(s, rs, pkt->header.ssrc);
                 }
             }
-            return NULL;
+            if (negotiated)
+                return NULL;
         }
     }
 

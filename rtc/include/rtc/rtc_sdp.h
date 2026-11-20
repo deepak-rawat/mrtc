@@ -50,9 +50,17 @@ typedef struct {
 #define RTC_SDP_FB_TRANSPORT_CC 0x08
 #define RTC_SDP_FB_REMB         0x10
 
+typedef enum {
+    RTC_SDP_EXT_SENDRECV,
+    RTC_SDP_EXT_SENDONLY,
+    RTC_SDP_EXT_RECVONLY,
+    RTC_SDP_EXT_INACTIVE
+} rtc_sdp_ext_direction_t;
+
 typedef struct {
     uint8_t id; /* 1..14 */
     char uri[SDP_EXTMAP_URI_LEN];
+    rtc_sdp_ext_direction_t direction; /* relative to the SDP author */
 } rtc_sdp_extmap_t;
 
 typedef enum {
@@ -156,5 +164,12 @@ int rtc_ice_candidate_to_string(const rtc_ice_candidate_t *candidate, char *buf,
 /* extmap helpers */
 int rtc_sdp_media_add_extmap(rtc_sdp_media_t *m, uint8_t id, const char *uri);
 uint8_t rtc_sdp_media_find_extmap_id(const rtc_sdp_media_t *m, const char *uri);
+uint8_t rtc_sdp_media_send_extmap_id(const rtc_sdp_media_t *m, const char *uri);
+uint8_t rtc_sdp_media_recv_extmap_id(const rtc_sdp_media_t *m, const char *uri);
+/* Intersect supported answer extensions with the offer's inverse permissions
+ * and the answer's media direction. Validate before applying either answer. */
+void rtc_sdp_media_answer_extmaps(rtc_sdp_media_t *answer, const rtc_sdp_media_t *offer);
+bool rtc_sdp_media_answer_extmaps_valid(const rtc_sdp_media_t *offer,
+                                        const rtc_sdp_media_t *answer);
 
 #endif /* RTC_SDP_H */

@@ -54,7 +54,8 @@ static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media
         SDP_WRITE(p, remain, "m=video %d UDP/TLS/RTP/SAVPF %d\r\n", m->rejected ? 0 : 9,
                   m->payload_type);
     } else {
-        SDP_WRITE(p, remain, "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n");
+        SDP_WRITE(p, remain, "m=application %d UDP/DTLS/SCTP webrtc-datachannel\r\n",
+                  m->rejected ? 0 : 9);
     }
 
     SDP_WRITE(p, remain, "c=IN IP4 0.0.0.0\r\n");
@@ -114,8 +115,11 @@ static int sdp_write_media_section(char **p, size_t *remain, const rtc_sdp_media
         for (int i = 0; i < m->extmap_count; i++) {
             if (m->extmaps[i].id == 0 || m->extmaps[i].uri[0] == '\0')
                 continue;
-            SDP_WRITE(p, remain, "a=extmap:%u %s\r\n", (unsigned)m->extmaps[i].id,
-                      m->extmaps[i].uri);
+            static const char *const modifiers[] = {"", "/sendonly", "/recvonly", "/inactive"};
+            if ((unsigned)m->extmaps[i].direction > RTC_SDP_EXT_INACTIVE)
+                return RTC_ERR_SDP;
+            SDP_WRITE(p, remain, "a=extmap:%u%s %s\r\n", (unsigned)m->extmaps[i].id,
+                      modifiers[m->extmaps[i].direction], m->extmaps[i].uri);
         }
     }
 
@@ -491,6 +495,50 @@ int rtc_ice_candidate_to_string(const rtc_ice_candidate_t *candidate, char *buf,
     return RTC_OK;
 }
 
+static bool sdp_attribute_uint(const char *cursor, uint32_t maximum, uint32_t *value) {
+    char token[12], extra[2];
+    return candidate_token(&cursor, token, sizeof(token)) == 1 &&
+           candidate_uint(token, maximum, value) &&
+           candidate_token(&cursor, extra, sizeof(extra)) == 0;
+}
+
+static int sdp_parse_media(rtc_sdp_media_t *m, const char *line, int index) {
+    const char *cursor = line + 2;
+    char kind[16], port_text[12], profile[32], format[32];
+    if (candidate_token(&cursor, kind, sizeof(kind)) != 1 ||
+        candidate_token(&cursor, port_text, sizeof(port_text)) != 1 ||
+        candidate_token(&cursor, profile, sizeof(profile)) != 1 ||
+        candidate_token(&cursor, format, sizeof(format)) != 1)
+        return RTC_ERR_SDP;
+    uint32_t port, payload;
+    if (!candidate_uint(port_text, UINT16_MAX, &port))
+        return RTC_ERR_SDP;
+    memset(m, 0, sizeof(*m));
+    m->mid_index = index;
+    m->rejected = port == 0;
+    if (strcmp(kind, "application") == 0) {
+        char extra[2];
+        if (strcmp(profile, "UDP/DTLS/SCTP") || strcmp(format, "webrtc-datachannel") ||
+            candidate_token(&cursor, extra, sizeof(extra)) != 0)
+            return RTC_ERR_SDP;
+        m->media_type = RTC_MEDIA_APPLICATION;
+    } else {
+        if (strcmp(kind, "audio") && strcmp(kind, "video"))
+            return RTC_ERR_SDP;
+        if (strcmp(profile, "UDP/TLS/RTP/SAVPF") || !candidate_uint(format, 127, &payload))
+            return RTC_ERR_SDP;
+        m->media_type = strcmp(kind, "audio") == 0 ? RTC_MEDIA_AUDIO : RTC_MEDIA_VIDEO;
+        m->payload_type = (int)payload;
+        int token;
+        while ((token = candidate_token(&cursor, format, sizeof(format))) == 1)
+            if (!candidate_uint(format, 127, &payload))
+                return RTC_ERR_SDP;
+        if (token < 0)
+            return RTC_ERR_SDP;
+    }
+    return RTC_OK;
+}
+
 int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
     if (!sdp || !text || len >= sizeof(sdp->raw))
         return RTC_ERR_INVALID;
@@ -527,57 +575,15 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
         if (sdp_line_starts_n(line, line_len, "m=") && sdp->media_count == SDP_MAX_MEDIA)
             return RTC_ERR_NOMEM;
 
-        /* Media type */
-        if (sdp_line_starts(line, "m=audio")) {
-            sdp->media_type = RTC_MEDIA_AUDIO;
-            /* Parse payload type from m=audio 9 UDP/TLS/RTP/SAVPF <pt> */
-            int pt = 0;
-            if (sscanf(line, "m=audio %*d %*s %d", &pt) == 1)
-                sdp->payload_type = pt;
-
-            if (sdp->media_count < SDP_MAX_MEDIA) {
-                current_media = sdp->media_count;
-                rtc_sdp_media_t *m = &sdp->media[current_media];
-                memset(m, 0, sizeof(*m));
-                m->media_type = RTC_MEDIA_AUDIO;
-                m->payload_type = pt;
-                int port;
-                if (sscanf(line, "m=audio %d", &port) != 1 || port < 0 || port > 65535)
-                    return RTC_ERR_SDP;
-                m->rejected = port == 0;
-                m->mid_index = current_media;
-                sdp->media_count++;
-            }
-        } else if (sdp_line_starts(line, "m=video")) {
-            sdp->media_type = RTC_MEDIA_VIDEO;
-            int pt = 0;
-            if (sscanf(line, "m=video %*d %*s %d", &pt) == 1)
-                sdp->payload_type = pt;
-
-            if (sdp->media_count < SDP_MAX_MEDIA) {
-                current_media = sdp->media_count;
-                rtc_sdp_media_t *m = &sdp->media[current_media];
-                memset(m, 0, sizeof(*m));
-                m->media_type = RTC_MEDIA_VIDEO;
-                m->payload_type = pt;
-                int port;
-                if (sscanf(line, "m=video %d", &port) != 1 || port < 0 || port > 65535)
-                    return RTC_ERR_SDP;
-                m->rejected = port == 0;
-                m->mid_index = current_media;
-                sdp->media_count++;
-            }
-        } else if (sdp_line_starts(line, "m=application")) {
-            sdp->media_type = RTC_MEDIA_APPLICATION;
-
-            if (sdp->media_count < SDP_MAX_MEDIA) {
-                current_media = sdp->media_count;
-                rtc_sdp_media_t *m = &sdp->media[current_media];
-                memset(m, 0, sizeof(*m));
-                m->media_type = RTC_MEDIA_APPLICATION;
-                m->mid_index = current_media;
-                sdp->media_count++;
-            }
+        if (sdp_line_starts_n(line, line_len, "m=")) {
+            current_media = sdp->media_count;
+            rtc_sdp_media_t *m = &sdp->media[current_media];
+            int rc = sdp_parse_media(m, line, current_media);
+            if (rc != RTC_OK)
+                return rc;
+            sdp->media_type = m->media_type;
+            sdp->payload_type = m->payload_type;
+            sdp->media_count++;
         }
 
         if (current_media >= 0 && current_media < sdp->media_count) {
@@ -615,14 +621,14 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
             else if (sdp_line_starts_n(line, line_len, "a=inactive"))
                 m->direction = 3;
             else if (sdp_line_starts_n(line, line_len, "a=sctp-port:")) {
-                unsigned port = 0;
-                if (sscanf(line + 12, "%u", &port) != 1 || port == 0 || port > 65535)
-                    return RTC_ERR_INVALID;
+                uint32_t port;
+                if (!sdp_attribute_uint(line + 12, UINT16_MAX, &port) || !port)
+                    return RTC_ERR_SDP;
                 m->sctp_port = (uint16_t)port;
             } else if (sdp_line_starts_n(line, line_len, "a=max-message-size:")) {
-                unsigned size = 0;
-                if (sscanf(line + 19, "%u", &size) != 1)
-                    return RTC_ERR_INVALID;
+                uint32_t size;
+                if (!sdp_attribute_uint(line + 19, UINT32_MAX, &size))
+                    return RTC_ERR_SDP;
                 m->max_message_size = size;
             }
         }
@@ -692,26 +698,42 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
         /* mid */
         if (sdp_line_starts(line, "a=mid:") && current_media >= 0 &&
             current_media < sdp->media_count) {
-            int mid_val = 0;
-            if (sscanf(line, "a=mid:%d", &mid_val) == 1) {
-                sdp->media[current_media].mid_index = mid_val;
-            }
+            uint32_t mid;
+            /* Applying an offer may allocate a bounded set of local MID slots. */
+            if (!sdp_attribute_uint(line + 6, INT_MAX - SDP_MAX_MEDIA - 1, &mid))
+                return RTC_ERR_SDP;
+            sdp->media[current_media].mid_index = (int)mid;
         }
 
         /* rtpmap */
         if (sdp_line_starts(line, "a=rtpmap:")) {
-            int pt, rate, ch = 0;
-            char codec[32] = {0};
-            int matched = sscanf(line, "a=rtpmap:%d %31[^/]/%d/%d", &pt, codec, &rate, &ch);
-            if (matched >= 3) {
+            const char *cursor = line + strlen("a=rtpmap:");
+            char payload[12], encoding[96], extra[2];
+            if (candidate_token(&cursor, payload, sizeof(payload)) != 1 ||
+                candidate_token(&cursor, encoding, sizeof(encoding)) != 1 ||
+                candidate_token(&cursor, extra, sizeof(extra)) != 0)
+                return RTC_ERR_SDP;
+            char *rate_text = strchr(encoding, '/');
+            if (!rate_text)
+                return RTC_ERR_SDP;
+            *rate_text++ = '\0';
+            char *channels = strchr(rate_text, '/');
+            if (channels)
+                *channels++ = '\0';
+            uint32_t pt, rate, ch = 0;
+            if (!candidate_uint(payload, 127, &pt) || !encoding[0] || strlen(encoding) >= 32 ||
+                !candidate_uint(rate_text, INT_MAX, &rate) || !rate ||
+                (channels && (!candidate_uint(channels, 255, &ch) || !ch)))
+                return RTC_ERR_SDP;
+            if (current_media >= 0) {
                 /* Set legacy fields */
                 sdp->payload_type = pt;
                 sdp->clockrate = rate;
                 sdp->channels = ch;
-                size_t clen = strlen(codec);
+                size_t clen = strlen(encoding);
                 if (clen >= sizeof(sdp->codec_name))
                     clen = sizeof(sdp->codec_name) - 1;
-                memcpy(sdp->codec_name, codec, clen);
+                memcpy(sdp->codec_name, encoding, clen);
                 sdp->codec_name[clen] = '\0';
 
                 /* Set multi-media fields */
@@ -722,7 +744,7 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
                     m->channels = ch;
                     if (clen >= sizeof(m->codec_name))
                         clen = sizeof(m->codec_name) - 1;
-                    memcpy(m->codec_name, codec, clen);
+                    memcpy(m->codec_name, encoding, clen);
                     m->codec_name[clen] = '\0';
                 }
             }
@@ -732,19 +754,46 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
          * RFC 5576 allows multiple ssrc lines for FEC/RTX, those are ignored). */
         if (sdp_line_starts(line, "a=ssrc:") && current_media >= 0 &&
             current_media < sdp->media_count) {
-            unsigned long ssrc_val = 0;
-            if (sscanf(line, "a=ssrc:%lu", &ssrc_val) == 1 && sdp->media[current_media].ssrc == 0) {
-                sdp->media[current_media].ssrc = (uint32_t)ssrc_val;
-            }
+            const char *cursor = line + strlen("a=ssrc:");
+            char token[12];
+            uint32_t ssrc;
+            if (candidate_token(&cursor, token, sizeof(token)) != 1 ||
+                !candidate_uint(token, UINT32_MAX, &ssrc))
+                return RTC_ERR_SDP;
+            if (!sdp->media[current_media].ssrc)
+                sdp->media[current_media].ssrc = ssrc;
         }
 
         /* extmap: a=extmap:<id>[/dir] <uri> */
         if (sdp_line_starts(line, "a=extmap:") && current_media >= 0 &&
             current_media < sdp->media_count) {
-            int id_val = 0;
+            const char *cursor = line + strlen("a=extmap:");
+            char identifier[32];
             char uri[SDP_EXTMAP_URI_LEN] = {0};
-            if (sscanf(line, "a=extmap:%d/%*[^ ] %95s", &id_val, uri) == 2 ||
-                sscanf(line, "a=extmap:%d %95s", &id_val, uri) == 2) {
+            if (candidate_token(&cursor, identifier, sizeof(identifier)) != 1 ||
+                candidate_token(&cursor, uri, sizeof(uri)) != 1)
+                return RTC_ERR_SDP;
+            if (!isalpha((unsigned char)uri[0]) || !strchr(uri, ':'))
+                return RTC_ERR_SDP;
+            rtc_sdp_ext_direction_t direction = RTC_SDP_EXT_SENDRECV;
+            char *modifier = strchr(identifier, '/');
+            if (modifier) {
+                *modifier++ = '\0';
+                if (strcmp(modifier, "sendrecv") == 0)
+                    direction = RTC_SDP_EXT_SENDRECV;
+                else if (strcmp(modifier, "sendonly") == 0)
+                    direction = RTC_SDP_EXT_SENDONLY;
+                else if (strcmp(modifier, "recvonly") == 0)
+                    direction = RTC_SDP_EXT_RECVONLY;
+                else if (strcmp(modifier, "inactive") == 0)
+                    direction = RTC_SDP_EXT_INACTIVE;
+                else
+                    return RTC_ERR_SDP;
+            }
+            uint32_t id_val;
+            if (!candidate_uint(identifier, 255, &id_val) || !id_val)
+                return RTC_ERR_SDP;
+            {
                 rtc_sdp_media_t *m = &sdp->media[current_media];
                 if ((id_val < 1 || id_val > 14) && (strcmp(uri, RTC_EXT_URI_MID) == 0 ||
                                                     strcmp(uri, RTC_EXT_URI_TRANSPORT_CC) == 0))
@@ -756,6 +805,7 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
                         if (m->extmaps[i].id == id_val || strcmp(m->extmaps[i].uri, uri) == 0)
                             return RTC_ERR_SDP;
                     m->extmaps[m->extmap_count].id = (uint8_t)id_val;
+                    m->extmaps[m->extmap_count].direction = direction;
                     size_t ulen = strlen(uri);
                     if (ulen >= sizeof(m->extmaps[m->extmap_count].uri))
                         ulen = sizeof(m->extmaps[m->extmap_count].uri) - 1;
@@ -838,10 +888,11 @@ int rtc_sdp_media_add_extmap(rtc_sdp_media_t *m, uint8_t id, const char *uri) {
             m->extmaps[i].id = id;
             return RTC_OK;
         }
-        if (m->extmap_count >= SDP_MAX_EXTMAP)
-            return RTC_ERR_INVALID;
     }
+    if (m->extmap_count >= SDP_MAX_EXTMAP)
+        return RTC_ERR_INVALID;
     m->extmaps[m->extmap_count].id = id;
+    m->extmaps[m->extmap_count].direction = RTC_SDP_EXT_SENDRECV;
     size_t ulen = strlen(uri);
     if (ulen >= sizeof(m->extmaps[m->extmap_count].uri))
         ulen = sizeof(m->extmaps[m->extmap_count].uri) - 1;
@@ -859,4 +910,77 @@ uint8_t rtc_sdp_media_find_extmap_id(const rtc_sdp_media_t *m, const char *uri) 
             return m->extmaps[i].id;
     }
     return 0;
+}
+
+static bool direction_sends(int direction) {
+    return direction == 0 || direction == 1;
+}
+
+static bool direction_receives(int direction) {
+    return direction == 0 || direction == 2;
+}
+
+static const rtc_sdp_extmap_t *media_extmap(const rtc_sdp_media_t *m, const char *uri) {
+    if (!uri)
+        return NULL;
+    for (int i = 0; m && i < m->extmap_count; i++)
+        if (strcmp(m->extmaps[i].uri, uri) == 0)
+            return &m->extmaps[i];
+    return NULL;
+}
+
+uint8_t rtc_sdp_media_send_extmap_id(const rtc_sdp_media_t *m, const char *uri) {
+    const rtc_sdp_extmap_t *e = media_extmap(m, uri);
+    return e && m->media_type != RTC_MEDIA_APPLICATION && !m->rejected &&
+                   direction_sends(m->direction) && direction_sends(e->direction)
+               ? e->id
+               : 0;
+}
+
+uint8_t rtc_sdp_media_recv_extmap_id(const rtc_sdp_media_t *m, const char *uri) {
+    const rtc_sdp_extmap_t *e = media_extmap(m, uri);
+    return e && m->media_type != RTC_MEDIA_APPLICATION && !m->rejected &&
+                   direction_receives(m->direction) && direction_receives(e->direction)
+               ? e->id
+               : 0;
+}
+
+void rtc_sdp_media_answer_extmaps(rtc_sdp_media_t *answer, const rtc_sdp_media_t *offer) {
+    if (!answer || !offer)
+        return;
+    int count = 0;
+    for (int i = 0; i < answer->extmap_count; i++) {
+        rtc_sdp_extmap_t e = answer->extmaps[i];
+        const rtc_sdp_extmap_t *remote = media_extmap(offer, e.uri);
+        if (!remote)
+            continue;
+        bool send = direction_sends(e.direction) && direction_sends(answer->direction) &&
+                    !answer->rejected && rtc_sdp_media_recv_extmap_id(offer, e.uri);
+        bool recv = direction_receives(e.direction) && direction_receives(answer->direction) &&
+                    !answer->rejected && rtc_sdp_media_send_extmap_id(offer, e.uri);
+        e.id = remote->id;
+        e.direction = send ? (recv ? RTC_SDP_EXT_SENDRECV : RTC_SDP_EXT_SENDONLY)
+                           : (recv ? RTC_SDP_EXT_RECVONLY : RTC_SDP_EXT_INACTIVE);
+        answer->extmaps[count++] = e;
+    }
+    answer->extmap_count = count;
+}
+
+bool rtc_sdp_media_answer_extmaps_valid(const rtc_sdp_media_t *offer,
+                                        const rtc_sdp_media_t *answer) {
+    if (!offer || !answer)
+        return false;
+    for (int i = 0; i < answer->extmap_count; i++) {
+        const rtc_sdp_extmap_t *e = &answer->extmaps[i];
+        const rtc_sdp_extmap_t *remote = media_extmap(offer, e->uri);
+        if (!remote || e->id != remote->id ||
+            (direction_sends(e->direction) && !direction_receives(remote->direction)) ||
+            (direction_receives(e->direction) && !direction_sends(remote->direction)) ||
+            (rtc_sdp_media_send_extmap_id(answer, e->uri) &&
+             !rtc_sdp_media_recv_extmap_id(offer, e->uri)) ||
+            (rtc_sdp_media_recv_extmap_id(answer, e->uri) &&
+             !rtc_sdp_media_send_extmap_id(offer, e->uri)))
+            return false;
+    }
+    return true;
 }

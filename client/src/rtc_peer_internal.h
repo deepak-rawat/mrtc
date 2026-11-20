@@ -121,6 +121,8 @@ struct rtc_peer_connection {
      * TWCC sender/receiver, BWE, and 100 ms feedback timer all live in the
      * runtime transport; the peer only carries the id needed to tag senders. */
     uint8_t twcc_ext_id;
+    uint8_t twcc_send_ids[RTC_MAX_TRANSCEIVERS];
+    bool twcc_receive[RTC_MAX_TRANSCEIVERS];
 #endif
 };
 

@@ -35,6 +35,7 @@ typedef struct endpoint {
     _Atomic unsigned decoded_frames;
     _Atomic unsigned decode_errors;
     int video_width, video_height;
+    bool inactive_mid;
 } endpoint_t;
 
 typedef struct {
@@ -235,8 +236,25 @@ static bool pump(fixture_t *fixture) {
                 return false;
             if (message.type == SIG_MSG_OFFER) {
                 rtc_desc_t answer;
-                if (rtc_peer_connection_create_answer(endpoint->pc, &answer) != RTC_OK ||
-                    rtc_peer_connection_set_local_desc(endpoint->pc, &answer) != RTC_OK)
+                if (rtc_peer_connection_create_answer(endpoint->pc, &answer) != RTC_OK)
+                    return false;
+                if (endpoint->inactive_mid) {
+                    rtc_sdp_t parsed = {0};
+                    rc = rtc_sdp_parse(&parsed, answer.sdp, answer.sdp_len);
+                    for (int i = 0; rc == RTC_OK && i < parsed.media_count; i++)
+                        for (int j = 0; j < parsed.media[i].extmap_count; j++)
+                            parsed.media[i].extmaps[j].direction = RTC_SDP_EXT_INACTIVE;
+                    if (rc == RTC_OK)
+                        rc = rtc_sdp_generate(&parsed);
+                    if (rc == RTC_OK) {
+                        memcpy(answer.sdp, parsed.raw, parsed.raw_len + 1);
+                        answer.sdp_len = parsed.raw_len;
+                    }
+                    rtc_sdp_close(&parsed);
+                    if (rc != RTC_OK)
+                        return false;
+                }
+                if (rtc_peer_connection_set_local_desc(endpoint->pc, &answer) != RTC_OK)
                     return false;
                 sig_msg_t response = {.type = SIG_MSG_ANSWER};
                 snprintf(response.to, sizeof(response.to), "%s", message.from);
@@ -303,8 +321,10 @@ TEST(sfu_live_tracks_restart_sctp_and_publisher_feedback) {
                                                      .user = &fixture});
     ASSERT(fixture.sfu != NULL);
     endpoint_t publisher = {.pc = rtc_peer_connection_create(NULL), .id = "publisher", .epoch = 1};
-    endpoint_t subscriber = {
-        .pc = rtc_peer_connection_create(NULL), .id = "subscriber", .epoch = 1};
+    endpoint_t subscriber = {.pc = rtc_peer_connection_create(NULL),
+                             .id = "subscriber",
+                             .epoch = 1,
+                             .inactive_mid = true};
     fixture.endpoints[0] = &publisher;
     fixture.endpoints[1] = &subscriber;
     ASSERT(publisher.pc && subscriber.pc);
@@ -357,6 +377,8 @@ TEST(sfu_live_tracks_restart_sctp_and_publisher_feedback) {
     ASSERT(session && subscription);
     rtc_transport_t *transport = session->transport;
     rtc_transport_t *downstream = subscription->transport;
+    ASSERT(!subscription->send_mid[0]);
+    ASSERT_EQ(rtc_sdp_media_recv_extmap_id(&subscription->remote.media[0], RTC_EXT_URI_MID), 0);
     rtc_sctp_t *association = session->sctp;
     rtc_consumer_t *consumer = subscription->consumers[0];
     rtc_rtp_parameters_t original;

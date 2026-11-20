@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 static int peer_dc_send(const uint8_t *data, size_t len, void *user);
 
@@ -543,6 +544,13 @@ static int peer_maybe_start_sctp(rtc_peer_connection_t *pc) {
     for (int i = 0; i < pc->remote_sdp.media_count; i++) {
         const rtc_sdp_media_t *m = &pc->remote_sdp.media[i];
         if (m->media_type == RTC_MEDIA_APPLICATION) {
+            const rtc_sdp_media_t *local = NULL;
+            for (int j = 0; j < pc->local_sdp.media_count; j++)
+                if (pc->local_sdp.media[j].mid_index == m->mid_index &&
+                    pc->local_sdp.media[j].media_type == RTC_MEDIA_APPLICATION)
+                    local = &pc->local_sdp.media[j];
+            if (m->rejected || !local || local->rejected)
+                continue;
             has_sctp = true;
             if (!m->sctp_port ||
                 (pc->dc_manager.socket && pc->dc_manager.remote_port != m->sctp_port))
@@ -566,16 +574,98 @@ static int peer_maybe_start_sctp(rtc_peer_connection_t *pc) {
     return RTC_OK;
 }
 
+static const rtc_sdp_media_t *peer_media(const rtc_sdp_t *sdp, int mid_index) {
+    for (int i = 0; i < sdp->media_count; i++)
+        if (sdp->media[i].mid_index == mid_index &&
+            sdp->media[i].media_type != RTC_MEDIA_APPLICATION)
+            return &sdp->media[i];
+    return NULL;
+}
+
+static uint8_t peer_extension_id(rtc_peer_connection_t *pc, int mid_index, const char *uri,
+                                 bool send) {
+    const rtc_sdp_media_t *local = peer_media(&pc->local_sdp, mid_index);
+    const rtc_sdp_media_t *remote = peer_media(&pc->remote_sdp, mid_index);
+    uint8_t ours =
+        send ? rtc_sdp_media_send_extmap_id(local, uri) : rtc_sdp_media_recv_extmap_id(local, uri);
+    uint8_t theirs = send ? rtc_sdp_media_recv_extmap_id(remote, uri)
+                          : rtc_sdp_media_send_extmap_id(remote, uri);
+    return ours && ours == theirs ? ours : 0;
+}
+
 #ifdef MRTC_ENABLE_TWCC
 static uint8_t peer_sender_twcc_id(rtc_peer_connection_t *pc, int mid_index) {
-    for (int i = 0; i < pc->remote_sdp.media_count; i++) {
-        const rtc_sdp_media_t *m = &pc->remote_sdp.media[i];
-        if (m->mid_index == mid_index && (m->rtcp_feedback & RTC_SDP_FB_TRANSPORT_CC))
-            return rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC);
-    }
-    return 0;
+    const rtc_sdp_media_t *local = peer_media(&pc->local_sdp, mid_index);
+    const rtc_sdp_media_t *remote = peer_media(&pc->remote_sdp, mid_index);
+    return local && remote &&
+                   (local->rtcp_feedback & remote->rtcp_feedback & RTC_SDP_FB_TRANSPORT_CC)
+               ? peer_extension_id(pc, mid_index, RTC_EXT_URI_TRANSPORT_CC, true)
+               : 0;
+}
+
+static bool peer_twcc_rtp_allowed(const rtc_rtp_packet_t *packet, void *user) {
+    rtc_peer_connection_t *pc = user;
+    for (int i = 0; i < pc->transceiver_count; i++)
+        if (rtc_rtp_recv_stream_ssrc(pc->transceivers[i].receiver.stream) == packet->header.ssrc)
+            return pc->twcc_receive[i];
+    return false;
 }
 #endif
+
+static int peer_configure_extensions(rtc_peer_connection_t *pc) {
+    uint8_t inbound_mid = 0;
+#ifdef MRTC_ENABLE_TWCC
+    uint8_t twcc_id = 0;
+    bool twcc_send = false, twcc_receive = false;
+    uint32_t reporter = 0;
+#endif
+    for (int i = 0; i < pc->transceiver_count; i++) {
+        struct rtc_rtp_transceiver *t = &pc->transceivers[i];
+#ifdef MRTC_ENABLE_TWCC
+        uint8_t send = peer_sender_twcc_id(pc, t->mid_index);
+        if (send != pc->twcc_send_ids[i])
+            rtc_rtp_sender_attach_twcc(&t->sender, 0);
+#endif
+        uint8_t mid = peer_extension_id(pc, t->mid_index, RTC_EXT_URI_MID, false);
+        rtc_rtp_recv_stream_set_mid(t->receiver.stream, mid ? t->mid : NULL);
+        if (mid)
+            inbound_mid = mid;
+        mid = peer_extension_id(pc, t->mid_index, RTC_EXT_URI_MID, true);
+        int rc = rtc_rtp_send_stream_set_mid(t->sender.stream, mid, t->mid);
+        if (rc != RTC_OK)
+            return rc;
+#ifdef MRTC_ENABLE_TWCC
+        const rtc_sdp_media_t *local = peer_media(&pc->local_sdp, t->mid_index);
+        const rtc_sdp_media_t *remote = peer_media(&pc->remote_sdp, t->mid_index);
+        uint8_t receive =
+            local && remote &&
+                    (local->rtcp_feedback & remote->rtcp_feedback & RTC_SDP_FB_TRANSPORT_CC)
+                ? peer_extension_id(pc, t->mid_index, RTC_EXT_URI_TRANSPORT_CC, false)
+                : 0;
+        pc->twcc_send_ids[i] = send;
+        pc->twcc_receive[i] = receive != 0;
+        if (send || receive)
+            twcc_id = send ? send : receive;
+        twcc_send |= send != 0;
+        twcc_receive |= receive != 0;
+        if (!reporter)
+            reporter = rtc_rtp_send_stream_ssrc(t->sender.stream);
+#endif
+    }
+    rtc_media_session_set_mid_ext_id(&pc->media_session, inbound_mid);
+#ifdef MRTC_ENABLE_TWCC
+    int rc = rtc_transport_configure_twcc(pc->runtime_transport, twcc_id, reporter, twcc_send,
+                                          twcc_receive);
+    if (rc != RTC_OK)
+        return rc;
+    rtc_transport_on_twcc_rtp(pc->runtime_transport, peer_twcc_rtp_allowed, pc);
+    if (twcc_id)
+        pc->twcc_ext_id = twcc_id;
+    for (int i = 0; i < pc->transceiver_count; i++)
+        rtc_rtp_sender_attach_twcc(&pc->transceivers[i].sender, pc->twcc_send_ids[i]);
+#endif
+    return RTC_OK;
+}
 
 static void peer_runtime_complete_connection(rtc_peer_connection_t *pc) {
     if (pc->runtime_connected)
@@ -588,7 +678,7 @@ static void peer_runtime_complete_connection(rtc_peer_connection_t *pc) {
             continue;
         rtc_rtp_sender_attach_logical(s, pc->runtime_transport);
 #ifdef MRTC_ENABLE_TWCC
-        rtc_rtp_sender_attach_twcc(s, peer_sender_twcc_id(pc, pc->transceivers[i].mid_index));
+        rtc_rtp_sender_attach_twcc(s, pc->twcc_send_ids[i]);
 #endif
         rtc_rtp_sender_arm_video(s);
     }
@@ -667,8 +757,8 @@ static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
         if (sdp->type == RTC_SDP_OFFER && pc->has_remote_desc) {
             rtc_sdp_media_t *m = &sdp->media[sdp->media_count];
             const rtc_sdp_media_t *previous = NULL;
-            for (int j = 0; j < pc->remote_sdp.media_count; j++) {
-                const rtc_sdp_media_t *r = &pc->remote_sdp.media[j];
+            for (int j = 0; j < pc->local_sdp.media_count; j++) {
+                const rtc_sdp_media_t *r = &pc->local_sdp.media[j];
                 if (r->media_type != RTC_MEDIA_APPLICATION && !previous)
                     previous = r;
                 if (r->mid_index == m->mid_index) {
@@ -696,17 +786,6 @@ static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
                     continue;
                 m->rtcp_feedback &= r->rtcp_feedback;
                 m->rejected = r->rejected;
-                rtc_sdp_extmap_t supported[SDP_MAX_EXTMAP];
-                int count = m->extmap_count;
-                memcpy(supported, m->extmaps, sizeof(supported));
-                m->extmap_count = 0;
-                for (int k = 0; k < count; k++) {
-                    uint8_t id = rtc_sdp_media_find_extmap_id(r, supported[k].uri);
-                    if (id)
-                        rtc_sdp_media_add_extmap(m, id, supported[k].uri);
-                }
-                if (!rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC))
-                    m->rtcp_feedback &= (uint8_t)~RTC_SDP_FB_TRANSPORT_CC;
                 bool send =
                     (m->direction == RTC_DIR_SENDRECV || m->direction == RTC_DIR_SENDONLY) &&
                     (r->direction == RTC_DIR_SENDRECV || r->direction == RTC_DIR_RECVONLY);
@@ -715,6 +794,9 @@ static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
                     (r->direction == RTC_DIR_SENDRECV || r->direction == RTC_DIR_SENDONLY);
                 m->direction = send ? (recv ? RTC_DIR_SENDRECV : RTC_DIR_SENDONLY)
                                     : (recv ? RTC_DIR_RECVONLY : RTC_DIR_INACTIVE);
+                rtc_sdp_media_answer_extmaps(m, r);
+                if (!rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC))
+                    m->rtcp_feedback &= (uint8_t)~RTC_SDP_FB_TRANSPORT_CC;
             }
         }
         sdp->media_count++;
@@ -728,6 +810,12 @@ static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
         rtc_sdp_media_t *m = &sdp->media[sdp->media_count];
         memset(m, 0, sizeof(*m));
         m->media_type = RTC_MEDIA_APPLICATION;
+        if (sdp->type == RTC_SDP_ANSWER)
+            for (int i = 0; i < pc->remote_sdp.media_count; i++)
+                if (pc->remote_sdp.media[i].media_type == RTC_MEDIA_APPLICATION)
+                    m->rejected = pc->remote_sdp.media[i].rejected;
+        if (pc->application_mid < 0 && pc->next_mid == INT_MAX)
+            return RTC_ERR_SDP;
         if (pc->application_mid < 0)
             pc->application_mid = pc->next_mid++;
         m->mid_index = pc->application_mid;
@@ -781,6 +869,7 @@ static void peer_apply_negotiated_media(rtc_peer_connection_t *pc) {
         return;
     for (int i = 0; i < pc->transceiver_count; i++) {
         struct rtc_rtp_transceiver *t = &pc->transceivers[i];
+        const rtc_sdp_media_t *local = peer_media(&pc->local_sdp, t->mid_index);
         const rtc_sdp_media_t *remote = NULL;
         for (int j = 0; j < pc->remote_sdp.media_count; j++) {
             if (pc->remote_sdp.media[j].mid_index == t->mid_index &&
@@ -788,9 +877,13 @@ static void peer_apply_negotiated_media(rtc_peer_connection_t *pc) {
                 remote = &pc->remote_sdp.media[j];
         }
         bool send =
+            local && !local->rejected &&
+            (local->direction == RTC_DIR_SENDRECV || local->direction == RTC_DIR_SENDONLY) &&
             remote && (t->direction == RTC_DIR_SENDRECV || t->direction == RTC_DIR_SENDONLY) &&
             (remote->direction == RTC_DIR_SENDRECV || remote->direction == RTC_DIR_RECVONLY);
         bool receive =
+            local && !local->rejected &&
+            (local->direction == RTC_DIR_SENDRECV || local->direction == RTC_DIR_RECVONLY) &&
             remote && (t->direction == RTC_DIR_SENDRECV || t->direction == RTC_DIR_RECVONLY) &&
             (remote->direction == RTC_DIR_SENDRECV || remote->direction == RTC_DIR_SENDONLY);
         bool was_receiving = rtc_rtp_recv_stream_is_active(t->receiver.stream);
@@ -800,7 +893,7 @@ static void peer_apply_negotiated_media(rtc_peer_connection_t *pc) {
             rtc_rtp_sender_attach_logical(&t->sender, pc->runtime_transport);
             rtc_rtp_sender_arm_video(&t->sender);
 #ifdef MRTC_ENABLE_TWCC
-            rtc_rtp_sender_attach_twcc(&t->sender, peer_sender_twcc_id(pc, t->mid_index));
+            rtc_rtp_sender_attach_twcc(&t->sender, pc->twcc_send_ids[i]);
 #endif
         }
         if (receive && !was_receiving && pc->on_track)
@@ -813,6 +906,10 @@ static void peer_try_connect(rtc_peer_connection_t *pc) {
         return;
     if (pc->signaling_state != RTC_SIGNALING_STABLE)
         return;
+    if (peer_configure_extensions(pc) != RTC_OK) {
+        peer_set_connection(pc, RTC_CONNECTION_FAILED);
+        return;
+    }
     peer_apply_negotiated_media(pc);
     if (pc->runtime_connected && peer_maybe_start_sctp(pc) != RTC_OK) {
         peer_set_connection(pc, RTC_CONNECTION_FAILED);
@@ -915,7 +1012,7 @@ void rtc_peer_connection_destroy(rtc_peer_connection_t *pc) {
 
 static rtc_rtp_sender_t *peer_add_track(rtc_peer_connection_t *pc, rtc_kind_t kind,
                                         const rtc_codec_t *codec) {
-    if (!pc || !codec)
+    if (!pc || !codec || pc->next_mid == INT_MAX)
         return NULL;
     if (pc->transceiver_count >= RTC_MAX_TRANSCEIVERS ||
         pc->transceiver_count + (pc->application_mid >= 0) >= SDP_MAX_MEDIA)
@@ -942,7 +1039,7 @@ static rtc_rtp_sender_t *peer_add_track(rtc_peer_connection_t *pc, rtc_kind_t ki
 static rtc_rtp_transceiver_t *peer_add_transceiver(rtc_peer_connection_t *pc, rtc_kind_t kind,
                                                    const rtc_codec_t *codec,
                                                    const rtc_rtp_transceiver_init_t *init) {
-    if (!pc || !codec)
+    if (!pc || !codec || pc->next_mid == INT_MAX)
         return NULL;
     if (pc->transceiver_count >= RTC_MAX_TRANSCEIVERS ||
         pc->transceiver_count + (pc->application_mid >= 0) >= SDP_MAX_MEDIA)
@@ -1101,6 +1198,23 @@ static int peer_set_local_desc(rtc_peer_connection_t *pc, const rtc_desc_t *desc
         return RTC_ERR_SDP;
     }
     parsed.type = desc->type;
+    for (int i = 0; i < parsed.media_count; i++)
+        if (parsed.media[i].media_type == RTC_MEDIA_APPLICATION &&
+            ((parsed.media[i].rejected && pc->dc_manager.socket) ||
+             (!parsed.media[i].rejected && parsed.media[i].sctp_port != 5000))) {
+            rtc_sdp_close(&parsed);
+            return RTC_ERR_SDP;
+        }
+    if (desc->type == RTC_SDP_ANSWER) {
+        for (int i = 0; i < parsed.media_count; i++) {
+            const rtc_sdp_media_t *offer = peer_media(&pc->remote_sdp, parsed.media[i].mid_index);
+            if (parsed.media[i].media_type != RTC_MEDIA_APPLICATION &&
+                (!offer || !rtc_sdp_media_answer_extmaps_valid(offer, &parsed.media[i]))) {
+                rtc_sdp_close(&parsed);
+                return RTC_ERR_SDP;
+            }
+        }
+    }
     rtc_sdp_close(&pc->local_sdp);
     pc->local_sdp = parsed;
 
@@ -1172,9 +1286,11 @@ static bool peer_validate_remote_media(rtc_peer_connection_t *pc, const rtc_sdp_
                 (m->ssrc && sdp->media[j].ssrc == m->ssrc))
                 return false;
         if (m->media_type == RTC_MEDIA_APPLICATION) {
-            if (++applications > 1 || !m->sctp_port ||
+            if (++applications > 1 || (!m->rejected && !m->sctp_port) ||
                 (type == RTC_SDP_ANSWER && m->mid_index != pc->application_mid) ||
-                (pc->dc_manager.socket && m->sctp_port != pc->dc_manager.remote_port))
+                (pc->dc_manager.socket &&
+                 (m->rejected || m->sctp_port != pc->dc_manager.remote_port)) ||
+                (type == RTC_SDP_ANSWER && pc->local_sdp.media[i].rejected && !m->rejected))
                 return false;
             for (int j = 0; j < pc->transceiver_count; j++)
                 if (pc->transceivers[j].mid_index == m->mid_index)
@@ -1190,6 +1306,13 @@ static bool peer_validate_remote_media(rtc_peer_connection_t *pc, const rtc_sdp_
         uint8_t mid_id = rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_MID);
         uint8_t twcc_id = rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC);
         if (mid_id > 14 || twcc_id > 14 || (mid_id && mid_id == twcc_id))
+            return false;
+#ifdef MRTC_ENABLE_TWCC
+        if (pc->runtime_connected && twcc_id && pc->twcc_ext_id && twcc_id != pc->twcc_ext_id)
+            return false;
+#endif
+        if (type == RTC_SDP_ANSWER &&
+            !rtc_sdp_media_answer_extmaps_valid(&pc->local_sdp.media[i], m))
             return false;
         for (int k = 0; k < m->extmap_count; k++)
             for (int j = 0; j < k; j++)
@@ -1220,9 +1343,10 @@ static bool peer_validate_remote_media(rtc_peer_connection_t *pc, const rtc_sdp_
         }
         for (int k = 0; pc->runtime_connected && k < pc->remote_sdp.media_count; k++) {
             const rtc_sdp_media_t *old = &pc->remote_sdp.media[k];
-            if (old->mid_index == m->mid_index &&
-                (mid_id != rtc_sdp_media_find_extmap_id(old, RTC_EXT_URI_MID) ||
-                 twcc_id != rtc_sdp_media_find_extmap_id(old, RTC_EXT_URI_TRANSPORT_CC)))
+            uint8_t old_mid = rtc_sdp_media_find_extmap_id(old, RTC_EXT_URI_MID);
+            uint8_t old_cc = rtc_sdp_media_find_extmap_id(old, RTC_EXT_URI_TRANSPORT_CC);
+            if (old->mid_index == m->mid_index && ((mid_id && old_mid && mid_id != old_mid) ||
+                                                   (twcc_id && old_cc && twcc_id != old_cc)))
                 return false;
         }
         if (type == RTC_SDP_ANSWER &&
@@ -1364,62 +1488,6 @@ static int peer_set_remote_desc(rtc_peer_connection_t *pc, const rtc_desc_t *des
             }
         }
     }
-
-    /* MID extmap negotiation: when the peer advertises the MID extension, route
-     * bundled inbound RTP by MID (RFC 8843/8852). Tell each receive stream its
-     * expected MID so the resolver can disambiguate same-payload-type streams. */
-    for (int i = 0; i < pc->remote_sdp.media_count; i++) {
-        const rtc_sdp_media_t *m = &pc->remote_sdp.media[i];
-        if (m->media_type != RTC_MEDIA_AUDIO && m->media_type != RTC_MEDIA_VIDEO)
-            continue;
-        uint8_t mid_id = rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_MID);
-        if (mid_id != 0) {
-            rtc_media_session_set_mid_ext_id(&pc->media_session, mid_id);
-            break;
-        }
-    }
-    for (int j = 0; j < pc->transceiver_count; j++) {
-        struct rtc_rtp_transceiver *t = &pc->transceivers[j];
-        if (t->receiver.stream)
-            rtc_rtp_recv_stream_set_mid(t->receiver.stream, t->mid);
-        for (int i = 0; i < pc->remote_sdp.media_count; i++)
-            if (pc->remote_sdp.media[i].mid_index == t->mid_index) {
-                uint8_t id =
-                    rtc_sdp_media_find_extmap_id(&pc->remote_sdp.media[i], RTC_EXT_URI_MID);
-                rc = rtc_rtp_send_stream_set_mid(t->sender.stream, id, t->mid);
-                if (rc != RTC_OK)
-                    return rc;
-            }
-    }
-
-    /* Transport-CC extmap negotiation */
-#ifdef MRTC_ENABLE_TWCC
-    for (int i = 0; i < pc->remote_sdp.media_count; i++) {
-        const rtc_sdp_media_t *m = &pc->remote_sdp.media[i];
-        if (m->media_type != RTC_MEDIA_AUDIO && m->media_type != RTC_MEDIA_VIDEO)
-            continue;
-        uint8_t id = (m->rtcp_feedback & RTC_SDP_FB_TRANSPORT_CC)
-                         ? rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC)
-                         : 0;
-        if (id != 0) {
-            uint32_t local_ssrc = 0;
-            for (int k = 0; k < pc->transceiver_count; k++) {
-                if (rtc_rtp_send_stream_is_active(pc->transceivers[k].sender.stream)) {
-                    local_ssrc = rtc_rtp_send_stream_ssrc(pc->transceivers[k].sender.stream);
-                    break;
-                }
-            }
-            rc = rtc_transport_enable_twcc(pc->runtime_transport, id, local_ssrc);
-            if (rc != RTC_OK) {
-                peer_set_connection(pc, RTC_CONNECTION_FAILED);
-                return rc;
-            }
-            pc->twcc_ext_id = id;
-            RTC_LOG_INFO("Peer: transport-cc negotiated (ext id=%u)", (unsigned)id);
-            break;
-        }
-    }
-#endif
 
     /* Try to start connection if both descriptions set */
     peer_try_connect(pc);

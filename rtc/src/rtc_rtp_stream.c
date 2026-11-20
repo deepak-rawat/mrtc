@@ -205,16 +205,24 @@ void rtc_rtp_recv_stream_set_local_ssrc(rtc_rtp_recv_stream_t *stream, uint32_t 
     }
 }
 
+static void send_stream_extensions_changed(rtc_rtp_send_stream_t *stream) {
+    if (!stream->started)
+        return;
+    rtc_transport_discard_rtp(stream->transport, stream->rtp_session.ssrc);
+    if (stream->nack_buf)
+        memset(stream->nack_buf->slots, 0,
+               (size_t)stream->nack_buf->capacity * sizeof(*stream->nack_buf->slots));
+}
+
 int rtc_rtp_send_stream_set_mid(rtc_rtp_send_stream_t *stream, uint8_t ext_id, const char *mid) {
     if (!stream || ext_id > 14 || (ext_id && (!mid || !mid[0] || strlen(mid) > 16)))
-        return RTC_ERR_INVALID;
-    if (stream->started &&
-        (ext_id != stream->mid_ext_id || (ext_id && strcmp(stream->mid, mid) != 0)))
         return RTC_ERR_INVALID;
 #ifdef MRTC_ENABLE_TWCC
     if (ext_id && ext_id == stream->twcc_ext_id)
         return RTC_ERR_INVALID;
 #endif
+    if (ext_id != stream->mid_ext_id || (ext_id && strcmp(stream->mid, mid) != 0))
+        send_stream_extensions_changed(stream);
     stream->mid_ext_id = ext_id;
     if (ext_id)
         memcpy(stream->mid, mid, strlen(mid) + 1);
@@ -268,6 +276,8 @@ void rtc_rtp_send_stream_attach_twcc(rtc_rtp_send_stream_t *stream, uint8_t ext_
     if (!stream || !stream->transport)
         return;
     if (!ext_id) {
+        if (stream->twcc_ext_id)
+            send_stream_extensions_changed(stream);
         stream->twcc = NULL;
         stream->twcc_ext_id = 0;
         return;
@@ -276,6 +286,8 @@ void rtc_rtp_send_stream_attach_twcc(rtc_rtp_send_stream_t *stream, uint8_t ext_
         rtc_transport_close(stream->transport);
         return;
     }
+    if (ext_id != stream->twcc_ext_id)
+        send_stream_extensions_changed(stream);
     stream->twcc = rtc_transport_twcc_sender(stream->transport);
     stream->twcc_ext_id = ext_id;
 #else
@@ -673,6 +685,10 @@ void rtc_rtp_recv_stream_set_mid(rtc_rtp_recv_stream_t *stream, const char *mid)
 
 const char *rtc_rtp_recv_stream_mid(const rtc_rtp_recv_stream_t *stream) {
     return (stream && stream->has_mid) ? stream->mid : NULL;
+}
+
+bool rtc_rtp_recv_stream_has_mid(const rtc_rtp_recv_stream_t *stream) {
+    return stream && stream->has_mid;
 }
 
 bool rtc_rtp_recv_stream_mid_matches(const rtc_rtp_recv_stream_t *stream, const char *mid) {

@@ -46,6 +46,12 @@ carry that subscription m-section's MID, including after a local consumer SSRC
 collision. Consumer rotation preserves the publisher, room participant and SCTP
 association; fresh offers obtain the current SSRC from the consumer. Publisher
 source SSRCs remain immutable, independently of rotatable local RR reporter IDs.
+MID is emitted only when the subscriber answer permits receiving it; inactive,
+send-only or omitted answer mappings do not authorize outbound tagging.
+Publisher TWCC feedback likewise requires the publisher's send permission,
+independently of any outbound tagging capability. Initial rejected application
+sections do not allocate/start SCTP; rejecting an existing SCTP association is
+refused before changing the session.
 
 ```text
 Alice publishing transport -> Alice camera producer

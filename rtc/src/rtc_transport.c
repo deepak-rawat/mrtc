@@ -130,6 +130,10 @@ struct rtc_transport {
     _Atomic uint64_t dtls_packets_received;
 #ifdef MRTC_ENABLE_TWCC
     bool twcc_enabled;
+    bool twcc_send_enabled;
+    bool twcc_receive_enabled;
+    rtc_transport_rtp_filter_fn on_twcc_rtp;
+    void *on_twcc_rtp_user;
     uint8_t twcc_ext_id;
     uint32_t twcc_local_ssrc;
     uint32_t twcc_remote_ssrc;
@@ -1851,6 +1855,10 @@ static int tx_close_impl(rtc_transport_t *transport, void *arg) {
     transport_clear_turn_config(transport);
     rtc_rtp_demux_close(&transport->rtp_demux);
 #ifdef MRTC_ENABLE_TWCC
+    transport->on_twcc_rtp = NULL;
+    transport->on_twcc_rtp_user = NULL;
+    transport->twcc_send_enabled = false;
+    transport->twcc_receive_enabled = false;
     if (transport->twcc_fb_timer != RTC_WORKER_TIMER_INVALID) {
         rtc_worker_cancel_timer(transport->worker, transport->twcc_fb_timer);
         transport->twcc_fb_timer = RTC_WORKER_TIMER_INVALID;
@@ -1996,8 +2004,11 @@ void *rtc_transport_rtp_bound(rtc_transport_t *transport, uint32_t ssrc) {
 
 #ifdef MRTC_ENABLE_TWCC
 static void transport_record_twcc_arrival(rtc_transport_t *transport, const rtc_rtp_packet_t *pkt) {
-    if (!transport->twcc_enabled || transport->twcc_ext_id == 0 || !pkt->header.extension ||
-        !pkt->ext_data || pkt->ext_len == 0)
+    if (atomic_load(&transport->closed) || !transport->twcc_receive_enabled ||
+        transport->twcc_ext_id == 0 || !pkt->header.extension || !pkt->ext_data ||
+        pkt->ext_len == 0)
+        return;
+    if (transport->on_twcc_rtp && !transport->on_twcc_rtp(pkt, transport->on_twcc_rtp_user))
         return;
     rtc_rtp_ext_t exts[RTC_RTP_EXT_MAX_ENTRIES];
     size_t cnt = RTC_RTP_EXT_MAX_ENTRIES;
@@ -2019,7 +2030,7 @@ static void transport_record_twcc_arrival(rtc_transport_t *transport, const rtc_
  * the media session sees any bundled SR/RR/NACK/PLI. */
 static void transport_consume_twcc_feedback(rtc_transport_t *transport, const uint8_t *buf,
                                             size_t len) {
-    if (!transport->twcc_enabled || !transport->bwe)
+    if (!transport->twcc_send_enabled || !transport->bwe)
         return;
     size_t offset = 0;
     while (offset + 4 <= len) {
@@ -2050,7 +2061,8 @@ static void transport_consume_twcc_feedback(rtc_transport_t *transport, const ui
 static void transport_twcc_fb_timer(void *user) {
     rtc_transport_t *transport = (rtc_transport_t *)user;
     transport->twcc_fb_timer = RTC_WORKER_TIMER_INVALID;
-    if (atomic_load_explicit(&transport->closed, memory_order_acquire))
+    if (atomic_load_explicit(&transport->closed, memory_order_acquire) ||
+        !transport->twcc_receive_enabled)
         return;
     if (transport->twcc_have_packets && transport->twcc_receiver.have_base) {
         uint8_t fb[RTCP_MAX_PACKET];
@@ -2082,61 +2094,88 @@ static void transport_bwe_trampoline(uint32_t bitrate_bps, void *user) {
 typedef struct {
     uint8_t ext_id;
     uint32_t local_ssrc;
+    bool send, receive;
 } tx_enable_twcc_args_t;
 
 static int tx_enable_twcc_impl(rtc_transport_t *transport, void *arg) {
     tx_enable_twcc_args_t *a = (tx_enable_twcc_args_t *)arg;
-    if (!transport->enable_twcc)
+    if (atomic_load(&transport->closed) || !transport->enable_twcc ||
+        (transport->twcc_enabled && a->ext_id && a->ext_id != transport->twcc_ext_id))
         return RTC_ERR_INVALID;
-    if (transport->twcc_enabled)
-        return RTC_OK;
-    bool shared = false;
-    for (unsigned i = 0; i < LOCAL_SOURCE_MAX; i++)
-        shared |= a->local_ssrc && transport->local_sources[i].ssrc == a->local_ssrc;
-    uint32_t reporter = a->local_ssrc;
-    if (!shared) {
-        int rc = rtc_transport_new_ssrc(transport, &reporter);
-        if (rc != RTC_OK)
-            return rc;
-        rc = rtc_transport_register_source(transport, reporter, transport_twcc_rotate, transport,
-                                           NULL);
-        if (rc != RTC_OK)
-            return rc;
+    if (a->receive && !transport->twcc_local_ssrc) {
+        bool shared = false;
+        for (unsigned i = 0; i < LOCAL_SOURCE_MAX; i++)
+            shared |= a->local_ssrc && transport->local_sources[i].ssrc == a->local_ssrc;
+        uint32_t reporter = a->local_ssrc;
+        if (!shared) {
+            int rc = rtc_transport_new_ssrc(transport, &reporter);
+            if (rc != RTC_OK)
+                return rc;
+            rc = rtc_transport_register_source(transport, reporter, transport_twcc_rotate,
+                                               transport, NULL);
+            if (rc != RTC_OK)
+                return rc;
+        }
+        transport->twcc_local_ssrc = reporter;
     }
-    transport->twcc_ext_id = a->ext_id;
-    transport->twcc_local_ssrc = reporter;
-    rtc_twcc_sender_init(&transport->twcc_sender);
-    rtc_twcc_receiver_init(&transport->twcc_receiver);
-    rtc_bwe_config_t cfg = {
-        .initial_bps = transport->initial_outgoing_bitrate_bps
-                           ? transport->initial_outgoing_bitrate_bps
-                           : 500000,
-        .min_bps = 100000,
-        .max_bps = 4000000,
-    };
-    transport->bwe = rtc_bwe_create(&cfg);
-    if (!transport->bwe)
-        return RTC_ERR_NOMEM;
-    rtc_bwe_on_bitrate_change(transport->bwe, transport_bwe_trampoline, transport);
-    transport->twcc_enabled = true;
-    if (transport->twcc_fb_timer == RTC_WORKER_TIMER_INVALID)
+    if (a->send && !transport->bwe) {
+        rtc_bwe_config_t cfg = {
+            .initial_bps = transport->initial_outgoing_bitrate_bps
+                               ? transport->initial_outgoing_bitrate_bps
+                               : 500000,
+            .min_bps = 100000,
+            .max_bps = 4000000,
+        };
+        transport->bwe = rtc_bwe_create(&cfg);
+        if (!transport->bwe)
+            return RTC_ERR_NOMEM;
+        rtc_twcc_sender_init(&transport->twcc_sender);
+        rtc_bwe_on_bitrate_change(transport->bwe, transport_bwe_trampoline, transport);
+    }
+    if (a->receive && !transport->twcc_receive_enabled)
+        rtc_twcc_receiver_init(&transport->twcc_receiver);
+    if (a->ext_id)
+        transport->twcc_ext_id = a->ext_id;
+    transport->twcc_send_enabled = a->send;
+    transport->twcc_receive_enabled = a->receive;
+    transport->twcc_enabled |= a->send || a->receive;
+    if (!a->receive) {
+        transport->twcc_have_packets = false;
+        if (transport->twcc_fb_timer != RTC_WORKER_TIMER_INVALID) {
+            rtc_worker_cancel_timer(transport->worker, transport->twcc_fb_timer);
+            transport->twcc_fb_timer = RTC_WORKER_TIMER_INVALID;
+        }
+    } else if (transport->twcc_fb_timer == RTC_WORKER_TIMER_INVALID) {
         transport->twcc_fb_timer = rtc_worker_add_timer(transport->worker, rtc_time_ms() + 100,
                                                         transport_twcc_fb_timer, transport);
+        if (transport->twcc_fb_timer == RTC_WORKER_TIMER_INVALID)
+            return RTC_ERR_NOMEM;
+    }
     return RTC_OK;
 }
 
 int rtc_transport_enable_twcc(rtc_transport_t *transport, uint8_t ext_id, uint32_t local_ssrc) {
     if (!transport || ext_id == 0 || ext_id > 14)
         return RTC_ERR_INVALID;
-    tx_enable_twcc_args_t args = {ext_id, local_ssrc};
+    return rtc_transport_configure_twcc(transport, ext_id, local_ssrc, true, true);
+}
+
+int rtc_transport_configure_twcc(rtc_transport_t *transport, uint8_t ext_id, uint32_t local_ssrc,
+                                 bool send, bool receive) {
+    if (!transport || atomic_load(&transport->closed) || ext_id > 14 ||
+        ((send || receive) && !ext_id))
+        return RTC_ERR_INVALID;
+    tx_enable_twcc_args_t args = {ext_id, local_ssrc, send, receive};
     return tx_op_invoke(transport, tx_enable_twcc_impl, &args);
 }
 
 rtc_twcc_sender_t *rtc_transport_twcc_sender(rtc_transport_t *transport) {
-    if (!transport || !transport->twcc_enabled)
+    if (!transport || !transport->twcc_send_enabled)
         return NULL;
     return &transport->twcc_sender;
 }
+
+TX_DEFINE_CB_SETTER(on_twcc_rtp, rtc_transport_rtp_filter_fn, on_twcc_rtp, on_twcc_rtp_user)
 
 TX_DEFINE_CB_SETTER(on_bitrate_estimate, rtc_transport_bitrate_fn, on_bitrate, on_bitrate_user)
 
