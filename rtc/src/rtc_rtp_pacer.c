@@ -36,6 +36,32 @@ static uint32_t u32(const uint8_t *p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
 
+int rtc_rtp_pacer_set_allocator(rtc_rtp_pacer_t *p, rtc_pacer_allocate_fn allocate,
+                                rtc_pacer_release_fn release, void *user) {
+    if (!p || !!allocate != !!release || p->sources || p->head || p->bytes || p->packets)
+        return RTC_ERR_INVALID;
+    p->allocate = allocate;
+    p->release = release;
+    p->allocator_user = user;
+    return RTC_OK;
+}
+
+static void *pacer_allocate(rtc_rtp_pacer_t *p, size_t bytes, bool clear) {
+    void *memory = p->allocate ? p->allocate(bytes, p->allocator_user) : malloc(bytes);
+    if (memory && clear)
+        memset(memory, 0, bytes);
+    return memory;
+}
+
+static void pacer_release(rtc_rtp_pacer_t *p, void *memory) {
+    if (!memory)
+        return;
+    if (p->release)
+        p->release(memory, p->allocator_user);
+    else
+        free(memory);
+}
+
 static uint16_t sequence(const uint8_t *wire) {
     return (uint16_t)((uint16_t)wire[2] << 8 | wire[3]);
 }
@@ -66,9 +92,9 @@ static void free_frame(rtc_rtp_pacer_t *p, rtc_pacer_frame_t *f, bool dropped) {
             p->packets_dropped++;
             f->source->sent.packets_dropped++;
         }
-        free(packet);
+        pacer_release(p, packet);
     }
-    free(f);
+    pacer_release(p, f);
 }
 
 static void replenish(rtc_rtp_pacer_t *p, uint64_t now) {
@@ -96,7 +122,8 @@ int rtc_rtp_pacer_enqueue(rtc_rtp_pacer_t *p, const uint8_t *wire, size_t len, s
     uint32_t ssrc = u32(wire + 8), timestamp = u32(wire + 4);
     rtc_pacer_source_t *s = source(p, ssrc);
     if (!s) {
-        if (p->source_count >= RTC_PACER_MAX_SOURCES || !(s = calloc(1, sizeof(*s)))) {
+        if (p->source_count >= RTC_PACER_MAX_SOURCES ||
+            !(s = pacer_allocate(p, sizeof(*s), true))) {
             p->packets_dropped++;
             return RTC_ERR_NOMEM;
         }
@@ -119,7 +146,7 @@ int rtc_rtp_pacer_enqueue(rtc_rtp_pacer_t *p, const uint8_t *wire, size_t len, s
     if (s->failed || s->complete)
         goto rejected;
     if (!s->stage) {
-        s->stage = calloc(1, sizeof(*s->stage));
+        s->stage = pacer_allocate(p, sizeof(*s->stage), true);
         if (!s->stage)
             goto failed;
         s->stage->source = s;
@@ -131,7 +158,7 @@ int rtc_rtp_pacer_enqueue(rtc_rtp_pacer_t *p, const uint8_t *wire, size_t len, s
         len > RTC_PACER_MAX_FRAME_BYTES - f->bytes || len > RTC_PACER_MAX_BYTES - p->bytes ||
         p->packets >= 1024)
         goto failed;
-    rtc_pacer_packet_t *packet = malloc(sizeof(*packet) + len);
+    rtc_pacer_packet_t *packet = pacer_allocate(p, sizeof(*packet) + len, false);
     if (!packet)
         goto failed;
     *packet = (rtc_pacer_packet_t){.len = len, .payload_len = payload_len};
@@ -210,10 +237,10 @@ void rtc_rtp_pacer_run(rtc_rtp_pacer_t *p, uint64_t now, rtc_pacer_write_fn writ
         p->packets--;
         s->sent.packets_queued--;
         f->head = packet->next;
-        free(packet);
+        pacer_release(p, packet);
         if (!f->head) {
             p->head = f->next;
-            free(f);
+            pacer_release(p, f);
         }
     }
     if (!p->head)
@@ -284,7 +311,7 @@ void rtc_rtp_pacer_forget(rtc_rtp_pacer_t *p, uint32_t ssrc) {
         return;
     *slot = s->next;
     p->source_count--;
-    free(s);
+    pacer_release(p, s);
 }
 
 void rtc_rtp_pacer_abort(rtc_rtp_pacer_t *p, uint32_t ssrc, bool rejected_queued) {

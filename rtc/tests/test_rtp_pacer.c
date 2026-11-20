@@ -1,5 +1,7 @@
 #include "rtc_rtp_pacer.h"
 #include "test_harness.h"
+#include <assert.h>
+#include <stdlib.h>
 
 typedef struct {
     unsigned packets;
@@ -226,6 +228,56 @@ TEST(protection_failure_aborts_staging_without_double_counting_the_rejection) {
     rtc_rtp_pacer_close(&p);
 }
 
+typedef struct {
+    size_t remaining, live;
+} allocation_t;
+
+static void *limited_allocate(size_t bytes, void *user) {
+    allocation_t *state = user;
+    if (!state->remaining)
+        return NULL;
+    if (state->remaining != SIZE_MAX)
+        state->remaining--;
+    void *memory = malloc(bytes);
+    if (memory)
+        state->live++;
+    return memory;
+}
+
+static void limited_release(void *memory, void *user) {
+    allocation_t *state = user;
+    assert(state->live > 0);
+    state->live--;
+    free(memory);
+}
+
+TEST(allocation_failure_cancels_partial_frame_and_recovers) {
+    for (size_t budget = 0; budget <= 3; budget++) {
+        rtc_rtp_pacer_t p = {.bitrate_bps = 384000};
+        allocation_t allocation = {.remaining = budget};
+        ASSERT_EQ(rtc_rtp_pacer_set_allocator(&p, limited_allocate, NULL, &allocation),
+                  RTC_ERR_INVALID);
+        ASSERT_EQ(rtc_rtp_pacer_set_allocator(&p, limited_allocate, limited_release, &allocation),
+                  RTC_OK);
+        uint8_t wire[1200];
+        packet(wire, 42, 9000, 1, true);
+        ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, 100),
+                  budget < 3 ? RTC_ERR_NOMEM : RTC_OK);
+        allocation.remaining = SIZE_MAX;
+        packet(wire, 42, 12000, 2, true);
+        ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, 101), RTC_OK);
+        writer_t writer = {.fail_after = -1};
+        rtc_rtp_pacer_run(&p, 101, write_packet, &writer);
+        ASSERT_EQ(writer.packets, budget < 3 ? 1 : 2);
+        ASSERT_EQ(p.bytes, 0);
+        ASSERT_EQ(p.packets, 0);
+        ASSERT_EQ(rtc_rtp_pacer_set_allocator(&p, NULL, NULL, NULL), RTC_ERR_INVALID);
+        rtc_rtp_pacer_close(&p);
+        ASSERT_EQ(allocation.live, 0);
+        ASSERT_EQ(rtc_rtp_pacer_set_allocator(&p, NULL, NULL, NULL), RTC_OK);
+    }
+}
+
 int main(void) {
     RUN_TEST(frame_staging_two_mtu_burst_and_deterministic_spacing);
     RUN_TEST(orphan_and_failed_frames_expire_without_resurrection);
@@ -235,5 +287,6 @@ int main(void) {
     RUN_TEST(transport_and_source_bounds_and_selective_cancellation);
     RUN_TEST(shared_wire_and_packet_limits_cancel_the_whole_failed_frame);
     RUN_TEST(protection_failure_aborts_staging_without_double_counting_the_rejection);
+    RUN_TEST(allocation_failure_cancels_partial_frame_and_recovers);
     TEST_SUMMARY();
 }

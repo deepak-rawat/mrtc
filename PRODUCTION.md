@@ -65,16 +65,22 @@ For coverage-guided parser fuzzing, use a Clang distribution with libFuzzer
 cmake -S . -B build/fuzz -G Ninja -DCMAKE_C_COMPILER=clang \
   -DCMAKE_BUILD_TYPE=Debug -DMRTC_BUILD_FUZZERS=ON \
   -DMRTC_ENABLE_ASAN=ON -DMRTC_ENABLE_UBSAN=ON
-cmake --build build/fuzz --parallel 4 --target fuzz_packet_parsers
-mkdir -p build/fuzz/corpus build/fuzz/findings
+cmake --build build/fuzz --parallel 4 --target fuzz_packet_parsers fuzz_media_state
+mkdir -p build/fuzz/corpus build/fuzz/media-corpus build/fuzz/findings
 build/fuzz/rtc/fuzz_packet_parsers build/fuzz/corpus \
+  -max_total_time=60 -max_len=8192 -artifact_prefix=build/fuzz/findings/
+build/fuzz/rtc/fuzz_media_state build/fuzz/media-corpus \
   -max_total_time=60 -max_len=8192 -artifact_prefix=build/fuzz/findings/
 ```
 
 The harness instruments the library as well as the entry point, exercising
-STUN, RTP/extensions, RTCP/feedback, SDP and ICE candidates. Retain reproducing
-inputs and add focused regressions for findings. This is parser fuzzing, not
-stateful transport fuzzing or an independent security audit.
+STUN, RTP/extensions, RTCP/feedback, SDP and ICE candidates. The media-state
+driver sequences source binding/retirement, RTP/RTCP, recovery ticks, pacing,
+write failures and allocation-budget failures, checking bounded resources and
+cleanup. Pacer allocation tests cover failure at each object/frame/packet
+allocation and recovery without resurrecting partial frames. Retain
+reproducers and focused regressions. These targets do not establish full
+ICE/DTLS state coverage or replace independent review.
 
 ### Release evidence
 

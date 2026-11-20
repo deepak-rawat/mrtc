@@ -12,6 +12,8 @@
 
 typedef struct rtc_pacer_frame rtc_pacer_frame_t;
 typedef struct rtc_pacer_source rtc_pacer_source_t;
+typedef void *(*rtc_pacer_allocate_fn)(size_t bytes, void *user);
+typedef void (*rtc_pacer_release_fn)(void *memory, void *user);
 typedef struct {
     uint64_t packets_sent, octets_sent, packets_dropped, packets_rejected;
     uint64_t packets_queued;
@@ -28,10 +30,16 @@ typedef struct {
     uint64_t last_ms, credit;
     uint64_t packets_sent, bytes_sent, packets_dropped, frames_dropped;
     bool clock_valid;
+    rtc_pacer_allocate_fn allocate;
+    rtc_pacer_release_fn release;
+    void *allocator_user;
 } rtc_rtp_pacer_t;
 
 typedef int (*rtc_pacer_write_fn)(const uint8_t *wire, size_t len, void *user);
 
+/* Configure only an empty pacer; NULL callbacks select the standard allocator. */
+int rtc_rtp_pacer_set_allocator(rtc_rtp_pacer_t *p, rtc_pacer_allocate_fn allocate,
+                                rtc_pacer_release_fn release, void *user);
 int rtc_rtp_pacer_enqueue(rtc_rtp_pacer_t *p, const uint8_t *wire, size_t len, size_t payload_len,
                           uint64_t now);
 void rtc_rtp_pacer_run(rtc_rtp_pacer_t *p, uint64_t now, rtc_pacer_write_fn write, void *user);

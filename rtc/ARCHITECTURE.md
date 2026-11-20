@@ -595,6 +595,12 @@ Client-facade tests (`test_peer`, `test_data_channel`,
 
 ## Transport lifetime
 
+`fuzz_media_state` exercises ordered receive-source and paced-queue operations,
+including allocation/write failure, expiry and cleanup. The pacer's optional
+internal allocator can be configured only while empty; production defaults
+remain the standard allocator. Deterministic failure tests check every enqueue
+allocation boundary and successful recovery on a fresh frame.
+
 Transport packet dispatch and queued work retain the logical transport until
 their callbacks finish. `close()` serializes resource teardown with its worker;
 `destroy()` releases ownership rather than freeing memory still used by a
