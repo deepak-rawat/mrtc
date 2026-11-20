@@ -12,22 +12,22 @@ changes there alone do not change client or SFU connectivity.
 
 | Standard | Implemented behavior | Remaining boundary |
 |---|---|---|
-| RFC 3550 — RTP/RTCP | Compound reports/feedback + per-publisher SDES/CNAME, interval loss/jitter, live bounded membership/sender expiry, timer/reverse reconsideration, publisher RTP/NTP mapping across SFU legs, monotonic SR-history RTT, incoming/outgoing BYE and inactivity expiry | Supported unicast profile; SSRC collision recovery and large-group BYE backoff remain incomplete; impaired-network synchronized playout needs qualification |
+| RFC 3550 — RTP/RTCP | Compound reports/feedback + per-publisher SDES/CNAME, live membership/sender expiry, timer/reverse reconsideration, publisher RTP/NTP correlation, monotonic RTT, BYE/expiry and authenticated local-SSRC collision recovery | Supported unicast profile; large-group BYE backoff is outside it; impaired-network synchronized playout needs qualification |
 | RFC 3711 — SRTP/SRTCP | AES-128-CM/HMAC-SHA1-80, per-SSRC rollover/replay state, authenticated replay rejection, capacity checks | No MKI/rekeying API or independent hardening audit |
 | RFC 7714 — SRTP AEAD | AES-128-GCM and AES-256-GCM; RTP/SRTCP protection and DTLS profile negotiation | Not every optional cipher/profile is offered |
 | RFC 8489 / RFC 5389 — STUN | UDP messages, integrity/fingerprint, address validation, ICE checks and credential-based TURN authentication | Authentication v2, alternate servers and TCP/TLS STUN are not implemented |
 | RFC 8445 — ICE | Full/lite operation, controlling/controlled roles, conflicts, nomination, consent and active restart on the runtime | Not a complete implementation of every checklist/dual-stack extension |
 | RFC 7675 — consent | Authenticated consent requests and expiration of an unresponsive selected path | Application reconnect policy remains application-owned |
 | RFC 8838 / RFC 8839 — trickle ICE and SDP | Asynchronous candidates, remote ingestion, end-of-candidates, ICE-lite signaling and retained browser candidate metadata | mDNS is deferred to authenticated peer-reflexive checks, not resolved by a multicast-DNS service |
-| RFC 8656 / RFC 5766 — TURN | Worker-owned UDP relay allocation over UDP/TCP/verified TLS, bounded pre-allocation address failover, permissions/channels, refresh and relay-only connectivity | One server identity/peer per logical transport; no multiple-server failover, live allocation migration or authentication v2; IPv6 relay qualification remains open |
+| RFC 8656 / RFC 5766 / RFC 6156 — TURN | Bounded multi-identity/address attempts over UDP/TCP/verified TLS, IPv4/IPv6 relay/peer paths, refresh, failed-allocation ICE restart recovery preserving DTLS/SRTP/SCTP and relay-only policy | Four total endpoint attempts, one selected relay family; no NAT64 synthesis, simultaneous dual-family allocation, transparent healthy-allocation migration or authentication v2; WAN qualification remains open |
 | RFC 6347 / RFC 9147 — DTLS | Minimum DTLS 1.2; newer versions negotiated when supported by OpenSSL; datagram-preserving BIOs on OpenSSL 3.2+ | Older OpenSSL uses the existing memory-BIO fallback |
 | RFC 5764 — DTLS-SRTP | Profile negotiation, key export and remote SHA-256 fingerprint pinning | Signaling authenticity is not provided by fingerprint pinning alone |
 | RFC 7983 — packet demultiplexing | Shared UDP classification and logical-transport routing | Distinct DTLS associations still require distinct network tuples |
-| RFC 8866 / RFC 3264 / RFC 8829 — SDP/JSEP | Multi-media SDP, initial dynamic PT mapping, RTP rejection/rtcp-mux validation, feedback/extension intersection, repeated offer/answer, glare rejection/rollback and ICE restart | Established codec/payload-type mutation and full Unified Plan are not supported |
-| RFC 8285 — RTP extensions | One-byte extension form, MID and transport-cc negotiation | Two-byte form and encrypted extensions are not implemented |
+| RFC 8866 / RFC 3264 / RFC 8829 — SDP/JSEP | Multi-media SDP, bounded numeric/profile validation, initial dynamic PT mapping, rejected RTP/SCTP sections, rtcp-mux validation, directional feedback/extension intersection, repeated offer/answer, glare rejection/rollback and ICE restart | Established codec/payload-type mutation and full Unified Plan are not supported |
+| RFC 8285 — RTP extensions | One-byte extension form, directional MID and transport-cc negotiation, native/SFU outbound MID | Two-byte form and encrypted extensions are not implemented |
 | RFC 4585 / RFC 5104 — feedback | NACK, PLI and FIR build/parse/routing; receiver loss feedback and bounded retransmission history | No RTX/FEC implementation |
 | Transport-wide CC draft / GCC | Transport-wide sequence numbers, arrival feedback and delay/loss estimation | This is not a claim to implement the different RFC 8888 wire format |
-| REMB draft — `goog-remb` | Negotiated single-source bitrate feedback; conservative minimum fresh-consumer video bound mapped to the original source; native encoder target constraints | Not a subscriber-wide allocator, pacer or simulcast selector; not an RFC 8888 implementation |
+| REMB draft — `goog-remb` | Negotiated single-source bitrate feedback; conservative minimum fresh-consumer video bound mapped to the original source; native encoder target constraints; subscriber-wide video allocation and bounded frame-aware pacing | One shared encoding, not simulcast or independent subscriber encoding; not an RFC 8888 implementation |
 | RFC 7741 — VP8 payload | Fragmentation, bounded sequence-aware assembly, PictureID lengths and keyframe detection | No temporal-layer scheduling or arbitrary cross-frame reorder buffer |
 | RFC 7587 — Opus payload | Opus at 48 kHz, one encoded audio frame per packet | Codec format-parameter coverage and in-band FEC negotiation remain limited |
 | RFC 8831 / RFC 8832 / RFC 8261 — data channels | usrsctp SCTP-over-DTLS, DCEP, stream resets, reliable/partial-reliable delivery and backpressure | Application message schemas remain application-specific |
@@ -107,20 +107,23 @@ because a TURN allocation is identified by its network tuple, not by a logical
 transport identifier behind a shared listener. Permission, channel and
 allocation refresh and cleanup are timer-driven.
 
-The client supports one authenticated `turn:` UDP/TCP or `turns:` TLS URL
-and a relay-only policy. TLS verifies the configured server name/IP and trust
+The client supports a bounded pool of authenticated `turn:` UDP/TCP or
+`turns:` TLS identities and a relay-only policy. TLS verifies the configured server name/IP and trust
 chain, using OpenSSL's default trust store or an explicit CA file. TCP/TLS is
 the client-to-server leg; relay candidates remain UDP. Stream I/O is nonblocking,
 framed and bounded (64 KiB send queue, 500 ms queued-write deadline after
 connection, five-second connect/TLS deadline). TCP_NODELAY prevents small
-control messages waiting behind Nagle/delayed acknowledgements. Multiple-server
-configurations fail explicitly. One identity may try up to four resolved
-addresses before allocation, with a five-second budget per attempt when
-alternatives exist. Address-family alternatives are retained, and callers may
-provide a copied numeric address list. TLS always verifies the original host.
-Successful allocations are pinned; exhausting addresses never enables a direct
-path. Retry timers and failed sockets are worker-owned and cancelled on close.
-Candidates and end-of-candidates can arrive after the initial SDP.
+control messages waiting behind Nagle/delayed acknowledgements. Identities
+and resolved addresses share four total attempts, with a five-second budget
+per attempt when alternatives exist. Address-family alternatives are retained,
+and callers may provide a copied numeric address list. Each attempt keeps its
+own credentials/protocol/trust; TLS always verifies the original host.
+Successful allocations are pinned; exhausting attempts never enables a direct
+path. Failed allocations can recover on explicit ICE restart while preserving
+DTLS/SRTP/SCTP. IPv4/IPv6 control and relay/peer combinations are supported,
+with one selected relay family and no NAT64 synthesis. Retry timers and failed
+sockets are worker-owned and cancelled on close. Candidates and
+end-of-candidates can arrive after the initial SDP.
 
 **Validation:** [network runtime tests](rtc/tests/test_network_runtime.c),
 [local coturn fixture](rtc/tests/run_turn_runtime.sh), and
@@ -181,12 +184,12 @@ success does not certify every SDL device/launch configuration.
 
 ## Deferred Work and Deployment Limits
 
-- SSRC collision recovery and large-group BYE backoff; impaired-network qualification of capture-clock synchronization, membership reconsideration and BYE/source expiry.
+- Large-group BYE backoff is outside the unicast profile; impaired-network qualification of collision recovery, clock synchronization, membership reconsideration and BYE/source expiry remains necessary.
 - FEC/RTX, simulcast/SVC and additional codecs.
-- Multiple TURN servers, post-allocation recovery, dual-stack completeness and STUN authentication v2; hostile-network qualification of pre-allocation address failover.
+- NAT64, simultaneous dual-family allocations and STUN authentication v2; hostile-network qualification of bounded TURN pool/restart/IPv6 behavior.
 - Full SDP/Unified Plan coverage and established codec changes.
 - Production authentication, authorization, HTTPS/WSS deployment, quotas,
-  sophisticated per-subscriber bitrate allocation and independent security review.
+  independent subscriber encoding/layer selection and independent security review.
 
 See [ROADMAP.md](ROADMAP.md) for priorities and
 [README.md](README.md) for dependencies and validation commands. Passing these

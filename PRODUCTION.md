@@ -67,6 +67,7 @@ cmake -S . -B build/fuzz -G Ninja -DCMAKE_C_COMPILER=clang \
   -DMRTC_ENABLE_ASAN=ON -DMRTC_ENABLE_UBSAN=ON
 cmake --build build/fuzz --parallel 4 --target fuzz_packet_parsers fuzz_media_state
 mkdir -p build/fuzz/corpus build/fuzz/media-corpus build/fuzz/findings
+cp rtc/tests/fuzz_corpus/* build/fuzz/corpus/
 build/fuzz/rtc/fuzz_packet_parsers build/fuzz/corpus \
   -max_total_time=60 -max_len=8192 -artifact_prefix=build/fuzz/findings/
 build/fuzz/rtc/fuzz_media_state build/fuzz/media-corpus \
@@ -122,12 +123,13 @@ The starting native baseline on macOS passed all 59 CTests, including local
 coturn fixtures and desktop media, with a warning-free build. This does not
 establish Linux/Windows/browser qualification or production readiness.
 
-Implemented: native and SFU periodic reports include SDES with the same random
+Initial implementation: native and SFU periodic reports included SDES with the same random
 process-local CNAME advertised in SDP. Report parsing respects sub-packet
 boundaries; loss fractions use report intervals, and late pre-rollover packets
 do not create a false cycle. Focused RTCP/SDP/media/routing/peer/SFU tests pass
-locally. Full dynamic source lifecycle/reconsideration remains required work;
-compound reports alone do not complete RTCP.
+locally. Dynamic source lifecycle/reconsideration was still required at this
+stage; its subsequent implementation is recorded below. Compound reports
+alone do not complete RTCP.
 
 Negotiated MID routing rejects unknown MIDs and ambiguous payload-type-only
 matches instead of binding a new source to the first stream. SR reception also
@@ -170,33 +172,92 @@ Real native mesh, SFU and AUTO 2-to-3-to-2 / 4-to-5-to-4 E2E scenarios pass
 with decoded media, SCTP, roster and lifecycle assertions. These checks do not
 re-qualify the browser audio or external-platform gates above.
 
-## Remaining protocol work
+## Implementation and remaining release gates
 
-The retained changes are a tested foundation, not completion of work items 0–6:
+The implementation targets the constrained unicast profile above, not every
+optional WebRTC/RTP feature. Local code and test results do not close the
+external release-evidence requirements:
 
-1. Complete supported-profile negotiation validation, including feedback
-   capability intersection, rejected sections and browser-specific SDP shapes.
-2. Complete SSRC collision recovery and qualify synchronized playout under
-   impairments. Publisher RTP/NTP correlation, per-publisher synchronization
+1. Qualify supported-profile negotiation against the external browser matrix.
+   The implementation validates bounded numeric/transport fields, feedback
+   intersection, MID/extension directions and answer permissions, and preserves
+   rejected SCTP sections without starting an association. Unsupported live
+   mutations fail before changing a working connection.
+2. Qualify SSRC recovery and synchronized playout under impairments.
+   Authenticated local-source collision recovery now retires the old source,
+   updates owners/routes/MID/stats and preserves crypto replay/nonce state.
+   Publisher RTP/NTP correlation, per-publisher synchronization
    CNAME and monotonic RTT history now cross the SFU legs. Dynamic
    member/sender tracking, timer/reverse
    reconsideration, incoming/outgoing BYE and source inactivity expiry are
-   implemented for the supported unicast profile. Duplicate remote-SSRC SDP
-   rejection is validation, not automatic collision recovery. Large-group BYE
-   backoff is outside this profile and remains unimplemented.
-3. Qualify conservative shared-source bitrate adaptation under impairments,
-   then complete pacing and subscriber-wide allocation across media legs.
-4. Qualify TURN under hostile networks and complete multiple-server failover,
-   post-allocation recovery and dual-stack relay/candidate selection. Bounded
-   pre-allocation address failover, nonblocking readiness and TCP/TLS TURN are
-   now implemented, with verified certificates, bounded framing/partial writes,
-   refresh and coturn runtime/client tests.
-5. Add broader allocation-failure/stateful fuzz/concurrency coverage, hostile
-   network fixtures and automated capacity/resource-growth measurements.
+   implemented for the supported unicast profile. Large-group BYE backoff is
+   outside this profile and remains unimplemented.
+3. Qualify bounded frame-aware pacing and subscriber-wide video allocation
+   under real impairments. They are enabled in the supported client/SFU path;
+   audio/control stay independent, with explicit queue/resource accounting.
+   Queues hold at most 256 KiB and frames at most 128 KiB. Streaming SFU
+   forwarding and size-derived serialization preserve large keyframe recovery;
+   the supported startup profile permits about a 10.49 Mbps keyframe peak.
+   It does not promise delivery across a hard 500 kbps WAN bottleneck.
+   One shared encoding still means a weak receiver can lower common source
+   quality; this is not simulcast or independent subscriber encoding.
+4. Qualify TURN under hostile networks. Multiple configured identities share
+   four total endpoint attempts; failed allocations recover only on an explicit
+   ICE restart, with new-ufrag relay candidates and retained DTLS/SRTP/SCTP.
+   IPv4/IPv6 server and relay/peer combinations have local coturn coverage.
+   There is one selected relay family, no NAT64 synthesis or transparent
+   healthy-allocation migration.
+5. Continue safety/capacity qualification. Stateful media/recovery/pacing fuzzing
+   and deterministic queue-allocation failures supplement parser fuzzing,
+   cancellation/teardown tests and concurrency checks. These are bounded local
+   evidence, not exhaustive allocation/ICE/DTLS coverage or a security audit.
 
 Actual Safari, Firefox, Linux/Windows qualification, long soaks and independent
 protocol/security review remain open. No access-control scheme is selected by
 this plan.
+
+### Current integrated local qualification
+
+The final protocol integration is `e70123d`; qualification automation follows
+in `cf054e4`. On macOS arm64:
+
+- The full Debug suite (99/99) and headless ASan/UBSan suite (97/97) passed
+  before the final directional-negotiation merge. After that merge, the
+  affected Debug tests passed 11/11, ASan/UBSan 10/10 and TSan 10/10.
+- Optional TWCC/rate-control-disabled negotiation, pacing, peer, routing and
+  SFU tests passed 7/7 with a warning-free build.
+- The final complete Chromium/native suite passed: actual UI, per-source
+  decoded VP8/Opus, SCTP, mesh/SFU/AUTO, restart, both topology transitions,
+  failure/stale-epoch isolation and 120 same-process leave/join cycles.
+- Final instrumented parser fuzzing executed 1,645,999 inputs and media-state
+  fuzzing 1,643,285 inputs, each over 61 seconds, without findings.
+- Benchmark/lifecycle-report contracts passed 23 tests; the optional compiled
+  transport smoke is checked separately against each prepared Release build.
+- Firefox still fails during browser startup with `Could not find profile
+  folder`, before loading the application. This is not a Firefox pass.
+
+These are bounded local results, not the external release matrix, long loaded
+soaks or a media-quality/latency certification.
+
+### Comparative performance gate
+
+The original pre-hardening baseline is `9a9319b`, before the first readiness
+plan/code commits. Comparisons use matched Release builds and dependency hashes,
+paired runs, actual decoded throughput, owned-process CPU/RSS and separately
+labeled application SCTP/controller RTT and UDP/DTLS/SRTP transport latency.
+Transport latency is not media capture-to-render latency.
+
+Flag CPU/throughput regressions above 5% and RSS/latency regressions above 10%;
+retain all measured deltas, noise and insufficient-evidence flags. The initial
+three short baseline samples showed substantial RSS variability, so they do
+not establish a no-regression result. The bounded suite uses longer warmup
+and chronological AB/BA/AB pairs, recording VM pressure and unknown source
+dimensions/bitrate rather than guessing them. The opt-in performance workflow
+and local commands are documented in
+[the interop benchmark guide](tests/interop/README.md).
+
+Application authentication remains deferred. No performance result can waive
+protocol correctness, transport verification or the external release gates.
 
 ## Receive-source lifecycle
 
@@ -267,8 +328,9 @@ exhaustion closes the transport, while local operations return a logged
 resource error. This is separate from the 64-SSRC lifetime crypto tables.
 Malformed SDES item/chunk bounds, alignment and feedback framing are rejected
 before membership mutation. Reported-source references in RR blocks do not
-create phantom members. Local and remote IDs are tracked separately; that is
-not a substitute for collision recovery.
+create phantom members. Local and remote IDs are tracked separately;
+authenticated local collision recovery retires the old identity before
+selecting and registering a fresh SSRC.
 
 Native and routing reports use live sender/receiver counts, a shared 1/16 EWMA
 of protected RTCP sizes and a 5% media-target budget. Size accounting includes
@@ -305,9 +367,9 @@ Local validation of these changes:
   post-warmup growth was at most 0.53125 MiB for the server and 0.4375 MiB
   for any client. This short sampled run is not long-soak/capacity certification.
 
-## TURN pre-allocation address failover
+## TURN identities, address failover and restart recovery
 
-One TURN server identity can now use up to four address alternatives. DNS runs
+Configured TURN identities share four total endpoint attempts. DNS runs
 on the configuring caller; the runtime retains unique results and puts an
 alternate address family second when available. Core callers may instead
 provide `rtc_turn_server_t.addresses` / `address_count`, with matching service
@@ -320,20 +382,26 @@ existing transaction deadlines. DNS and process scheduling are outside those
 allocation budgets. The transport copies addresses, host, credentials and CA
 path before returning, so retries do not borrow caller storage.
 
-Every attempt uses the same protocol and configured server identity. TLS still
-verifies that original name/IP and trust chain, including on an alternate IP;
-there is no plaintext or certificate-verification fallback. Each attempt starts
+Each attempt uses its own explicitly configured protocol, credentials, server
+identity and CA trust. TLS verifies that identity, including on alternate IPs;
+there is no implicit plaintext or certificate-verification fallback. Each attempt starts
 fresh TURN challenge/channel state. Failed I/O is unregistered before
 replacement, and retry timers are cancelled on close. A failed runtime remains
 in place on exhaustion so relay-only traffic cannot fall through to the direct
 listener. Core transport stats expose attempts and terminal `turn_failed`.
 
-The first successful allocation pins the address, even before candidate
-publication. It is not replaced after permission/refresh failure or ICE restart.
-Recovery then requires a new transport; multiple server URLs, live allocation
-migration, DNS re-resolution and full IPv6 relay/candidate qualification remain
-open. Address-family fallback for the TURN connection is not complete
-dual-stack ICE support.
+The first successful allocation pins the address. A healthy allocation does not
+move during ICE restart. A failed allocation may be replaced during an explicit
+local or remote ICE restart: fresh-ufrag relay candidates are published while
+DTLS, SRTP replay/nonce state and SCTP remain intact. Pool configuration is
+owned until close to support this recovery.
+
+The relay family is independent of the server connection family. IPv4 and IPv6
+relay/peer paths, including IPv4-server/IPv6-relay and the converse, have local
+coverage. All alternatives request the same selected relay family; simultaneous
+dual-family allocations, NAT64 synthesis and transparent migration of a healthy
+allocation are not promised. Real network-change/NAT and WAN qualification
+remain release gates.
 
 Local qualification:
 
@@ -351,6 +419,8 @@ Local qualification:
   hostname URLs, SCTP, refresh and ICE restart.
 - The four real native mesh/SFU/AUTO conference E2E scenarios pass. This does
   not establish browser-forced-relay, hostile-WAN or external-platform coverage.
+- Expanded identity/credential/trust, IPv6, local/remote restart and retained
+  media/SCTP cases are included in the integrated native/sanitizer validation.
 
 ## Latest transport implementation
 
@@ -358,11 +428,11 @@ The project code is now MIT-licensed; dependencies retain their own licenses.
 The worker supports read/write readiness on epoll/kqueue/select. TURN supports
 UDP/TCP/TLS client-to-server legs without blocking the media worker; TLS has
 strict trust-chain and server-name/IP verification. Library users configure
-`rtc_transport_set_turn_server_ex()` or a single peer `turn:`/`turns:` URL.
+`rtc_transport_set_turn_server_ex()` for one identity,
+`rtc_transport_set_turn_servers()` for a pool, or configured peer TURN URLs.
 Stream sends are bounded to 64 KiB and 500 ms after connection; connection/TLS
 setup is bounded to five seconds. DNS uses the calling thread; bounded address
-alternatives are described above. This is not multiple-server or in-call
-allocation failover.
+alternatives and failed-allocation restart recovery are described above.
 
 Local UDP/TCP/TLS runtime and native peer tests pass, including real SRTP,
 DTLS data, SCTP, allocation refresh and ICE restart. Trusted-CA/wrong-identity
@@ -384,8 +454,9 @@ video bound to the original publisher SSRC. Receiver-report loss/RTT uses the
 existing AIMD controller; paused/closed consumers and ten-second-old bounds
 are excluded. Native senders honor negotiated limits (including zero-rate
 pause) and expire unrefreshed limits after ten seconds. Audio is unaffected.
-This intentionally shares source quality across receivers; full subscriber
-allocation, pacing and simulcast remain distinct work.
+This intentionally shares source quality across receivers. Subscriber-wide
+allocation and bounded video pacing now supplement it; simulcast and independent
+per-subscriber encodings remain outside this profile.
 
 Focused regressions verify loss-driven decrease/recovery, minimum-consumer
 aggregation, stale/paused exclusion, feedback quantization/bounds and a real

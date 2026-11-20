@@ -1,8 +1,9 @@
 # mrtc — Roadmap
 
-The immediate goal is a small, testable educational RTC stack, not a complete
-browser implementation or a production conferencing service. Prefer existing
-runtime primitives and bounded state over a parallel networking framework.
+The immediate goal is a small, well-qualified VP8/Opus/SCTP RTC stack for the
+constrained production profile, not a complete browser implementation or a
+turnkey production conferencing service. Prefer existing runtime primitives
+and bounded state over a parallel networking framework.
 
 See [RFC_COMPLIANCE.md](RFC_COMPLIANCE.md) for actual protocol capabilities and
 limits. Do not treat old percentage estimates or already-fixed bugs as new work.
@@ -18,7 +19,7 @@ The P0–P2 work is organized into independently testable areas:
 | Trickle ICE | Forward local candidates and end-of-candidates, apply delayed remote candidates, and surface signaling errors |
 | Transport identity | Pin remote SDP fingerprints, reject mismatches, enforce DTLS 1.2 minimum, and preserve datagram boundaries |
 | ICE lifecycle | Full/lite roles, role conflicts, nomination, consent expiration and active restart with media/data continuity |
-| TURN | Runtime relay-only UDP/TCP/verified TLS, bounded pre-allocation address retries, permissions/channels, refresh and cleanup against coturn |
+| TURN | Runtime relay-only UDP/TCP/verified TLS, bounded identity/address pools, failed-allocation ICE restart, IPv4/IPv6 relay/peer paths, permissions/channels, refresh and cleanup against coturn |
 | Live negotiation | Track/direction updates, explicit glare rejection/rollback and safe rejection of unsupported codec changes |
 | Standard data channels | usrsctp SCTP/DCEP, partial reliability, fragmentation, backpressure and stream reset, verified with a browser |
 | Congestion and forwarding | Apply transport estimates to encoders; bounded send/retransmission state; explicit failure/drop reporting |
@@ -61,7 +62,7 @@ have been replaced. See [the layout](ARCHITECTURE.md),
 - Preserve publisher RTP/NTP correlation and synchronization CNAME across SFU
   legs; qualify synchronized playout and lip-sync under impairments.
 - Qualify incoming/outgoing BYE, inactivity expiry and source replacement under
-  broader network faults; complete SSRC collision recovery. Compound feedback
+  broader network faults, including local SSRC collision recovery. Compound feedback
   is implemented; reduced-size RTCP is not advertised.
 
 These are more useful next protocol improvements than reimplementing already
@@ -69,16 +70,16 @@ working NACK, PLI, RTP extensions or replay windows.
 
 ### 3. Expand hostile-network and deployment coverage
 
-- Multiple TURN servers, post-allocation recovery and STUN long-term
-  authentication v2. Pre-allocation address failover is implemented and needs
-  broader hostile-network qualification.
-- IPv6/dual-stack relay and candidate selection.
+- Qualify bounded TURN identity/address pools, failed-allocation ICE restart and
+  IPv4/IPv6 relay/peer paths under hostile networks; authentication v2, NAT64 and
+  simultaneous dual-family allocations remain separate work.
 - Network changes and NAT behavior against independent implementations.
 - Fault injection across both SFU media legs, keeping queues and caches bounded.
 
 ### 4. Improve SFU efficiency without changing the model
 
-- Per-subscriber bitrate allocation and packet scheduling informed by congestion.
+- Measure and qualify subscriber-wide video allocation and bounded frame-aware
+  packet scheduling informed by congestion, including their CPU/latency cost.
 - Better operational counters and explicit resource limits.
 - Evaluate a single bidirectional bundled connection per participant before
   adding simulcast or more complex transport sharing.
