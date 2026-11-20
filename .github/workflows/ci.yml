@@ -151,7 +151,7 @@ jobs:
           if-no-files-found: ignore
 
   thread-sanitizer:
-    timeout-minutes: 10
+    timeout-minutes: 20
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -166,11 +166,12 @@ jobs:
             -DCMAKE_BUILD_TYPE=Debug -DMRTC_ENABLE_TSAN=ON \
             -DMRTC_BUILD_DESKTOP=OFF
           cmake --build build/tsan --parallel 4 --target test_worker test_network_runtime \
-            test_peer test_peer_integration test_routing_media test_sfu_session
+            test_peer test_peer_integration test_routing_media test_sfu_session \
+            test_rtp_pacer test_media_session test_loopback test_rtp_sender_loopback
       - name: Test worker, relay, peer and routing concurrency
         env:
           TSAN_OPTIONS: halt_on_error=1
-        run: ctest --test-dir build/tsan --output-on-failure --timeout 120 -R '^test_(worker|network_runtime|routing_media|sfu_session|peer|network_turn_(tcp|tls)|peer_turn_(tcp|tls))$'
+        run: ctest --test-dir build/tsan --output-on-failure --timeout 120 -R '^test_(worker|rtp_pacer|media_session|loopback|rtp_sender_loopback|network_runtime|routing_media|sfu_session|peer|peer_integration|network_turn.*|peer_turn.*)$'
 
   parser-fuzz:
     timeout-minutes: 10
@@ -189,11 +190,14 @@ jobs:
             -DMRTC_ENABLE_ASAN=ON -DMRTC_ENABLE_UBSAN=ON \
             -DMRTC_BUILD_TESTS=OFF -DMRTC_ENABLE_CLIENT_API=OFF \
             -DMRTC_ENABLE_ROUTING_API=OFF
-          cmake --build build/fuzz --parallel 4 --target fuzz_packet_parsers
-      - name: Exercise parsers
+          cmake --build build/fuzz --parallel 4 --target fuzz_packet_parsers fuzz_media_state
+      - name: Exercise parsers and media state
         run: |
-          mkdir -p build/fuzz/corpus build/fuzz/findings
+          mkdir -p build/fuzz/corpus build/fuzz/media-corpus build/fuzz/findings
           build/fuzz/rtc/fuzz_packet_parsers build/fuzz/corpus \
+            -max_total_time=60 -max_len=8192 -print_final_stats=1 \
+            -artifact_prefix=build/fuzz/findings/
+          build/fuzz/rtc/fuzz_media_state build/fuzz/media-corpus \
             -max_total_time=60 -max_len=8192 -print_final_stats=1 \
             -artifact_prefix=build/fuzz/findings/
       - name: Save reproducing inputs
@@ -228,6 +232,7 @@ jobs:
           MRTC_TEST_ARTIFACTS: ${{ github.workspace }}/build/interop-failures
         run: |
           npm --prefix tests/interop run test:controller
+          node --test tests/interop/benchmark.test.mjs
           npm --prefix tests/interop run test:native
       - name: Save headless failure evidence
         if: failure()
