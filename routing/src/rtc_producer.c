@@ -34,6 +34,7 @@ struct rtc_producer {
     _Atomic uint64_t bytes_received;
     _Atomic uint64_t last_keyframe_request_ms;
     rtc_rtcp_stats_t rtcp;
+    _Atomic uint32_t reporter_ssrc;
     rtc_rtcp_sr_t sender_report;
     uint64_t sender_report_ms;
     bool sender_report_valid;
@@ -46,6 +47,16 @@ struct rtc_producer {
 };
 
 static _Atomic uint32_t g_next_producer_id = 1;
+
+static int producer_rotate_reporter(uint32_t previous, uint32_t current, void *user) {
+    (void)previous;
+    rtc_producer_t *producer = user;
+    if (atomic_load(&producer->closed))
+        return RTC_OK;
+    rtc_rtcp_stats_restart_sender(&producer->rtcp, current);
+    atomic_store(&producer->reporter_ssrc, current);
+    return RTC_OK;
+}
 
 static void producer_report_timer(void *user) {
     rtc_producer_t *producer = user;
@@ -160,7 +171,14 @@ rtc_producer_t *rtc_transport_produce(rtc_transport_t *transport,
     producer->app_data = opts->app_data;
     atomic_init(&producer->feedback, RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR);
     producer->last_bitrate_limit = UINT32_MAX;
-    rtc_rtcp_stats_init(&producer->rtcp, id);
+    uint32_t reporter;
+    if (rtc_transport_reserve_remote_ssrc(transport, opts->rtp.ssrc) != RTC_OK ||
+        rtc_transport_new_ssrc(transport, &reporter) != RTC_OK) {
+        free(producer);
+        return NULL;
+    }
+    rtc_rtcp_stats_init(&producer->rtcp, reporter);
+    atomic_init(&producer->reporter_ssrc, reporter);
     if (rtc_vec_init(&producer->consumers, sizeof(rtc_consumer_t *)) != RTC_OK ||
         rtc_mutex_init(&producer->consumers_mutex) != RTC_OK) {
         rtc_vec_free(&producer->consumers);
@@ -168,12 +186,21 @@ rtc_producer_t *rtc_transport_produce(rtc_transport_t *transport,
         return NULL;
     }
     producer->consumers_ready = true;
-    if (rtc_router_register_producer(transport, producer, producer->rtp.ssrc) != RTC_OK) {
+    if (rtc_transport_register_source(transport, reporter, producer_rotate_reporter, producer,
+                                      NULL) != RTC_OK) {
         rtc_mutex_destroy(&producer->consumers_mutex);
         rtc_vec_free(&producer->consumers);
         free(producer);
         return NULL;
     }
+    if (rtc_router_register_producer(transport, producer, producer->rtp.ssrc) != RTC_OK) {
+        rtc_transport_unregister_source(transport, producer);
+        rtc_mutex_destroy(&producer->consumers_mutex);
+        rtc_vec_free(&producer->consumers);
+        free(producer);
+        return NULL;
+    }
+    rtc_transport_retain(transport);
     return producer;
 }
 
@@ -304,6 +331,7 @@ void rtc_producer_close(rtc_producer_t *producer) {
     if (producer->transport && producer->rtp.ssrc != 0)
         rtc_router_unregister_producer(producer->transport, producer->rtp.ssrc);
     rtc_worker_invoke(producer->worker, producer_retire_on_worker, producer);
+    rtc_transport_unregister_source(producer->transport, producer);
 }
 
 void rtc_producer_destroy(rtc_producer_t *producer) {
@@ -315,6 +343,7 @@ void rtc_producer_destroy(rtc_producer_t *producer) {
         producer->consumers_ready = false;
     }
     rtc_vec_free(&producer->consumers);
+    rtc_transport_release(producer->transport);
     free(producer);
 }
 
@@ -323,6 +352,7 @@ int rtc_producer_get_stats(rtc_producer_t *producer, rtc_producer_stats_t *out) 
         return RTC_ERR_INVALID;
     memset(out, 0, sizeof(*out));
     out->closed = atomic_load_explicit(&producer->closed, memory_order_acquire);
+    out->local_ssrc = atomic_load(&producer->reporter_ssrc);
     out->source_active = atomic_load(&producer->source_active);
     out->source_ended = atomic_load(&producer->source_ended);
     out->kind = producer->kind;
@@ -353,10 +383,10 @@ int rtc_producer_request_keyframe(rtc_producer_t *producer) {
     uint8_t packet[64 + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
     size_t len = 0;
     int rc = feedback & RTC_SDP_FB_PLI
-                 ? rtc_rtcp_build_pli(packet, sizeof(packet), &len, producer->rtcp.ssrc,
-                                      producer->rtp.ssrc)
-                 : rtc_rtcp_build_fir(packet, sizeof(packet), &len, producer->rtcp.ssrc,
-                                      producer->rtp.ssrc,
+                 ? rtc_rtcp_build_pli(packet, sizeof(packet), &len,
+                                      atomic_load(&producer->reporter_ssrc), producer->rtp.ssrc)
+                 : rtc_rtcp_build_fir(packet, sizeof(packet), &len,
+                                      atomic_load(&producer->reporter_ssrc), producer->rtp.ssrc,
                                       (uint8_t)atomic_fetch_add(&producer->fir_sequence, 1));
     if (rc != RTC_OK)
         return rc;

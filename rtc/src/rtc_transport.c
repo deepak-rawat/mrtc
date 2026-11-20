@@ -31,6 +31,8 @@
 
 #define RTC_TURN_ADDRESS_TIMEOUT_MS 5000
 #define RTC_TURN_RETRY_POLL_MS      100
+#define LOCAL_SOURCE_MAX            64
+#define REMOTE_SOURCE_MAX           256
 
 typedef struct {
     rtc_turn_config_t config;
@@ -92,6 +94,22 @@ struct rtc_transport {
     bool consent_expired;
     bool ice_restarting;
     rtc_mutex_t send_mutex;
+    struct {
+        uint32_t ssrc;
+        rtc_local_source_fn fn;
+        void *user;
+        char cname[33];
+    } local_sources[LOCAL_SOURCE_MAX];
+    struct {
+        uint32_t ssrc;
+        bool retired;
+        bool crypto_used;
+    } used_sources[LOCAL_SOURCE_MAX];
+    unsigned used_source_count;
+    uint32_t remote_sources[REMOTE_SOURCE_MAX];
+    unsigned remote_source_count;
+    _Atomic bool sources_closed;
+    unsigned source_callback_depth;
     bool enable_rtp_pacing;
     rtc_rtp_pacer_t pacer;
     rtc_worker_timer_t pacer_timer;
@@ -178,6 +196,293 @@ static int tx_op_invoke(rtc_transport_t *transport, tx_op_fn fn, void *arg) {
     tx_op_call_t call = {fn, transport, arg, RTC_OK};
     rtc_worker_invoke(transport->worker, tx_op_trampoline, &call);
     return call.rc;
+}
+
+static bool source_retired_locked(rtc_transport_t *t, uint32_t ssrc) {
+    for (unsigned i = 0; i < t->used_source_count; i++)
+        if (t->used_sources[i].ssrc == ssrc)
+            return t->used_sources[i].retired;
+    return false;
+}
+
+static int source_reserve_locked(rtc_transport_t *t, uint32_t ssrc) {
+    if (!ssrc)
+        return RTC_ERR_INVALID;
+    for (unsigned i = 0; i < t->used_source_count; i++)
+        if (t->used_sources[i].ssrc == ssrc)
+            return t->used_sources[i].retired ? RTC_ERR_INVALID : RTC_OK;
+    if (t->used_source_count == LOCAL_SOURCE_MAX)
+        return RTC_ERR_NOMEM;
+    t->used_sources[t->used_source_count++].ssrc = ssrc;
+    return RTC_OK;
+}
+
+static int source_random_locked(rtc_transport_t *t, uint32_t *out) {
+    if (t->used_source_count == LOCAL_SOURCE_MAX)
+        return RTC_ERR_NOMEM;
+    for (unsigned attempt = 0; attempt < 64; attempt++) {
+        uint32_t ssrc;
+        if (rtc_random_bytes((uint8_t *)&ssrc, sizeof(ssrc)) != RTC_OK)
+            return RTC_ERR_GENERIC;
+        if (!ssrc)
+            continue;
+        bool used = false;
+        for (unsigned i = 0; i < t->used_source_count; i++)
+            used |= t->used_sources[i].ssrc == ssrc;
+        for (unsigned i = 0; i < t->remote_source_count; i++)
+            used |= t->remote_sources[i] == ssrc;
+        if (atomic_load_explicit(&t->srtp_ready, memory_order_acquire))
+            used |=
+                rtc_srtp_ssrc_used(&t->srtp_send, ssrc) || rtc_srtp_ssrc_used(&t->srtp_recv, ssrc);
+        if (!used) {
+            *out = ssrc;
+            return source_reserve_locked(t, ssrc);
+        }
+    }
+    return RTC_ERR_NOMEM;
+}
+
+int rtc_transport_new_ssrc(rtc_transport_t *t, uint32_t *ssrc) {
+    if (!t || !ssrc)
+        return RTC_ERR_INVALID;
+    rtc_mutex_lock(&t->send_mutex);
+    int rc = atomic_load(&t->closed) ? RTC_ERR_INVALID : source_random_locked(t, ssrc);
+    rtc_mutex_unlock(&t->send_mutex);
+    return rc;
+}
+
+typedef struct {
+    uint32_t ssrc;
+    rtc_local_source_fn fn;
+    void *user;
+    const char *cname;
+} source_registration_t;
+
+static int source_register_impl(rtc_transport_t *t, void *arg) {
+    source_registration_t *a = arg;
+    rtc_mutex_lock(&t->send_mutex);
+    int rc = RTC_ERR_NOMEM;
+    unsigned slot = LOCAL_SOURCE_MAX;
+    for (unsigned i = 0; i < LOCAL_SOURCE_MAX; i++) {
+        if (t->local_sources[i].ssrc == a->ssrc || t->local_sources[i].user == a->user) {
+            rc = RTC_ERR_INVALID;
+            goto done;
+        }
+        if (!t->local_sources[i].ssrc)
+            slot = i;
+    }
+    for (unsigned i = 0; i < t->used_source_count; i++)
+        if (t->used_sources[i].ssrc == a->ssrc && t->used_sources[i].crypto_used) {
+            rc = RTC_ERR_INVALID;
+            goto done;
+        }
+    if (slot < LOCAL_SOURCE_MAX && !atomic_load(&t->closed)) {
+        rc = source_reserve_locked(t, a->ssrc);
+        if (rc == RTC_OK) {
+            t->local_sources[slot].ssrc = a->ssrc;
+            t->local_sources[slot].fn = a->fn;
+            t->local_sources[slot].user = a->user;
+            snprintf(t->local_sources[slot].cname, sizeof(t->local_sources[slot].cname), "%s",
+                     a->cname && a->cname[0] ? a->cname : t->rtcp_cname);
+        }
+    }
+done:
+    rtc_mutex_unlock(&t->send_mutex);
+    return rc;
+}
+
+int rtc_transport_register_source(rtc_transport_t *t, uint32_t ssrc, rtc_local_source_fn fn,
+                                  void *user, const char *cname) {
+    if (!t || !ssrc || !fn || !user || atomic_load(&t->closed))
+        return RTC_ERR_INVALID;
+    source_registration_t args = {ssrc, fn, user, cname};
+    return tx_op_invoke(t, source_register_impl, &args);
+}
+
+#ifdef MRTC_ENABLE_TWCC
+static int transport_twcc_rotate(uint32_t previous, uint32_t current, void *user) {
+    (void)previous;
+    rtc_transport_t *transport = user;
+    transport->twcc_local_ssrc = current;
+    return RTC_OK;
+}
+#endif
+
+static int source_unregister_impl(rtc_transport_t *t, void *user) {
+    rtc_mutex_lock(&t->send_mutex);
+    int rc = RTC_OK;
+    for (unsigned i = 0; i < LOCAL_SOURCE_MAX; i++)
+        if (t->local_sources[i].user == user) {
+            uint32_t ssrc = t->local_sources[i].ssrc;
+            for (unsigned j = 0; j < t->used_source_count; j++)
+                if (t->used_sources[j].ssrc == ssrc)
+                    t->used_sources[j].retired = true;
+            memset(&t->local_sources[i], 0, sizeof(t->local_sources[i]));
+#ifdef MRTC_ENABLE_TWCC
+            if (t->twcc_enabled && t->twcc_local_ssrc == ssrc && user != t &&
+                !atomic_load(&t->closed)) {
+                uint32_t reporter;
+                rc = source_random_locked(t, &reporter);
+                if (rc == RTC_OK) {
+                    t->twcc_local_ssrc = reporter;
+                    t->local_sources[i].ssrc = reporter;
+                    t->local_sources[i].fn = transport_twcc_rotate;
+                    t->local_sources[i].user = t;
+                    memcpy(t->local_sources[i].cname, t->rtcp_cname, sizeof(t->rtcp_cname));
+                }
+            }
+#endif
+        }
+    rtc_mutex_unlock(&t->send_mutex);
+    return rc;
+}
+
+void rtc_transport_unregister_source(rtc_transport_t *t, void *user) {
+    /* A retained send stream may outlive the closed transport's worker. The
+     * worker publishes this only after all owner callbacks have drained. */
+    if (!t || atomic_load_explicit(&t->sources_closed, memory_order_acquire))
+        return;
+    if (t && tx_op_invoke(t, source_unregister_impl, user) != RTC_OK) {
+        RTC_LOG_ERR("Local reporting source capacity exhausted");
+        rtc_transport_close(t);
+    }
+}
+
+static int source_reserve_remote_locked(rtc_transport_t *t, uint32_t ssrc) {
+    if (!ssrc)
+        return RTC_OK;
+    for (unsigned i = 0; i < t->remote_source_count; i++)
+        if (t->remote_sources[i] == ssrc)
+            return RTC_OK;
+    if (t->remote_source_count == REMOTE_SOURCE_MAX)
+        return RTC_ERR_NOMEM;
+    t->remote_sources[t->remote_source_count++] = ssrc;
+    return RTC_OK;
+}
+
+int rtc_transport_reserve_remote_ssrc(rtc_transport_t *t, uint32_t ssrc) {
+    if (!t)
+        return RTC_ERR_INVALID;
+    rtc_mutex_lock(&t->send_mutex);
+    int rc = atomic_load(&t->closed) ? RTC_ERR_INVALID : source_reserve_remote_locked(t, ssrc);
+    rtc_mutex_unlock(&t->send_mutex);
+    return rc;
+}
+
+/* Authenticated packet sources, never report-block targets. Crypto entries are
+ * deliberately never removed: an old SSRC must not start another nonce epoch. */
+static int transport_observe_source(rtc_transport_t *t, uint32_t ssrc, bool departing) {
+    if (!ssrc)
+        return RTC_OK;
+    rtc_mutex_lock(&t->send_mutex);
+    int rc = source_reserve_remote_locked(t, ssrc);
+    if (rc != RTC_OK) {
+        rtc_mutex_unlock(&t->send_mutex);
+        return rc;
+    }
+    unsigned slot = LOCAL_SOURCE_MAX;
+    for (unsigned i = 0; !departing && i < LOCAL_SOURCE_MAX; i++)
+        if (t->local_sources[i].ssrc == ssrc)
+            slot = i;
+    if (slot == LOCAL_SOURCE_MAX) {
+        int result = RTC_OK;
+        for (unsigned i = 0; !departing && i < t->used_source_count; i++)
+            if (t->used_sources[i].ssrc == ssrc && t->used_sources[i].crypto_used &&
+                !t->used_sources[i].retired)
+                result = RTC_ERR_INVALID;
+        rtc_mutex_unlock(&t->send_mutex);
+        return result;
+    }
+    uint32_t replacement;
+    rc = source_random_locked(t, &replacement);
+    if (rc != RTC_OK) {
+        rtc_mutex_unlock(&t->send_mutex);
+        return rc;
+    }
+    rtc_local_source_fn fn = t->local_sources[slot].fn;
+    void *user = t->local_sources[slot].user;
+    char cname[33];
+    memcpy(cname, t->local_sources[slot].cname, sizeof(cname));
+    for (unsigned i = 0; i < t->used_source_count; i++)
+        if (t->used_sources[i].ssrc == ssrc)
+            t->used_sources[i].retired = true;
+    t->local_sources[slot].ssrc = replacement;
+#ifdef MRTC_ENABLE_TWCC
+    if (t->twcc_local_ssrc == ssrc)
+        t->twcc_local_ssrc = replacement;
+#endif
+    rtc_mutex_unlock(&t->send_mutex);
+    /* No owner callback or pacing helper may run under send_mutex. */
+    rtc_transport_forget_rtp(t, ssrc);
+    rc = rtc_transport_send_bye_named(t, ssrc, cname);
+    if (rc != RTC_OK)
+        return rc;
+    t->source_callback_depth++;
+    rc = fn(ssrc, replacement, user);
+    t->source_callback_depth--;
+    if (!t->source_callback_depth && atomic_load(&t->closed))
+        atomic_store_explicit(&t->sources_closed, true, memory_order_release);
+    return rc == RTC_OK && atomic_load(&t->closed) ? RTC_ERR_INVALID : rc;
+}
+
+static uint32_t source_read(const uint8_t *p) {
+    uint32_t value;
+    memcpy(&value, p, sizeof(value));
+    return ntohl(value);
+}
+
+static bool source_departing(const uint8_t *buf, size_t len, uint32_t ssrc) {
+    for (size_t off = 0; off + 4 <= len;) {
+        size_t size = ((size_t)buf[off + 2] * 256 + buf[off + 3] + 1) * 4;
+        if (size > len - off)
+            break;
+        if (buf[off + 1] == RTCP_PT_BYE)
+            for (unsigned i = 0; i < (buf[off] & 31) && 8 + i * 4 <= size; i++)
+                if (source_read(buf + off + 4 + i * 4) == ssrc)
+                    return true;
+        off += size;
+    }
+    return false;
+}
+
+static int transport_observe_rtcp(rtc_transport_t *t, const uint8_t *buf, size_t len,
+                                  bool record_only) {
+    for (size_t off = 0; off + 4 <= len;) {
+        size_t size = ((size_t)buf[off + 2] * 256 + buf[off + 3] + 1) * 4;
+        uint8_t pt = buf[off + 1];
+        if (pt == RTCP_PT_SDES) {
+            size_t pos = off + 4;
+            for (unsigned i = 0; i < (buf[off] & 31) && pos + 4 <= off + size; i++) {
+                uint32_t ssrc = source_read(buf + pos);
+                int rc = transport_observe_source(t, ssrc,
+                                                  record_only || source_departing(buf, len, ssrc));
+                if (rc != RTC_OK)
+                    return rc;
+                pos += 4;
+                while (pos < off + size && buf[pos]) {
+                    if (pos + 2 > off + size || buf[pos + 1] > off + size - pos - 2)
+                        return RTC_ERR_INVALID;
+                    pos += 2 + buf[pos + 1];
+                }
+                pos = (pos + 4) & ~(size_t)3;
+            }
+        } else if (pt == RTCP_PT_BYE) {
+            for (unsigned i = 0; i < (buf[off] & 31); i++) {
+                int rc = transport_observe_source(t, source_read(buf + off + 4 + i * 4), true);
+                if (rc != RTC_OK)
+                    return rc;
+            }
+        } else if (size >= 8 && (pt == RTCP_PT_SR || pt == RTCP_PT_RR || pt == RTCP_PT_RTPFB ||
+                                 pt == RTCP_PT_PSFB)) {
+            uint32_t ssrc = source_read(buf + off + 4);
+            int rc =
+                transport_observe_source(t, ssrc, record_only || source_departing(buf, len, ssrc));
+            if (rc != RTC_OK)
+                return rc;
+        }
+        off += size;
+    }
+    return RTC_OK;
 }
 
 int rtc_transport_invoke(rtc_transport_t *transport, rtc_transport_task_fn fn, void *user) {
@@ -448,6 +753,25 @@ static void transport_handle_rtp(rtc_transport_t *transport, const uint8_t *data
     rtc_rtp_packet_t pkt;
     if (rtc_rtp_parse(&pkt, buf, pkt_len) != RTC_OK)
         return;
+    rc = transport_observe_source(transport, pkt.header.ssrc, true);
+    for (unsigned i = 0; rc == RTC_OK && i < pkt.header.csrc_count; i++)
+        rc = transport_observe_source(transport, source_read(buf + RTP_HEADER_SIZE + i * 4), true);
+    if (rc != RTC_OK) {
+        RTC_LOG_ERR("RTP source history exhausted: %d", rc);
+        rtc_transport_close(transport);
+        return;
+    }
+    if (transport_observe_source(transport, pkt.header.ssrc, false) != RTC_OK) {
+        RTC_LOG_ERR("Local SSRC recovery exhausted or failed");
+        rtc_transport_close(transport);
+        return;
+    }
+    for (unsigned i = 0; i < pkt.header.csrc_count; i++)
+        if (transport_observe_source(transport, source_read(buf + RTP_HEADER_SIZE + i * 4),
+                                     false) != RTC_OK) {
+            rtc_transport_close(transport);
+            return;
+        }
 
     rtc_mutex_lock(&transport->send_mutex);
     uint64_t now = rtc_time_ms();
@@ -488,6 +812,16 @@ static void transport_handle_rtcp(rtc_transport_t *transport, const uint8_t *dat
     if (rc != RTC_OK) {
         if (rc == RTC_ERR_NOMEM)
             rtc_transport_close(transport);
+        return;
+    }
+    if (rtc_rtcp_validate_compound(buf, pkt_len) != RTC_OK)
+        return;
+    rc = transport_observe_rtcp(transport, buf, pkt_len, true);
+    if (rc == RTC_OK)
+        rc = transport_observe_rtcp(transport, buf, pkt_len, false);
+    if (rc != RTC_OK) {
+        RTC_LOG_ERR("Local RTCP source recovery failed: %d", rc);
+        rtc_transport_close(transport);
         return;
     }
     rtc_mutex_lock(&transport->send_mutex);
@@ -1542,6 +1876,9 @@ static int tx_close_impl(rtc_transport_t *transport, void *arg) {
     }
     rtc_mutex_unlock(&transport->send_mutex);
     rtc_dtls_close(&transport->dtls);
+    memset(transport->local_sources, 0, sizeof(transport->local_sources));
+    if (!transport->source_callback_depth)
+        atomic_store_explicit(&transport->sources_closed, true, memory_order_release);
     return RTC_OK;
 }
 
@@ -1612,6 +1949,9 @@ typedef struct {
 
 static int tx_bind_rtp_impl(rtc_transport_t *transport, void *arg) {
     tx_bind_rtp_args_t *a = (tx_bind_rtp_args_t *)arg;
+    int rc = transport_observe_source(transport, a->ssrc, true);
+    if (rc != RTC_OK)
+        return rc;
     return rtc_rtp_demux_bind(&transport->rtp_demux, a->ssrc, a->user);
 }
 
@@ -1749,8 +2089,21 @@ static int tx_enable_twcc_impl(rtc_transport_t *transport, void *arg) {
         return RTC_ERR_INVALID;
     if (transport->twcc_enabled)
         return RTC_OK;
+    bool shared = false;
+    for (unsigned i = 0; i < LOCAL_SOURCE_MAX; i++)
+        shared |= a->local_ssrc && transport->local_sources[i].ssrc == a->local_ssrc;
+    uint32_t reporter = a->local_ssrc;
+    if (!shared) {
+        int rc = rtc_transport_new_ssrc(transport, &reporter);
+        if (rc != RTC_OK)
+            return rc;
+        rc = rtc_transport_register_source(transport, reporter, transport_twcc_rotate, transport,
+                                           NULL);
+        if (rc != RTC_OK)
+            return rc;
+    }
     transport->twcc_ext_id = a->ext_id;
-    transport->twcc_local_ssrc = a->local_ssrc;
+    transport->twcc_local_ssrc = reporter;
     rtc_twcc_sender_init(&transport->twcc_sender);
     rtc_twcc_receiver_init(&transport->twcc_receiver);
     rtc_bwe_config_t cfg = {
@@ -1772,7 +2125,7 @@ static int tx_enable_twcc_impl(rtc_transport_t *transport, void *arg) {
 }
 
 int rtc_transport_enable_twcc(rtc_transport_t *transport, uint8_t ext_id, uint32_t local_ssrc) {
-    if (!transport || ext_id == 0)
+    if (!transport || ext_id == 0 || ext_id > 14)
         return RTC_ERR_INVALID;
     tx_enable_twcc_args_t args = {ext_id, local_ssrc};
     return tx_op_invoke(transport, tx_enable_twcc_impl, &args);
@@ -1979,8 +2332,9 @@ static int tx_retransmit_rtp_impl(rtc_transport_t *transport, void *arg) {
     memcpy(&ssrc, a->data + 8, sizeof(ssrc));
     rtc_pacer_sent_t sent;
     bool video = rtc_rtp_pacer_sent(&transport->pacer, ntohl(ssrc), &sent);
-    if (!transport->enable_rtp_pacing ||
-        (video && rtc_rtp_pacer_repair(&transport->pacer, a->data, a->len, rtc_time_ms())))
+    if (!source_retired_locked(transport, ntohl(ssrc)) &&
+        (!transport->enable_rtp_pacing ||
+         (video && rtc_rtp_pacer_repair(&transport->pacer, a->data, a->len, rtc_time_ms()))))
         rc = transport_send_raw_locked(transport, a->data, a->len);
     if (rc == RTC_OK)
         transport->rtp_retransmissions_sent++;
@@ -2031,7 +2385,13 @@ int rtc_transport_send_rtp_media(rtc_transport_t *transport, uint8_t *buf, size_
             rtc_mutex_unlock(&transport->send_mutex);
             return RTC_ERR_NOMEM;
         }
-        rc = rtc_srtp_protect(&transport->srtp_send, buf, len, buf_cap);
+        rc = source_reserve_locked(transport, ssrc);
+        if (rc == RTC_OK) {
+            for (unsigned i = 0; i < transport->used_source_count; i++)
+                if (transport->used_sources[i].ssrc == ssrc)
+                    transport->used_sources[i].crypto_used = true;
+            rc = rtc_srtp_protect(&transport->srtp_send, buf, len, buf_cap);
+        }
         if (rc != RTC_OK && video && transport->enable_rtp_pacing)
             rtc_rtp_pacer_abort(&transport->pacer, ssrc, false);
         if (rc == RTC_OK && video && transport->enable_rtp_pacing) {
@@ -2089,6 +2449,16 @@ int rtc_transport_send_rtcp(rtc_transport_t *transport, uint8_t *buf, size_t *le
                     }
                 offset += size;
             }
+        }
+        if (rc == RTC_OK && *len >= 8) {
+            uint32_t ssrc = source_read(buf + 4);
+            bool departing = source_departing(buf, *len, ssrc);
+            if (!departing)
+                rc = source_reserve_locked(transport, ssrc);
+            if (rc == RTC_OK)
+                for (unsigned i = 0; i < transport->used_source_count; i++)
+                    if (transport->used_sources[i].ssrc == ssrc)
+                        transport->used_sources[i].crypto_used = true;
         }
         if (rc == RTC_OK)
             rc = rtc_srtp_protect_rtcp(&transport->srtp_send, buf, len, buf_cap);

@@ -41,6 +41,12 @@ now.
 Each incoming video/audio track has one producer. Each subscriber gets a
 consumer for that track on its subscription transport.
 
+Subscription offers negotiate the one-byte MID extension. Forwarded packets
+carry that subscription m-section's MID, including after a local consumer SSRC
+collision. Consumer rotation preserves the publisher, room participant and SCTP
+association; fresh offers obtain the current SSRC from the consumer. Publisher
+source SSRCs remain immutable, independently of rotatable local RR reporter IDs.
+
 ```text
 Alice publishing transport -> Alice camera producer
                                     |

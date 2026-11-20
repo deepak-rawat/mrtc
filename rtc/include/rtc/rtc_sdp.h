@@ -42,7 +42,7 @@ typedef struct {
 } rtc_ice_candidate_t;
 
 #define SDP_MAX_MEDIA           16
-#define SDP_MAX_EXTMAP          6
+#define SDP_MAX_EXTMAP          14
 #define SDP_EXTMAP_URI_LEN      96
 #define RTC_SDP_FB_NACK         0x01
 #define RTC_SDP_FB_PLI          0x02

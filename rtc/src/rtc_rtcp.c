@@ -74,6 +74,28 @@ int rtc_rtcp_stats_init(rtc_rtcp_stats_t *stats, uint32_t ssrc) {
     return RTC_OK;
 }
 
+void rtc_rtcp_stats_restart_sender(rtc_rtcp_stats_t *stats, uint32_t ssrc) {
+    stats->ssrc = ssrc;
+    stats->packets_sent = 0;
+    stats->octets_sent = 0;
+    stats->rtp_timestamp = 0;
+    stats->send_time_ms = 0;
+    stats->send_clock_valid = false;
+    memset(stats->sr_history, 0, sizeof(stats->sr_history));
+    stats->sr_history_next = 0;
+    stats->last_report_time = rtc_time_ms();
+    stats->next_report_time = 0;
+    stats->report_target_bps = 0;
+    stats->last_report_size = 0;
+    stats->report_members = 1;
+    stats->report_senders = 0;
+    stats->report_pmembers = 0;
+    stats->report_we_sent = false;
+    stats->report_initial = true;
+    stats->report_previous_ms = 0;
+    stats->report_average_size = 0;
+}
+
 int rtc_rtcp_stats_reset_source(rtc_rtcp_stats_t *stats) {
     if (!stats)
         return RTC_ERR_INVALID;

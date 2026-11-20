@@ -105,6 +105,14 @@ TEST(peer_rejects_duplicate_remote_sources_without_mutation) {
     ASSERT_EQ(rtc_peer_connection_signaling_state(answerer), RTC_SIGNALING_STABLE);
     ASSERT_EQ(rtc_peer_connection_connection_state(answerer), RTC_CONNECTION_NEW);
     ASSERT(rtc_peer_connection_remote_desc(answerer) == NULL);
+    duplicate.media_count = 1;
+    duplicate.media[0].extmaps[0].id = 15;
+    ASSERT_EQ(rtc_sdp_generate(&duplicate), RTC_OK);
+    memcpy(offer.sdp, duplicate.raw, duplicate.raw_len + 1);
+    offer.sdp_len = duplicate.raw_len;
+    ASSERT(rtc_peer_connection_set_remote_desc(answerer, &offer) != RTC_OK);
+    ASSERT_EQ(rtc_peer_connection_signaling_state(answerer), RTC_SIGNALING_STABLE);
+    ASSERT(rtc_peer_connection_remote_desc(answerer) == NULL);
     rtc_sdp_close(&duplicate);
     rtc_peer_connection_close(offerer);
     rtc_peer_connection_close(answerer);

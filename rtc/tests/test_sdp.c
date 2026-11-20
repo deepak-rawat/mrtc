@@ -329,6 +329,32 @@ TEST(sdp_extmap_roundtrip) {
     rtc_sdp_close(&parsed);
 }
 
+TEST(sdp_preserves_late_mid_and_rejects_extension_aliases) {
+    const char offer[] =
+        "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+        "a=rtpmap:96 VP8/90000\r\n"
+        "a=extmap:14 urn:ietf:params:rtp-hdrext:toffset\r\n"
+        "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time\r\n"
+        "a=extmap:13 urn:3gpp:video-orientation\r\n"
+        "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n"
+        "a=extmap:5 http://www.webrtc.org/experiments/rtp-hdrext/playout-delay\r\n"
+        "a=extmap:6 http://www.webrtc.org/experiments/rtp-hdrext/video-content-type\r\n"
+        "a=extmap:7 http://www.webrtc.org/experiments/rtp-hdrext/video-timing\r\n"
+        "a=extmap:8 http://www.webrtc.org/experiments/rtp-hdrext/color-space\r\n"
+        "a=extmap:4/sendrecv urn:ietf:params:rtp-hdrext:sdes:mid\r\n";
+    rtc_sdp_t parsed = {0};
+    ASSERT_EQ(rtc_sdp_parse(&parsed, offer, strlen(offer)), RTC_OK);
+    ASSERT_EQ(rtc_sdp_media_find_extmap_id(&parsed.media[0], "urn:ietf:params:rtp-hdrext:sdes:mid"),
+              4);
+    ASSERT_EQ(rtc_sdp_media_add_extmap(&parsed.media[0], 4, "urn:example:different-extension"),
+              RTC_ERR_INVALID);
+    rtc_sdp_close(&parsed);
+    char conflict[sizeof(offer) + 128];
+    snprintf(conflict, sizeof(conflict), "%sa=extmap:4 urn:example:different-extension\r\n", offer);
+    ASSERT_EQ(rtc_sdp_parse(&parsed, conflict, strlen(conflict)), RTC_ERR_SDP);
+    rtc_sdp_close(&parsed);
+}
+
 TEST(sdp_candidate_helpers) {
     ASSERT_EQ(rtc_ice_candidate_priority(ICE_CANDIDATE_HOST, 65535, 1), 2130706431u);
     ASSERT_EQ(rtc_ice_candidate_priority(ICE_CANDIDATE_SRFLX, 65535, 1), 1694498815u);
@@ -445,6 +471,7 @@ int main(void) {
     RUN_TEST(sdp_roundtrip);
     RUN_TEST(sdp_many_candidates);
     RUN_TEST(sdp_extmap_roundtrip);
+    RUN_TEST(sdp_preserves_late_mid_and_rejects_extension_aliases);
     RUN_TEST(sdp_candidate_helpers);
     RUN_TEST(browser_candidates_preserve_mdns_and_tcp_metadata);
     RUN_TEST(browser_candidate_rejection_is_not_blanket_filtering);

@@ -3,6 +3,8 @@
 #include "test_harness.h"
 #include "rtc_peer_internal.h"
 #include <rtc/rtc_transport.h>
+#include "rtc_transport_internal.h"
+#include <rtc/rtc_rtp_ext.h>
 #include <stdatomic.h>
 
 #ifdef _WIN32
@@ -27,6 +29,7 @@ typedef struct {
     _Atomic unsigned frames;
     _Atomic unsigned opus_frames, vp8_frames;
     _Atomic unsigned channels;
+    _Atomic uint16_t last_seq;
     uint8_t message[4096];
     size_t message_len;
     rtc_ice_candidate_desc_t candidates[16];
@@ -51,11 +54,11 @@ static void received_channel(rtc_data_channel_t *channel, void *user) {
 
 static void received_frame(const uint8_t *data, size_t len, uint16_t seq, uint32_t timestamp,
                            uint32_t ssrc, bool marker, void *user) {
-    (void)seq;
     (void)timestamp;
     (void)ssrc;
     (void)marker;
     endpoint_t *endpoint = user;
+    atomic_store(&endpoint->last_seq, seq);
     if (len == sizeof(opus_silence) && !memcmp(data, opus_silence, len))
         atomic_fetch_add(&endpoint->opus_frames, 1);
     if (len == sizeof(vp8_black) && !memcmp(data, vp8_black, len))
@@ -143,6 +146,241 @@ static bool wait_count(_Atomic unsigned *count, unsigned target, int timeout_ms)
         SLEEP_MS(5);
     }
     return false;
+}
+
+typedef struct {
+    rtc_peer_connection_t *peer;
+    _Atomic unsigned byes;
+    _Atomic uint32_t bye_ssrc;
+    _Atomic unsigned packets;
+} collision_reports_t;
+
+static void collision_reports(const uint8_t *data, size_t len, void *user) {
+    collision_reports_t *reports = user;
+    for (size_t off = 0; off + 4 <= len;) {
+        size_t size = ((size_t)data[off + 2] * 256 + data[off + 3] + 1) * 4;
+        if (size > len - off)
+            break;
+        rtc_rtcp_bye_t bye;
+        if (data[off + 1] == RTCP_PT_BYE && rtc_rtcp_parse_bye(&bye, data + off, size) == RTC_OK &&
+            bye.count) {
+            atomic_store(&reports->bye_ssrc, bye.ssrcs[0]);
+            atomic_fetch_add(&reports->byes, 1);
+        }
+        off += size;
+    }
+    rtc_media_session_handle_rtcp(&reports->peer->media_session, data, len);
+    atomic_fetch_add(&reports->packets, 1);
+}
+
+TEST(peer_authenticated_collision_preserves_bundle_and_sctp) {
+    rtc_config_t ac = {.stun_server = "127.0.0.1", .stun_port = 9};
+    rtc_config_t bc = {.stun_server = "127.0.0.1", .stun_port = 10};
+    endpoint_t a = {.peer = rtc_peer_connection_create(&ac)};
+    endpoint_t b = {.peer = rtc_peer_connection_create(&bc)};
+    ASSERT(a.peer && b.peer);
+    rtc_peer_connection_on_track(a.peer, received_track, &a);
+    rtc_peer_connection_on_track(b.peer, received_track, &b);
+    rtc_peer_connection_on_data_channel(b.peer, received_channel, &b);
+    rtc_codec_t video = {.payload_type = 96, .mime_type = "video/VP8", .clock_rate = 90000};
+    rtc_codec_t audio = {
+        .payload_type = 111, .mime_type = "audio/opus", .clock_rate = 48000, .channels = 2};
+    rtc_rtp_sender_t *first = rtc_peer_connection_add_track(a.peer, RTC_KIND_VIDEO, &video);
+    rtc_rtp_sender_t *second = rtc_peer_connection_add_track(a.peer, RTC_KIND_VIDEO, &video);
+    rtc_rtp_sender_t *sound = rtc_peer_connection_add_track(a.peer, RTC_KIND_AUDIO, &audio);
+    ASSERT(rtc_peer_connection_add_track(b.peer, RTC_KIND_VIDEO, &video));
+    ASSERT(rtc_peer_connection_add_track(b.peer, RTC_KIND_VIDEO, &video));
+    ASSERT(rtc_peer_connection_add_track(b.peer, RTC_KIND_AUDIO, &audio));
+    rtc_data_channel_t *channel =
+        rtc_peer_connection_create_data_channel(a.peer, "collision", NULL);
+    ASSERT(first && second && sound && channel);
+    ASSERT(exchange(a.peer, b.peer));
+    ASSERT(wait_connected(&a, &b, channel));
+    collision_reports_t ar = {.peer = a.peer}, br = {.peer = b.peer};
+    rtc_transport_on_rtcp(a.peer->runtime_transport, collision_reports, &ar);
+    rtc_transport_on_rtcp(b.peer->runtime_transport, collision_reports, &br);
+    ASSERT_EQ(rtc_rtp_sender_send(first, vp8_black, sizeof(vp8_black), 3000, true), RTC_OK);
+    ASSERT(wait_count(&b.vp8_frames, 1, 3000));
+    uint16_t old_seq = atomic_load(&b.last_seq);
+    ASSERT_EQ(rtc_rtp_sender_send(second, vp8_black, sizeof(vp8_black), 3000, true), RTC_OK);
+    ASSERT(wait_count(&b.vp8_frames, 2, 3000));
+    rtc_stats_report_t before, after;
+    ASSERT_EQ(rtc_peer_connection_get_stats(a.peer, &before), RTC_OK);
+    uint32_t old = before.transceivers[0].out_ssrc;
+
+    /* A report-block reference and a retiring RR+SDES+BYE sender are not collisions. */
+    rtc_rtcp_stats_t stats;
+    rtc_rtcp_packet_t rr;
+    rtc_rtcp_stats_init(&stats, 0xabcdef01);
+    rtc_rtcp_stats_on_rtp_recv(&stats, 1, 1, old, 90000);
+    ASSERT_EQ(rtc_rtcp_build_report(&rr, &stats, false), RTC_OK);
+    uint8_t report[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
+    memcpy(report, rr.buf, rr.buf_len);
+    size_t length = rr.buf_len;
+    const uint8_t unknown[] = {
+        0x80,        211, 0, 1, (uint8_t)(old >> 24), (uint8_t)(old >> 16), (uint8_t)(old >> 8),
+        (uint8_t)old};
+    memcpy(report + length, unknown, sizeof(unknown));
+    length += sizeof(unknown);
+    unsigned packets = atomic_load(&ar.packets);
+    ASSERT_EQ(rtc_transport_send_rtcp(b.peer->runtime_transport, report, &length, sizeof(report)),
+              RTC_OK);
+    ASSERT(wait_count(&ar.packets, packets + 1, 3000));
+    packets = atomic_load(&ar.packets);
+    ASSERT_EQ(rtc_transport_send_bye(b.peer->runtime_transport, old), RTC_OK);
+    ASSERT(wait_count(&ar.packets, packets + 1, 3000));
+    ASSERT_EQ(rtc_peer_connection_get_stats(a.peer, &after), RTC_OK);
+    ASSERT_EQ(after.transceivers[0].out_ssrc, old);
+
+    rtc_rtp_ext_t mid;
+    rtc_rtp_ext_make_string(&mid, 4, "0");
+    rtc_rtp_packet_t collision;
+    ASSERT_EQ(rtc_rtp_build_with_ext(&collision, 96, 123, 9000, old, true, &mid, 1, vp8_black,
+                                     sizeof(vp8_black)),
+              RTC_OK);
+    length = collision.buf_len;
+    /* Plain RTP fails authentication and must not rename a local source. */
+    ASSERT_EQ(rtc_transport_send_raw(b.peer->runtime_transport, collision.buf, length), RTC_OK);
+    SLEEP_MS(30);
+    ASSERT_EQ(rtc_peer_connection_get_stats(a.peer, &after), RTC_OK);
+    ASSERT_EQ(after.transceivers[0].out_ssrc, old);
+    ASSERT_EQ(rtc_transport_send_rtp(b.peer->runtime_transport, collision.buf, &length,
+                                     sizeof(collision.buf)),
+              RTC_OK);
+    ASSERT(wait_count(&br.byes, 1, 3000));
+    ASSERT_EQ(atomic_load(&br.bye_ssrc), old);
+    ASSERT(wait_count(&a.vp8_frames, 1, 3000));
+    ASSERT_EQ(rtc_peer_connection_get_stats(a.peer, &after), RTC_OK);
+    uint32_t current = after.transceivers[0].out_ssrc;
+    ASSERT(current && current != old);
+    ASSERT_EQ(after.transceivers[0].out_source_generation, 2);
+    ASSERT_EQ(after.transceivers[0].out_packets_sent, 0);
+    ASSERT_EQ(after.transceivers[1].out_ssrc, before.transceivers[1].out_ssrc);
+    ASSERT_EQ(after.transceivers[2].out_ssrc, before.transceivers[2].out_ssrc);
+    ASSERT_EQ(rtc_transport_send_raw(b.peer->runtime_transport, collision.buf, length), RTC_OK);
+    SLEEP_MS(30);
+    ASSERT_EQ(atomic_load(&a.vp8_frames), 1); /* old receive replay context survived */
+
+    /* The new SSRC is unsignalled and two BUNDLE sections share PT=96: MID is essential. */
+    ASSERT_EQ(rtc_rtp_sender_send(first, vp8_black, sizeof(vp8_black), 3000, true), RTC_OK);
+    ASSERT(wait_count(&b.vp8_frames, 3, 3000));
+    uint16_t new_seq = atomic_load(&b.last_seq);
+    ASSERT_EQ(rtc_rtp_sender_send(second, vp8_black, sizeof(vp8_black), 3000, true), RTC_OK);
+    ASSERT(wait_count(&b.vp8_frames, 4, 3000));
+    ASSERT_EQ(rtc_rtp_sender_send(sound, opus_silence, sizeof(opus_silence), 960, true), RTC_OK);
+    ASSERT(wait_count(&b.opus_frames, 1, 3000));
+    ASSERT_EQ(rtc_data_channel_send_text(channel, "same SCTP association"), RTC_OK);
+    ASSERT(wait_count(&b.messages, 1, 3000));
+    ASSERT_EQ(atomic_load(&b.channels), 1);
+    ASSERT_EQ(rtc_data_channel_state(channel), RTC_DC_OPEN);
+
+    rtc_transport_stats_t tx_before, tx_after;
+    ASSERT_EQ(rtc_transport_get_stats(a.peer->runtime_transport, &tx_before), RTC_OK);
+    length = 0;
+    ASSERT_EQ(rtc_rtcp_build_nack(report, sizeof(report), &length, 0xabcdef01, old, &old_seq, 1),
+              RTC_OK);
+    packets = atomic_load(&ar.packets);
+    ASSERT_EQ(rtc_transport_send_rtcp(b.peer->runtime_transport, report, &length, sizeof(report)),
+              RTC_OK);
+    ASSERT(wait_count(&ar.packets, packets + 1, 3000));
+    ASSERT_EQ(rtc_transport_get_stats(a.peer->runtime_transport, &tx_after), RTC_OK);
+    ASSERT_EQ(tx_after.rtp_retransmissions_sent, tx_before.rtp_retransmissions_sent);
+    length = 0;
+    ASSERT_EQ(rtc_rtcp_build_nack(report, sizeof(report), &length, 0xabcdef01, current, &new_seq,
+                                  1),
+              RTC_OK);
+    packets = atomic_load(&ar.packets);
+    ASSERT_EQ(rtc_transport_send_rtcp(b.peer->runtime_transport, report, &length, sizeof(report)),
+              RTC_OK);
+    ASSERT(wait_count(&ar.packets, packets + 1, 3000));
+    ASSERT_EQ(rtc_transport_get_stats(a.peer->runtime_transport, &tx_after), RTC_OK);
+    ASSERT_EQ(tx_after.rtp_retransmissions_sent, tx_before.rtp_retransmissions_sent + 1);
+    rtc_desc_t offer;
+    ASSERT_EQ(rtc_peer_connection_create_offer(a.peer, &offer), RTC_OK);
+    rtc_sdp_t parsed = {0};
+    ASSERT_EQ(rtc_sdp_parse(&parsed, offer.sdp, offer.sdp_len), RTC_OK);
+    ASSERT_EQ(parsed.media[0].ssrc, current);
+    rtc_sdp_close(&parsed);
+    ASSERT_EQ(rtc_peer_connection_connection_state(a.peer), RTC_CONNECTION_CONNECTED);
+    rtc_peer_connection_close(a.peer);
+    rtc_peer_connection_close(b.peer);
+    rtc_peer_connection_destroy(a.peer);
+    rtc_peer_connection_destroy(b.peer);
+}
+
+TEST(peer_authenticated_rtcp_collisions_exhaust_without_reusing_ids) {
+    rtc_config_t ac = {.stun_server = "127.0.0.1", .stun_port = 9};
+    rtc_config_t bc = {.stun_server = "127.0.0.1", .stun_port = 10};
+    endpoint_t a = {.peer = rtc_peer_connection_create(&ac)};
+    endpoint_t b = {.peer = rtc_peer_connection_create(&bc)};
+    ASSERT(a.peer && b.peer);
+    rtc_codec_t audio = {
+        .payload_type = 111, .mime_type = "audio/opus", .clock_rate = 48000, .channels = 2};
+    ASSERT(rtc_peer_connection_add_track(a.peer, RTC_KIND_AUDIO, &audio));
+    ASSERT(rtc_peer_connection_add_track(b.peer, RTC_KIND_AUDIO, &audio));
+    ASSERT(exchange(a.peer, b.peer));
+    ASSERT(wait_connected(&a, &b, NULL));
+    rtc_stats_report_t stats, remote;
+    ASSERT_EQ(rtc_peer_connection_get_stats(a.peer, &stats), RTC_OK);
+    ASSERT_EQ(rtc_peer_connection_get_stats(b.peer, &remote), RTC_OK);
+    uint32_t used[65] = {stats.transceivers[0].out_ssrc};
+    unsigned rotations = 0;
+    while (rtc_peer_connection_connection_state(a.peer) == RTC_CONNECTION_CONNECTED &&
+           rotations < 64) {
+        rtc_rtcp_stats_t sender;
+        rtc_rtcp_packet_t report;
+        rtc_rtcp_stats_init(&sender, remote.transceivers[0].out_ssrc);
+        ASSERT_EQ(rtc_rtcp_build_report(&report, &sender, false), RTC_OK);
+        uint32_t current = used[rotations];
+        /* A stable authenticated reporter describes a colliding SDES source.
+         * Its crypto namespace stays constant while the local victim rotates. */
+        uint8_t chunk[] = {0x81,
+                           RTCP_PT_SDES,
+                           0,
+                           2,
+                           (uint8_t)(current >> 24),
+                           (uint8_t)(current >> 16),
+                           (uint8_t)(current >> 8),
+                           (uint8_t)current,
+                           1,
+                           1,
+                           'c',
+                           0};
+        uint8_t wire[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
+        memcpy(wire, report.buf, report.buf_len);
+        memcpy(wire + report.buf_len, chunk, sizeof(chunk));
+        size_t length = report.buf_len + sizeof(chunk);
+        ASSERT_EQ(rtc_transport_send_rtcp(b.peer->runtime_transport, wire, &length, sizeof(wire)),
+                  RTC_OK);
+        uint64_t deadline = rtc_time_ms() + 3000;
+        do {
+            int rc = rtc_peer_connection_get_stats(a.peer, &stats);
+            if (rc != RTC_OK) {
+                ASSERT_EQ(rc, RTC_ERR_INVALID);
+                ASSERT_EQ(rtc_peer_connection_connection_state(a.peer), RTC_CONNECTION_FAILED);
+                break;
+            }
+            if (stats.transceivers[0].out_ssrc != current ||
+                rtc_peer_connection_connection_state(a.peer) == RTC_CONNECTION_FAILED)
+                break;
+            SLEEP_MS(1);
+        } while (rtc_time_ms() < deadline);
+        if (rtc_peer_connection_connection_state(a.peer) == RTC_CONNECTION_FAILED)
+            break;
+        ASSERT(stats.transceivers[0].out_ssrc != current);
+        uint32_t replacement = stats.transceivers[0].out_ssrc;
+        ASSERT(replacement != remote.transceivers[0].out_ssrc);
+        for (unsigned i = 0; i <= rotations; i++)
+            ASSERT(replacement != used[i]);
+        used[++rotations] = replacement;
+    }
+    ASSERT(rotations > 1 && rotations < 64);
+    ASSERT_EQ(rtc_peer_connection_connection_state(a.peer), RTC_CONNECTION_FAILED);
+    ASSERT_EQ(rtc_peer_connection_connection_state(b.peer), RTC_CONNECTION_CONNECTED);
+    rtc_peer_connection_close(a.peer);
+    rtc_peer_connection_close(b.peer);
+    rtc_peer_connection_destroy(a.peer);
+    rtc_peer_connection_destroy(b.peer);
 }
 
 TEST(peer_answer_adopts_offered_payload_type_before_media) {
@@ -430,6 +668,8 @@ int main(int argc, char **argv) {
         RUN_TEST(peer_turn_relay_sctp_refresh_and_restart);
     } else {
         RUN_TEST(peer_answer_adopts_offered_payload_type_before_media);
+        RUN_TEST(peer_authenticated_collision_preserves_bundle_and_sctp);
+        RUN_TEST(peer_authenticated_rtcp_collisions_exhaust_without_reusing_ids);
         RUN_TEST(peer_sctp_live_renegotiation_glare_and_ice_restart);
         RUN_TEST(peer_adds_sctp_after_media_connection);
     }

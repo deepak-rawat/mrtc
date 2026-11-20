@@ -151,6 +151,9 @@ int rtc_rtcp_stats_init(rtc_rtcp_stats_t *stats, uint32_t ssrc);
 /* Reset reception state for a new/retired remote source, retaining local
  * sender counters and the existing RTCP scheduling budget/deadline. */
 int rtc_rtcp_stats_reset_source(rtc_rtcp_stats_t *stats);
+/* Start a fresh local sender/reporting identity while retaining reception
+ * statistics, CNAME and any external source clock correlation. */
+void rtc_rtcp_stats_restart_sender(rtc_rtcp_stats_t *stats, uint32_t ssrc);
 
 /* Update receiver stats when an RTP packet is received */
 void rtc_rtcp_stats_on_rtp_recv(rtc_rtcp_stats_t *stats, uint16_t seq, uint32_t timestamp,

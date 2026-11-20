@@ -12,6 +12,8 @@
 #include "test_harness.h"
 #include "rtc_consumer_internal.h"
 #include "rtc_producer_internal.h"
+#include "rtc_transport_internal.h"
+#include <rtc/rtc_rtp_ext.h>
 
 #include <stdatomic.h>
 
@@ -473,6 +475,9 @@ typedef struct {
     _Atomic int packets, frames, plis, feedback, feedback_errors, receiver_reports;
     _Atomic bool receiver_report_has_sr;
     _Atomic bool downstream_clock_ok, downstream_cname_ok;
+    _Atomic bool downstream_mid_ok;
+    _Atomic uint32_t last_ssrc, bye_ssrc;
+    _Atomic int byes;
     char cname[33];
     _Atomic uint16_t last_seq;
     rtc_consumer_t *consumer;
@@ -494,6 +499,11 @@ static void routed_rtp(const rtc_rtp_packet_t *packet, void *user) {
                             (int)packet->payload_len, packet->header.seq, packet->header.timestamp,
                             packet->header.marker);
     atomic_store(&receiver->last_seq, packet->header.seq);
+    atomic_store(&receiver->last_ssrc, packet->header.ssrc);
+    char mid[17];
+    if (rtc_rtp_ext_get_string(packet->ext_data, packet->ext_len, 7, mid, sizeof(mid)) &&
+        strcmp(mid, "2") == 0)
+        atomic_store(&receiver->downstream_mid_ok, true);
     atomic_fetch_add(&receiver->packets, 1);
 }
 
@@ -533,6 +543,12 @@ static void routed_downstream_reports(const uint8_t *data, size_t len, void *use
             if (name_len == strlen(receiver->cname) && name_len <= size - 10 &&
                 memcmp(data + offset + 10, receiver->cname, name_len) == 0)
                 atomic_store(&receiver->downstream_cname_ok, true);
+        } else if (data[offset + 1] == RTCP_PT_BYE) {
+            rtc_rtcp_bye_t bye;
+            if (rtc_rtcp_parse_bye(&bye, data + offset, size) == RTC_OK && bye.count) {
+                atomic_store(&receiver->bye_ssrc, bye.ssrcs[0]);
+                atomic_fetch_add(&receiver->byes, 1);
+            }
         }
         offset += size;
     }
@@ -674,6 +690,9 @@ TEST(routed_loss_wrap_and_bounded_retransmission) {
     rtc_consumer_t *consumer =
         rtc_transport_consume(outbound, &(rtc_consumer_options_t){.producer = producer});
     ASSERT(consumer != NULL);
+    ASSERT_EQ(rtc_consumer_set_mid(consumer, 15, "2"), RTC_ERR_INVALID);
+    ASSERT_EQ(rtc_consumer_set_mid(consumer, 7, "subscriber-mid-too-long"), RTC_ERR_INVALID);
+    ASSERT_EQ(rtc_consumer_set_mid(consumer, 7, "2"), RTC_OK);
     rtc_rtp_parameters_t params;
     ASSERT_EQ(rtc_consumer_get_rtp_parameters(consumer, &params), RTC_OK);
     routed_receiver_t receiver = {.consumer = consumer, .producer = producer};
@@ -829,6 +848,73 @@ TEST(routed_loss_wrap_and_bounded_retransmission) {
     ASSERT(atomic_load(&receiver.receiver_report_has_sr));
     ASSERT(atomic_load(&receiver.downstream_clock_ok));
     ASSERT(atomic_load(&receiver.downstream_cname_ok));
+    ASSERT(atomic_load(&receiver.downstream_mid_ok));
+
+    uint32_t previous = params.ssrc;
+    uint16_t previous_seq = atomic_load(&receiver.last_seq);
+    uint8_t collision_wire[RTCP_MAX_PACKET + RTC_TRANSPORT_RTCP_PROTECT_OVERHEAD];
+    rtc_rtcp_stats_t collision_stats;
+    rtc_rtcp_packet_t collision_report;
+    rtc_rtcp_stats_init(&collision_stats, previous);
+    ASSERT_EQ(rtc_rtcp_build_report(&collision_report, &collision_stats, false), RTC_OK);
+    memcpy(collision_wire, collision_report.buf, collision_report.buf_len);
+    size_t collision_len = collision_report.buf_len;
+    ASSERT_EQ(rtc_transport_send_rtcp(subscriber, collision_wire, &collision_len,
+                                      sizeof(collision_wire)),
+              RTC_OK);
+    ASSERT(wait_count(&receiver.byes, 1));
+    ASSERT_EQ(atomic_load(&receiver.bye_ssrc), previous);
+    ASSERT_EQ(rtc_consumer_get_rtp_parameters(consumer, &params), RTC_OK);
+    ASSERT(params.ssrc && params.ssrc != previous);
+    ASSERT_EQ(rtc_consumer_get_stats(consumer, &after), RTC_OK);
+    ASSERT_EQ(after.source_generation, 2);
+    ASSERT_EQ(after.ssrc, params.ssrc);
+    ASSERT_EQ(after.packets_sent, 0);
+    ASSERT_STR_EQ(params.mid, "2");
+    ASSERT_STR_EQ(params.rtcp_cname, receiver.cname);
+    int feedback_count = atomic_load(&receiver.feedback);
+    ASSERT_EQ(routed_nack(subscriber, previous, previous_seq), RTC_OK);
+    ASSERT(wait_count(&receiver.feedback, feedback_count + 1));
+    ASSERT_EQ(rtc_consumer_get_stats(consumer, &after), RTC_OK);
+    ASSERT_EQ(after.packets_retransmitted, 0);
+    atomic_store(&receiver.downstream_clock_ok, false);
+    atomic_store(&receiver.downstream_cname_ok, false);
+    ASSERT_EQ(routed_send(publisher, source_seq++, 19002, &orphan), RTC_OK);
+    ASSERT(wait_count(&receiver.packets, ++received));
+    ASSERT_EQ(atomic_load(&receiver.last_ssrc), params.ssrc);
+    ASSERT(wait_count(&receiver.frames, 2));
+    idle_deadline = rtc_time_ms() + 5000;
+    while ((!atomic_load(&receiver.downstream_clock_ok) ||
+            !atomic_load(&receiver.downstream_cname_ok)) &&
+           rtc_time_ms() < idle_deadline)
+        pause_ms(5);
+    ASSERT(atomic_load(&receiver.downstream_clock_ok));
+    ASSERT(atomic_load(&receiver.downstream_cname_ok));
+    ASSERT_EQ(rtc_consumer_get_stats(consumer, &before), RTC_OK);
+    ASSERT_EQ(before.packets_sent, 1);
+    offset = (uint16_t)(atomic_load(&receiver.last_seq) - (uint16_t)(source_seq - 1));
+
+    /* A producer collision renames its RR actor, never the publisher binding. */
+    ASSERT_EQ(rtc_producer_get_stats(producer, &producer_before), RTC_OK);
+    uint32_t old_reporter = producer_before.local_ssrc;
+    ASSERT(old_reporter != options.rtp.ssrc);
+    rtc_rtcp_stats_init(&collision_stats, old_reporter);
+    ASSERT_EQ(rtc_rtcp_build_report(&collision_report, &collision_stats, false), RTC_OK);
+    memcpy(collision_wire, collision_report.buf, collision_report.buf_len);
+    collision_len = collision_report.buf_len;
+    ASSERT_EQ(rtc_transport_send_rtcp(publisher, collision_wire, &collision_len,
+                                      sizeof(collision_wire)),
+              RTC_OK);
+    deadline = rtc_time_ms() + 3000;
+    do {
+        ASSERT_EQ(rtc_producer_get_stats(producer, &producer_after), RTC_OK);
+        if (producer_after.local_ssrc != old_reporter)
+            break;
+        pause_ms(1);
+    } while (rtc_time_ms() < deadline);
+    ASSERT(producer_after.local_ssrc && producer_after.local_ssrc != old_reporter);
+    ASSERT_EQ(producer_after.packets_received, producer_before.packets_received);
+    ASSERT_EQ(rtc_producer_ssrc(producer), options.rtp.ssrc);
 
     rtc_transport_close(outbound);
     uint16_t failed_seq = (uint16_t)(source_seq + offset);

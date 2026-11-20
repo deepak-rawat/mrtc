@@ -6,6 +6,7 @@
 #include "rtc_consumer_internal.h"
 #include "rtc_producer_internal.h"
 #include "rtc/rtc_rtcp.h"
+#include "rtc/rtc_rtp_ext.h"
 #include "rtc_rate_control.h"
 #include "rtc_transport_internal.h"
 #include "rtc_worker_internal.h"
@@ -25,6 +26,8 @@ struct rtc_consumer {
     uint16_t seq_offset;
     uint16_t highest_source_seq;
     bool source_initialized;
+    uint8_t mid_ext_id;
+    uint64_t source_generation;
     rtc_mutex_t media_mutex;
     void *app_data;
     _Atomic bool closed;
@@ -62,6 +65,34 @@ static void consumer_sync_sent(rtc_consumer_t *consumer) {
 }
 
 static _Atomic uint32_t g_next_consumer_id = 1;
+
+static int consumer_rotate_source(uint32_t previous, uint32_t current, void *user) {
+    (void)previous;
+    rtc_consumer_t *consumer = user;
+    uint16_t seq;
+    if (rtc_random_bytes((uint8_t *)&seq, sizeof(seq)) != RTC_OK)
+        return RTC_ERR_GENERIC;
+    if (seq < RTC_CONSUMER_HISTORY_SIZE)
+        seq += RTC_CONSUMER_HISTORY_SIZE;
+    rtc_mutex_lock(&consumer->media_mutex);
+    if (atomic_load(&consumer->closed) || atomic_load(&consumer->source_ended)) {
+        rtc_mutex_unlock(&consumer->media_mutex);
+        return RTC_OK;
+    }
+    rtc_rtcp_stats_restart_sender(&consumer->rtcp, current);
+    consumer->rtp.ssrc = current;
+    consumer->source_generation++;
+    consumer->initial_seq = seq;
+    consumer->source_initialized = false;
+    memset(consumer->history, 0, sizeof(consumer->history));
+    atomic_store(&consumer->packets_sent, 0);
+    atomic_store(&consumer->bytes_sent, 0);
+    atomic_store(&consumer->packets_dropped, 0);
+    atomic_store(&consumer->packets_retransmitted, 0);
+    rtc_mutex_unlock(&consumer->media_mutex);
+    (void)rtc_producer_request_keyframe(consumer->producer);
+    return RTC_OK;
+}
 
 static void consumer_report_timer(void *user) {
     rtc_consumer_t *consumer = user;
@@ -131,9 +162,11 @@ rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
         free(consumer);
         return NULL;
     }
-    rtc_random_bytes((uint8_t *)&consumer->rtp.ssrc, sizeof(consumer->rtp.ssrc));
-    if (consumer->rtp.ssrc == 0)
-        consumer->rtp.ssrc = 1;
+    if (rtc_transport_new_ssrc(transport, &consumer->rtp.ssrc) != RTC_OK) {
+        free(consumer);
+        return NULL;
+    }
+    consumer->source_generation = 1;
     if (consumer->rtp.mid[0] == '\0') {
         size_t len = strlen(consumer->id);
         if (len >= sizeof(consumer->rtp.mid))
@@ -168,7 +201,15 @@ rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
     consumer->rtcp.send_clock_rate = consumer->rtp.codecs[0].clock_rate;
     snprintf(consumer->rtcp.cname, sizeof(consumer->rtcp.cname), "%s", consumer->rtp.rtcp_cname);
     atomic_store_explicit(&consumer->paused, opts->paused, memory_order_release);
+    if (rtc_transport_register_source(transport, consumer->rtp.ssrc, consumer_rotate_source,
+                                      consumer, consumer->rtp.rtcp_cname) != RTC_OK) {
+        rtc_rate_control_destroy(consumer->rate_controller);
+        rtc_mutex_destroy(&consumer->media_mutex);
+        free(consumer);
+        return NULL;
+    }
     if (rtc_producer_add_consumer(opts->producer, consumer) != RTC_OK) {
+        rtc_transport_unregister_source(transport, consumer);
         rtc_rate_control_destroy(consumer->rate_controller);
         rtc_mutex_destroy(&consumer->media_mutex);
         free(consumer);
@@ -185,7 +226,30 @@ const char *rtc_consumer_id(const rtc_consumer_t *consumer) {
 int rtc_consumer_get_rtp_parameters(rtc_consumer_t *consumer, rtc_rtp_parameters_t *out) {
     if (!consumer || !out)
         return RTC_ERR_INVALID;
+    rtc_mutex_lock(&consumer->media_mutex);
     *out = consumer->rtp;
+    rtc_mutex_unlock(&consumer->media_mutex);
+    return RTC_OK;
+}
+
+int rtc_consumer_set_mid(rtc_consumer_t *consumer, uint8_t ext_id, const char *mid) {
+    if (!consumer || ext_id > 14 ||
+        (ext_id &&
+         (!mid || !mid[0] || strlen(mid) > 16 || strlen(mid) >= sizeof(consumer->rtp.mid))))
+        return RTC_ERR_INVALID;
+    rtc_mutex_lock(&consumer->media_mutex);
+    if (consumer->mid_ext_id == ext_id && (!ext_id || strcmp(consumer->rtp.mid, mid) == 0)) {
+        rtc_mutex_unlock(&consumer->media_mutex);
+        return RTC_OK;
+    }
+    if (!atomic_load(&consumer->paused) && consumer->source_initialized) {
+        rtc_mutex_unlock(&consumer->media_mutex);
+        return RTC_ERR_INVALID;
+    }
+    consumer->mid_ext_id = ext_id;
+    if (ext_id)
+        memcpy(consumer->rtp.mid, mid, strlen(mid) + 1);
+    rtc_mutex_unlock(&consumer->media_mutex);
     return RTC_OK;
 }
 
@@ -260,6 +324,7 @@ void rtc_consumer_close(rtc_consumer_t *consumer) {
     if (consumer->producer)
         rtc_producer_remove_consumer(consumer->producer, consumer);
     rtc_worker_invoke(consumer->worker, consumer_retire_on_worker, consumer);
+    rtc_transport_unregister_source(consumer->transport, consumer);
 }
 
 void rtc_consumer_destroy(rtc_consumer_t *consumer) {
@@ -277,6 +342,9 @@ int rtc_consumer_get_stats(rtc_consumer_t *consumer, rtc_consumer_stats_t *out) 
     if (!consumer || !out)
         return RTC_ERR_INVALID;
     memset(out, 0, sizeof(*out));
+    rtc_mutex_lock(&consumer->media_mutex);
+    out->ssrc = consumer->rtp.ssrc;
+    out->source_generation = consumer->source_generation;
     out->closed = atomic_load_explicit(&consumer->closed, memory_order_acquire);
     out->source_ended = atomic_load(&consumer->source_ended);
     out->paused =
@@ -299,6 +367,7 @@ int rtc_consumer_get_stats(rtc_consumer_t *consumer, rtc_consumer_stats_t *out) 
         out->packets_dropped += snapshot.packets_dropped - snapshot.packets_rejected;
         out->packets_queued = snapshot.packets_queued;
     }
+    rtc_mutex_unlock(&consumer->media_mutex);
     return RTC_OK;
 }
 
@@ -449,8 +518,12 @@ void rtc_consumer_on_producer_rtp(rtc_consumer_t *consumer, const rtc_rtp_packet
     consumer->history[slot].seq = seq;
     consumer->history[slot].len = 0;
     consumer->history[slot].attempts = 0;
-    int rc = rtc_rtp_build(&out_pkt, pkt->header.payload_type, seq, pkt->header.timestamp,
-                           consumer->rtp.ssrc, pkt->header.marker, pkt->payload, pkt->payload_len);
+    rtc_rtp_ext_t ext;
+    if (consumer->mid_ext_id)
+        rtc_rtp_ext_make_string(&ext, consumer->mid_ext_id, consumer->rtp.mid);
+    int rc = rtc_rtp_build_with_ext(&out_pkt, pkt->header.payload_type, seq, pkt->header.timestamp,
+                                    consumer->rtp.ssrc, pkt->header.marker, &ext,
+                                    consumer->mid_ext_id ? 1 : 0, pkt->payload, pkt->payload_len);
     if (rc != RTC_OK) {
         atomic_fetch_add_explicit(&consumer->packets_dropped, 1, memory_order_relaxed);
         rtc_mutex_unlock(&consumer->media_mutex);

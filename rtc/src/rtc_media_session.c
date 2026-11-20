@@ -6,6 +6,7 @@
 #include "rtc/rtc_rtcp.h"
 #include "rtc/rtc_rtp_ext.h"
 #include "rtc_worker_internal.h"
+#include "rtc_transport_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -427,18 +428,58 @@ rtc_err_t rtc_media_session_init(rtc_media_session_t *s, rtc_transport_t *transp
     return RTC_OK;
 }
 
+static void session_local_source_changed(uint32_t previous, uint32_t current, void *user) {
+    rtc_media_session_t *s = user;
+    rtc_rtp_send_stream_t *stream = session_sender(s, previous);
+    if (!stream || rtc_u32_map_set(&s->send_streams, current, stream) != RTC_OK) {
+        rtc_transport_close(s->transport);
+        return;
+    }
+    rtc_u32_map_remove(&s->send_streams, previous);
+    for (size_t i = 0; i < rtc_vec_len(&s->recv_streams); i++) {
+        rtc_rtp_recv_stream_t *receiver = session_recv_at(s, i);
+        if (rtc_rtp_recv_stream_stats(receiver)->ssrc == previous)
+            rtc_rtp_recv_stream_set_local_ssrc(receiver, current);
+    }
+}
+
 rtc_err_t rtc_media_session_add_sender(rtc_media_session_t *s, rtc_rtp_send_stream_t *stream) {
     if (!s || !s->ready || !stream)
         return RTC_ERR_INVALID;
-    return rtc_u32_map_set(&s->send_streams, rtc_rtp_send_stream_ssrc(stream), stream);
+    rtc_rtp_send_stream_t *existing = session_sender(s, rtc_rtp_send_stream_ssrc(stream));
+    if (existing)
+        return existing == stream ? RTC_OK : RTC_ERR_INVALID;
+    rtc_err_t rc = rtc_u32_map_set(&s->send_streams, rtc_rtp_send_stream_ssrc(stream), stream);
+    if (rc == RTC_OK) {
+        rtc_rtp_send_stream_on_source(stream, session_local_source_changed, s);
+        rtc_rtp_send_stream_attach_transport(stream, s->transport);
+    }
+    return rc;
+}
+
+static int session_local_reporter_changed(uint32_t previous, uint32_t current, void *user) {
+    (void)previous;
+    rtc_rtp_recv_stream_set_local_ssrc(user, current);
+    return RTC_OK;
 }
 
 rtc_err_t rtc_media_session_add_receiver(rtc_media_session_t *s, rtc_rtp_recv_stream_t *stream) {
     if (!s || !s->ready || !stream)
         return RTC_ERR_INVALID;
+    rtc_rtp_recv_stream_attach_transport(stream, s->transport);
+    uint32_t local = rtc_rtp_recv_stream_stats(stream)->ssrc;
+    if (s->transport && !session_sender(s, local)) {
+        int rc = local ? RTC_OK : rtc_transport_new_ssrc(s->transport, &local);
+        if (rc == RTC_OK)
+            rc = rtc_transport_register_source(s->transport, local, session_local_reporter_changed,
+                                               stream, NULL);
+        if (rc != RTC_OK)
+            return rc;
+        rtc_rtp_recv_stream_set_local_ssrc(stream, local);
+    }
     rtc_err_t rc = rtc_vec_push(&s->recv_streams, &stream);
-    if (rc == RTC_OK)
-        rtc_rtp_recv_stream_attach_transport(stream, s->transport);
+    if (rc != RTC_OK)
+        rtc_transport_unregister_source(s->transport, stream);
     return rc;
 }
 
@@ -523,6 +564,11 @@ void rtc_media_session_stop(rtc_media_session_t *s) {
 void rtc_media_session_close(rtc_media_session_t *s) {
     if (!s || !s->ready)
         return;
+    rtc_u32_map_iter_t iterator = {0};
+    uint32_t ssrc;
+    void *value;
+    while (rtc_u32_map_next(&s->send_streams, &iterator, &ssrc, &value))
+        rtc_rtp_send_stream_on_source(value, NULL, NULL);
     rtc_interceptor_chain_close(&s->chain);
     rtc_u32_map_free(&s->send_streams);
     rtc_vec_free(&s->recv_streams);

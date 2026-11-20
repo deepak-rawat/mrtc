@@ -2,10 +2,9 @@
  * Stats API - mirrors WebRTC RTCStatsReport (W3C webrtc-stats).
  *
  * `rtc_peer_connection_get_stats` produces a snapshot of the per-transceiver
- * counters maintained by the RTCP stats path. The values are monotonic
- * counters; the report is a best-effort, lock-free read across threads
- * (RTP send updates on the main thread, RTP recv updates on the transport
- * thread). Individual fields may be slightly stale but the read is safe.
+ * counters maintained by the RTCP stats path. Counters are scoped to a
+ * source generation and restart when that source's SSRC changes. Queries
+ * marshal onto the peer worker for a serialized snapshot.
  */
 #ifndef RTC_STATS_H
 #define RTC_STATS_H
@@ -20,7 +19,8 @@ typedef struct {
     rtc_direction_t dir; /* current negotiated direction */
 
     /* Outbound (RTCOutboundRtpStreamStats subset) */
-    uint32_t out_ssrc; /* 0 if sender inactive */
+    uint32_t out_ssrc;              /* 0 if sender inactive */
+    uint64_t out_source_generation; /* sender counters restart with a new SSRC */
     uint32_t out_packets_sent;
     uint32_t out_bytes_sent; /* RTP payload octets (RFC 3550 sender octet count) */
 

@@ -31,6 +31,12 @@ struct rtc_rtp_send_stream {
     _Atomic uint64_t remote_limit_ms;
     bool send_active;
     bool video;
+    bool started;
+    uint64_t generation;
+    uint8_t mid_ext_id;
+    char mid[17];
+    rtc_rtp_recv_stream_source_fn on_source;
+    void *source_user;
 
     rtc_rtp_send_stream_nack_fn on_nack;
     void *on_nack_user;
@@ -98,12 +104,18 @@ rtc_rtp_send_stream_t *rtc_rtp_send_stream_create(const rtc_rtp_send_stream_conf
         return NULL;
     }
     stream->rtcp_stats.send_clock_rate = cfg->clock_rate;
+    if (cfg->ssrc) {
+        stream->rtp_session.ssrc = cfg->ssrc;
+        stream->rtcp_stats.ssrc = cfg->ssrc;
+    }
+    stream->generation = 1;
     return stream;
 }
 
 void rtc_rtp_send_stream_destroy(rtc_rtp_send_stream_t *stream) {
     if (!stream)
         return;
+    rtc_transport_unregister_source(stream->transport, stream);
     rtc_transport_forget_rtp(stream->transport, stream->rtp_session.ssrc);
 #ifdef MRTC_ENABLE_RATE_CONTROL
     if (stream->rate_ctrl)
@@ -132,6 +144,10 @@ rtc_rtp_recv_stream_t *rtc_rtp_recv_stream_create(const rtc_rtp_recv_stream_conf
 }
 
 void rtc_rtp_recv_stream_destroy(rtc_rtp_recv_stream_t *stream) {
+    if (!stream)
+        return;
+    rtc_transport_unregister_source(stream->transport, stream);
+    rtc_transport_release(stream->transport);
     free(stream);
 }
 
@@ -171,19 +187,95 @@ const rtc_rtcp_stats_t *rtc_rtp_send_stream_stats(const rtc_rtp_send_stream_t *s
     return stream ? &stream->rtcp_stats : NULL;
 }
 
+uint64_t rtc_rtp_send_stream_generation(const rtc_rtp_send_stream_t *stream) {
+    return stream ? stream->generation : 0;
+}
+
+void rtc_rtp_send_stream_on_source(rtc_rtp_send_stream_t *stream, rtc_rtp_recv_stream_source_fn fn,
+                                   void *user) {
+    if (stream) {
+        stream->on_source = fn;
+        stream->source_user = user;
+    }
+}
+
+void rtc_rtp_recv_stream_set_local_ssrc(rtc_rtp_recv_stream_t *stream, uint32_t ssrc) {
+    if (stream) {
+        rtc_rtcp_stats_restart_sender(&stream->rtcp_stats, ssrc);
+    }
+}
+
+int rtc_rtp_send_stream_set_mid(rtc_rtp_send_stream_t *stream, uint8_t ext_id, const char *mid) {
+    if (!stream || ext_id > 14 || (ext_id && (!mid || !mid[0] || strlen(mid) > 16)))
+        return RTC_ERR_INVALID;
+    if (stream->started &&
+        (ext_id != stream->mid_ext_id || (ext_id && strcmp(stream->mid, mid) != 0)))
+        return RTC_ERR_INVALID;
+#ifdef MRTC_ENABLE_TWCC
+    if (ext_id && ext_id == stream->twcc_ext_id)
+        return RTC_ERR_INVALID;
+#endif
+    stream->mid_ext_id = ext_id;
+    if (ext_id)
+        memcpy(stream->mid, mid, strlen(mid) + 1);
+    return RTC_OK;
+}
+
+static int send_stream_rotate(uint32_t previous, uint32_t current, void *user) {
+    rtc_rtp_send_stream_t *stream = user;
+    rtc_nack_buf_t *replacement =
+        stream->nack_buf ? rtc_nack_buf_create(NACK_BUF_DEFAULT_SIZE) : NULL;
+    if (stream->nack_buf && !replacement)
+        return RTC_ERR_NOMEM;
+    uint16_t seq;
+    if (rtc_random_bytes((uint8_t *)&seq, sizeof(seq)) != RTC_OK) {
+        rtc_nack_buf_destroy(replacement);
+        return RTC_ERR_GENERIC;
+    }
+    rtc_nack_buf_destroy(stream->nack_buf);
+    stream->nack_buf = replacement;
+    stream->rtp_session.ssrc = current;
+    stream->rtp_session.seq = seq;
+    rtc_rtcp_stats_restart_sender(&stream->rtcp_stats, current);
+    stream->generation++;
+    atomic_store(&stream->keyframe_requested, true);
+    if (stream->on_source)
+        stream->on_source(previous, current, stream->source_user);
+    return RTC_OK;
+}
+
 void rtc_rtp_send_stream_attach_transport(rtc_rtp_send_stream_t *stream,
                                           rtc_transport_t *transport) {
-    if (!stream || !stream->active)
+    if (!stream)
         return;
+    if (stream->transport == transport)
+        return;
+    rtc_transport_unregister_source(stream->transport, stream);
     rtc_transport_retain(transport);
     rtc_transport_release(stream->transport);
     stream->transport = transport;
+    if (transport &&
+        rtc_transport_register_source(transport, stream->rtp_session.ssrc, send_stream_rotate,
+                                      stream, stream->rtcp_stats.cname) != RTC_OK) {
+        stream->active = false;
+        RTC_LOG_ERR("Local RTP source registration failed");
+        rtc_transport_close(transport);
+    }
 }
 
 void rtc_rtp_send_stream_attach_twcc(rtc_rtp_send_stream_t *stream, uint8_t ext_id) {
 #ifdef MRTC_ENABLE_TWCC
-    if (!stream || !stream->active || ext_id == 0 || !stream->transport)
+    if (!stream || !stream->transport)
         return;
+    if (!ext_id) {
+        stream->twcc = NULL;
+        stream->twcc_ext_id = 0;
+        return;
+    }
+    if (ext_id > 14 || ext_id == stream->mid_ext_id) {
+        rtc_transport_close(stream->transport);
+        return;
+    }
     stream->twcc = rtc_transport_twcc_sender(stream->transport);
     stream->twcc_ext_id = ext_id;
 #else
@@ -248,24 +340,24 @@ static int send_stream_send(rtc_rtp_send_stream_t *stream, const uint8_t *payloa
 
     rtc_rtp_packet_t pkt;
     int rc;
+    rtc_rtp_ext_t exts[2];
+    size_t ext_count = 0;
+    if (stream->mid_ext_id)
+        rtc_rtp_ext_make_string(&exts[ext_count++], stream->mid_ext_id, stream->mid);
 #ifdef MRTC_ENABLE_TWCC
     uint16_t twcc_seq = 0;
     bool tagged = (stream->twcc && stream->twcc_ext_id != 0);
     if (tagged) {
         twcc_seq = atomic_fetch_add(&stream->twcc->next_seq, 1);
-        rtc_rtp_ext_t exts[1];
-        rtc_rtp_ext_make_transport_cc(&exts[0], stream->twcc_ext_id, twcc_seq);
-        rc = rtc_rtp_session_send_with_ext(&stream->rtp_session, &pkt, exts, 1, payload, len,
-                                           samples, marker);
-    } else {
-        rc = rtc_rtp_session_send(&stream->rtp_session, &pkt, payload, len, samples, marker);
+        rtc_rtp_ext_make_transport_cc(&exts[ext_count++], stream->twcc_ext_id, twcc_seq);
     }
-#else
-    rc = rtc_rtp_session_send(&stream->rtp_session, &pkt, payload, len, samples, marker);
 #endif
+    rc = rtc_rtp_session_send_with_ext(&stream->rtp_session, &pkt, exts, ext_count, payload, len,
+                                       samples, marker);
     if (rc != RTC_OK)
         return rc;
 
+    stream->started = true;
     size_t pkt_len = pkt.buf_len;
     int target = rtc_rtp_send_stream_get_target_bitrate(stream);
     rc = rtc_transport_send_rtp_media(stream->transport, pkt.buf, &pkt_len, sizeof(pkt.buf),
@@ -681,8 +773,12 @@ void rtc_rtp_recv_stream_on_packet(rtc_rtp_recv_stream_t *stream, const rtc_rtp_
 
 void rtc_rtp_recv_stream_attach_transport(rtc_rtp_recv_stream_t *stream,
                                           rtc_transport_t *transport) {
-    if (stream)
-        stream->transport = transport;
+    if (!stream || stream->transport == transport)
+        return;
+    rtc_transport_unregister_source(stream->transport, stream);
+    rtc_transport_retain(transport);
+    rtc_transport_release(stream->transport);
+    stream->transport = transport;
 }
 
 void rtc_rtp_recv_stream_on_feedback(rtc_rtp_recv_stream_t *stream,

@@ -29,6 +29,8 @@ typedef struct {
     uint64_t packets_dropped;
     uint64_t packets_retransmitted;
     uint64_t packets_queued;
+    uint32_t ssrc;
+    uint64_t source_generation;
     uint32_t estimated_bitrate_bps;
     uint64_t bitrate_feedback_ms;
     uint64_t last_packet_ms;
@@ -38,7 +40,9 @@ typedef struct {
 
 rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
                                       const rtc_consumer_options_t *opts);
-/* The source SSRC is immutable. A fixed sequence offset preserves source
+/* The publisher source is immutable; local collisions rotate the outbound
+ * SSRC and reset sender counters with an incremented source_generation.
+ * A fixed sequence offset preserves source
  * gaps, reordering and wrap, including across pause/resume. A source restart
  * with a discontinuous sequence space requires a new producer/consumer.
  * The last 128 sequence positions retain successful protected wire packets,
@@ -46,6 +50,8 @@ rtc_consumer_t *rtc_transport_consume(rtc_transport_t *transport,
  * stages complete video frames; cached ciphertext is never re-protected. */
 const char *rtc_consumer_id(const rtc_consumer_t *consumer);
 int rtc_consumer_get_rtp_parameters(rtc_consumer_t *consumer, rtc_rtp_parameters_t *out);
+/* Configure the subscriber m-section's negotiated MID before resuming media. */
+int rtc_consumer_set_mid(rtc_consumer_t *consumer, uint8_t ext_id, const char *mid);
 void rtc_consumer_pause(rtc_consumer_t *consumer);
 void rtc_consumer_resume(rtc_consumer_t *consumer);
 void rtc_consumer_close(rtc_consumer_t *consumer);

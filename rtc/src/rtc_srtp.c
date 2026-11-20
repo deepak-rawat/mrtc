@@ -154,6 +154,17 @@ static rtc_srtp_replay_entry_t *srtp_entry_for_ssrc(rtc_srtp_replay_entry_t *tab
     return free_slot;
 }
 
+bool rtc_srtp_ssrc_used(rtc_srtp_ctx_t *ctx, uint32_t ssrc) {
+    if (!ctx || !ctx->initialized)
+        return false;
+    rtc_mutex_lock(&ctx->lock);
+    bool used = srtp_find_ssrc(ctx->rtp_send, SRTP_REPLAY_MAX_STREAMS, ssrc) ||
+                srtp_find_ssrc(ctx->rtp_replay, SRTP_REPLAY_MAX_STREAMS, ssrc) ||
+                srtp_find_ssrc(ctx->rtcp_replay, SRTP_REPLAY_MAX_STREAMS, ssrc);
+    rtc_mutex_unlock(&ctx->lock);
+    return used;
+}
+
 /*
  * SRTP Key Derivation Function (RFC 3711, Section 4.3.1)
  *

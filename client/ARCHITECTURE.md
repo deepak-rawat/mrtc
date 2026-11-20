@@ -339,3 +339,19 @@ the scaffolding touches runtime internals.
   migration or simultaneous dual-family allocation.
 - Multiple peer connections share one default runtime; per-peer worker
   isolation is not a public knob.
+
+## Source identity continuity
+
+Authenticated local SSRC collisions recover without replacing the peer, other
+media tracks or SCTP association. The media session rekeys its sender route and
+the paired receiver's local reporting identity, preserving the incoming remote
+binding. Sender counters/SR history restart and `out_source_generation`
+increments; fresh offers use the current SSRC. Existing cached descriptions
+remain descriptions of their original negotiation.
+
+Outbound RTP includes the negotiated MID alongside per-section TWCC when
+selected. Shared-payload BUNDLE sections require MID. One-byte extension IDs,
+duplicate/conflicting mappings and unsupported established mapping changes are
+validated before accepting SDP. The full one-byte ID space is retained so a
+MID late in a browser's extension list cannot be silently dropped. New offers
+retain established mappings.

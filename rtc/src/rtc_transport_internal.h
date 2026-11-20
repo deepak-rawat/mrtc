@@ -14,6 +14,14 @@
 int rtc_transport_send_raw(rtc_transport_t *transport, const uint8_t *data, size_t len);
 rtc_worker_t *rtc_transport_worker(rtc_transport_t *transport);
 const char *rtc_transport_cname(const rtc_transport_t *transport);
+/* Registration/unregistration serialize with receive callbacks on the worker.
+ * The owner must unregister before freeing user. Callbacks run without send_mutex. */
+typedef int (*rtc_local_source_fn)(uint32_t previous, uint32_t current, void *user);
+int rtc_transport_register_source(rtc_transport_t *transport, uint32_t ssrc, rtc_local_source_fn fn,
+                                  void *user, const char *cname);
+void rtc_transport_unregister_source(rtc_transport_t *transport, void *user);
+int rtc_transport_new_ssrc(rtc_transport_t *transport, uint32_t *ssrc);
+int rtc_transport_reserve_remote_ssrc(rtc_transport_t *transport, uint32_t ssrc);
 /* No actor pointers escape these calls. Timers belong to the transport and
  * close cancels them on its worker before destroy frees the transport. */
 int rtc_transport_send_rtp_media(rtc_transport_t *transport, uint8_t *buf, size_t *len, size_t cap,

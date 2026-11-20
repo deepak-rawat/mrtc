@@ -394,6 +394,8 @@ static int subscribe(rtc_sfu_t *sfu, const char *subscriber, sfu_session_t *publ
         }
         s->description.media[index].direction = sending ? 1 : 3;
         s->description.media[index].extmap_count = 0;
+        if (rtc_sdp_media_add_extmap(&s->description.media[index], 1, RTC_EXT_URI_MID) != RTC_OK)
+            return RTC_ERR_SDP;
         s->description.media[index].rtcp_feedback =
             s->description.media[index].media_type == RTC_MEDIA_VIDEO
                 ? RTC_SDP_FB_NACK | RTC_SDP_FB_PLI | RTC_SDP_FB_FIR | RTC_SDP_FB_REMB
@@ -414,6 +416,10 @@ static int subscribe(rtc_sfu_t *sfu, const char *subscriber, sfu_session_t *publ
             }
         }
         if (s->consumers[index]) {
+            char mid[17];
+            snprintf(mid, sizeof(mid), "%d", index);
+            if (rtc_consumer_set_mid(s->consumers[index], 1, mid) != RTC_OK)
+                return RTC_ERR_SDP;
             rtc_rtp_parameters_t rtp;
             if (rtc_consumer_get_rtp_parameters(s->consumers[index], &rtp) != RTC_OK)
                 return RTC_ERR_GENERIC;
@@ -715,7 +721,10 @@ static int handle_worker(rtc_sfu_t *sfu, const rtc_sfu_command_t *message) {
             if (remote.media[i].mid_index != s->description.media[i].mid_index ||
                 remote.media[i].media_type != s->description.media[i].media_type ||
                 remote.media[i].payload_type != s->description.media[i].payload_type ||
-                strcmp(remote.media[i].codec_name, s->description.media[i].codec_name) != 0)
+                strcmp(remote.media[i].codec_name, s->description.media[i].codec_name) != 0 ||
+                remote.media[i].extmap_count > 1 ||
+                (!remote.media[i].rejected &&
+                 rtc_sdp_media_find_extmap_id(&remote.media[i], RTC_EXT_URI_MID) != 1))
                 rc = RTC_ERR_SDP;
         if (rc == RTC_OK)
             rc = apply_remote(s, &remote);

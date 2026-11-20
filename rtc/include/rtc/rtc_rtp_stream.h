@@ -34,6 +34,7 @@ typedef void (*rtc_rtp_recv_stream_source_fn)(uint32_t previous_ssrc, uint32_t c
 typedef struct {
     uint8_t payload_type;
     uint32_t clock_rate;
+    uint32_t ssrc; /* Optional initial local source; zero selects a random SSRC. */
 } rtc_rtp_send_stream_config_t;
 
 typedef struct {
@@ -55,6 +56,13 @@ void rtc_rtp_send_stream_set_active(rtc_rtp_send_stream_t *stream, bool active);
 bool rtc_rtp_send_stream_is_active(const rtc_rtp_send_stream_t *stream);
 uint32_t rtc_rtp_send_stream_ssrc(const rtc_rtp_send_stream_t *stream);
 const rtc_rtcp_stats_t *rtc_rtp_send_stream_stats(const rtc_rtp_send_stream_t *stream);
+uint64_t rtc_rtp_send_stream_generation(const rtc_rtp_send_stream_t *stream);
+/* Configure negotiated one-byte MID before sending. Zero disables MID. */
+int rtc_rtp_send_stream_set_mid(rtc_rtp_send_stream_t *stream, uint8_t ext_id, const char *mid);
+void rtc_rtp_send_stream_on_source(rtc_rtp_send_stream_t *stream, rtc_rtp_recv_stream_source_fn fn,
+                                   void *user);
+/* Change only the local RTCP reporter, never the incoming source binding. */
+void rtc_rtp_recv_stream_set_local_ssrc(rtc_rtp_recv_stream_t *stream, uint32_t ssrc);
 
 void rtc_rtp_send_stream_attach_transport(rtc_rtp_send_stream_t *stream,
                                           rtc_transport_t *transport);

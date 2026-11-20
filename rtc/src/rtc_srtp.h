@@ -105,6 +105,9 @@ typedef struct {
     bool initialized;
 } rtc_srtp_ctx_t;
 
+/* Non-allocating query of every retained nonce/replay namespace. */
+bool rtc_srtp_ssrc_used(rtc_srtp_ctx_t *ctx, uint32_t ssrc);
+
 /* Initialize SRTP context with master key + salt */
 int rtc_srtp_init(rtc_srtp_ctx_t *ctx, const uint8_t *master_key, size_t key_len,
                   const uint8_t *master_salt, size_t salt_len);

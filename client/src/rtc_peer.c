@@ -566,6 +566,17 @@ static int peer_maybe_start_sctp(rtc_peer_connection_t *pc) {
     return RTC_OK;
 }
 
+#ifdef MRTC_ENABLE_TWCC
+static uint8_t peer_sender_twcc_id(rtc_peer_connection_t *pc, int mid_index) {
+    for (int i = 0; i < pc->remote_sdp.media_count; i++) {
+        const rtc_sdp_media_t *m = &pc->remote_sdp.media[i];
+        if (m->mid_index == mid_index && (m->rtcp_feedback & RTC_SDP_FB_TRANSPORT_CC))
+            return rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC);
+    }
+    return 0;
+}
+#endif
+
 static void peer_runtime_complete_connection(rtc_peer_connection_t *pc) {
     if (pc->runtime_connected)
         return;
@@ -577,8 +588,7 @@ static void peer_runtime_complete_connection(rtc_peer_connection_t *pc) {
             continue;
         rtc_rtp_sender_attach_logical(s, pc->runtime_transport);
 #ifdef MRTC_ENABLE_TWCC
-        if (pc->twcc_ext_id != 0)
-            rtc_rtp_sender_attach_twcc(s, pc->twcc_ext_id);
+        rtc_rtp_sender_attach_twcc(s, peer_sender_twcc_id(pc, pc->transceivers[i].mid_index));
 #endif
         rtc_rtp_sender_arm_video(s);
     }
@@ -654,6 +664,30 @@ static int peer_build_sdp(rtc_peer_connection_t *pc, rtc_sdp_t *sdp) {
     sdp->media_count = 0;
     for (int i = 0; i < pc->transceiver_count && sdp->media_count < SDP_MAX_MEDIA; i++) {
         rtc_rtp_transceiver_fill_sdp_media(&pc->transceivers[i], &sdp->media[sdp->media_count]);
+        if (sdp->type == RTC_SDP_OFFER && pc->has_remote_desc) {
+            rtc_sdp_media_t *m = &sdp->media[sdp->media_count];
+            const rtc_sdp_media_t *previous = NULL;
+            for (int j = 0; j < pc->remote_sdp.media_count; j++) {
+                const rtc_sdp_media_t *r = &pc->remote_sdp.media[j];
+                if (r->media_type != RTC_MEDIA_APPLICATION && !previous)
+                    previous = r;
+                if (r->mid_index == m->mid_index) {
+                    previous = r;
+                    break;
+                }
+            }
+            if (previous) {
+                m->extmap_count = 0;
+                uint8_t mid = rtc_sdp_media_find_extmap_id(previous, RTC_EXT_URI_MID);
+                uint8_t twcc = rtc_sdp_media_find_extmap_id(previous, RTC_EXT_URI_TRANSPORT_CC);
+                if (mid)
+                    rtc_sdp_media_add_extmap(m, mid, RTC_EXT_URI_MID);
+                if (twcc)
+                    rtc_sdp_media_add_extmap(m, twcc, RTC_EXT_URI_TRANSPORT_CC);
+                else
+                    m->rtcp_feedback &= (uint8_t)~RTC_SDP_FB_TRANSPORT_CC;
+            }
+        }
         if (sdp->type == RTC_SDP_ANSWER) {
             rtc_sdp_media_t *m = &sdp->media[sdp->media_count];
             for (int j = 0; j < pc->remote_sdp.media_count; j++) {
@@ -766,8 +800,7 @@ static void peer_apply_negotiated_media(rtc_peer_connection_t *pc) {
             rtc_rtp_sender_attach_logical(&t->sender, pc->runtime_transport);
             rtc_rtp_sender_arm_video(&t->sender);
 #ifdef MRTC_ENABLE_TWCC
-            if (pc->twcc_ext_id)
-                rtc_rtp_sender_attach_twcc(&t->sender, pc->twcc_ext_id);
+            rtc_rtp_sender_attach_twcc(&t->sender, peer_sender_twcc_id(pc, t->mid_index));
 #endif
         }
         if (receive && !was_receiving && pc->on_track)
@@ -1154,6 +1187,44 @@ static bool peer_validate_remote_media(rtc_peer_connection_t *pc, const rtc_sdp_
             return false;
         if (!m->rejected && !m->rtcp_mux)
             return false;
+        uint8_t mid_id = rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_MID);
+        uint8_t twcc_id = rtc_sdp_media_find_extmap_id(m, RTC_EXT_URI_TRANSPORT_CC);
+        if (mid_id > 14 || twcc_id > 14 || (mid_id && mid_id == twcc_id))
+            return false;
+        for (int k = 0; k < m->extmap_count; k++)
+            for (int j = 0; j < k; j++)
+                if (m->extmaps[k].id == m->extmaps[j].id ||
+                    strcmp(m->extmaps[k].uri, m->extmaps[j].uri) == 0)
+                    return false;
+        if (type == RTC_SDP_ANSWER &&
+            ((mid_id &&
+              mid_id != rtc_sdp_media_find_extmap_id(&pc->local_sdp.media[i], RTC_EXT_URI_MID)) ||
+             (twcc_id && twcc_id != rtc_sdp_media_find_extmap_id(&pc->local_sdp.media[i],
+                                                                 RTC_EXT_URI_TRANSPORT_CC))))
+            return false;
+        for (int k = 0; k < i; k++) {
+            const rtc_sdp_media_t *other = &sdp->media[k];
+            if (other->media_type == RTC_MEDIA_APPLICATION)
+                continue;
+            uint8_t other_mid = rtc_sdp_media_find_extmap_id(other, RTC_EXT_URI_MID);
+            uint8_t other_twcc = rtc_sdp_media_find_extmap_id(other, RTC_EXT_URI_TRANSPORT_CC);
+            if ((mid_id && other_mid && other_mid != mid_id) ||
+                (twcc_id && other_twcc && other_twcc != twcc_id) ||
+                (m->payload_type == other->payload_type && (!mid_id || !other_mid)))
+                return false;
+            for (int a = 0; a < m->extmap_count; a++)
+                for (int b = 0; b < other->extmap_count; b++)
+                    if (m->extmaps[a].id == other->extmaps[b].id &&
+                        strcmp(m->extmaps[a].uri, other->extmaps[b].uri) != 0)
+                        return false;
+        }
+        for (int k = 0; pc->runtime_connected && k < pc->remote_sdp.media_count; k++) {
+            const rtc_sdp_media_t *old = &pc->remote_sdp.media[k];
+            if (old->mid_index == m->mid_index &&
+                (mid_id != rtc_sdp_media_find_extmap_id(old, RTC_EXT_URI_MID) ||
+                 twcc_id != rtc_sdp_media_find_extmap_id(old, RTC_EXT_URI_TRANSPORT_CC)))
+                return false;
+        }
         if (type == RTC_SDP_ANSWER &&
             (m->rtcp_feedback & (uint8_t)~pc->local_sdp.media[i].rtcp_feedback))
             return false;
@@ -1311,6 +1382,14 @@ static int peer_set_remote_desc(rtc_peer_connection_t *pc, const rtc_desc_t *des
         struct rtc_rtp_transceiver *t = &pc->transceivers[j];
         if (t->receiver.stream)
             rtc_rtp_recv_stream_set_mid(t->receiver.stream, t->mid);
+        for (int i = 0; i < pc->remote_sdp.media_count; i++)
+            if (pc->remote_sdp.media[i].mid_index == t->mid_index) {
+                uint8_t id =
+                    rtc_sdp_media_find_extmap_id(&pc->remote_sdp.media[i], RTC_EXT_URI_MID);
+                rc = rtc_rtp_send_stream_set_mid(t->sender.stream, id, t->mid);
+                if (rc != RTC_OK)
+                    return rc;
+            }
     }
 
     /* Transport-CC extmap negotiation */
@@ -1714,6 +1793,7 @@ static int peer_get_stats(const rtc_peer_connection_t *pc, rtc_stats_report_t *r
         if (rtc_rtp_send_stream_is_active(t->sender.stream)) {
             const rtc_rtcp_stats_t *sender_stats = rtc_rtp_send_stream_stats(t->sender.stream);
             s->out_ssrc = rtc_rtp_send_stream_ssrc(t->sender.stream);
+            s->out_source_generation = rtc_rtp_send_stream_generation(t->sender.stream);
             s->out_packets_sent = sender_stats->packets_sent;
             s->out_bytes_sent = sender_stats->octets_sent;
         }

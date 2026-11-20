@@ -61,6 +61,20 @@ gaps, reordering and wraparound remain visible downstream; compacting every
 received packet into a contiguous sequence would hide an incomplete VP8 frame.
 Discontinuous source restarts require a new producer/consumer.
 
+Authenticated collisions rotate a consumer's **local outbound** SSRC and its
+sequence mapping, not the immutable publisher source. The transport sends BYE
+for the old ID and purges queued/repair packets; the consumer clears ciphertext
+history, restarts sender counters/SR history, increments `source_generation`,
+and requests an upstream keyframe after releasing its media mutex. Publisher
+clock correlation and CNAME survive. `get_rtp_parameters` and stats expose the
+current local source. Producers use separately owned random RR reporter IDs;
+colliding with one changes only `local_ssrc`, not incoming routes or counters.
+
+Subscription forwarding emits the negotiated subscriber MID, configured with
+`rtc_consumer_set_mid`, rather than the publisher MID or consumer object ID.
+MID uses validated one-byte extension IDs and 1..16-byte values. An active
+consumer cannot change it without pausing/draining media first.
+
 The consumer caches accepted **protected wire packets** in 128 sequence
 positions. NACK retransmission uses `rtc_transport_retransmit_rtp()` rather
 than re-encrypting old packets across rollover counters. Retransmission attempts

@@ -616,8 +616,31 @@ callback. Core RTP callback teardown is covered by the network-runtime tests.
 - Reports and feedback are compound SR/RR + SDES, with feedback capability
   intersection in SDP. Reports use bounded live membership, sender expiry and
   timer/reverse reconsideration for the supported unicast profile.
-  Incoming/outgoing BYE and inactivity expiry are implemented; SSRC collision
-  recovery and large-group BYE backoff remain incomplete. Impaired-network
+  Incoming/outgoing BYE, inactivity expiry and registered local-source collision
+  recovery are implemented. Large-group BYE backoff remains incomplete. Impaired-network
   synchronized playout needs broader qualification.
 - Replay windows and fingerprint checks are implemented, but this educational
   stack has not undergone an independent production security audit.
+
+## Local SSRC recovery
+
+The transport authenticates RTP/SRTCP before comparing actual source identities
+with its worker-owned local-source registrations. Report-block targets and
+unknown RTCP payloads do not cause collisions. Sources departing anywhere in a
+BYE compound are recorded but do not provoke a rename.
+
+Recovery retires the old local ID, discards staged/queued/repair RTP, sends
+compound BYE for that ID, and calls the live owner without `send_mutex` held.
+The owner changes local RTP/reporting state and clears protected NACK history.
+Paired sender/receiver reporting identities move together; incoming remote
+bindings do not. Independent receive reporters and TWCC also have local owners.
+Unregistration drains through the worker; completed transport close publishes
+that no owner callback remains before a retained stream can outlive the worker.
+
+All crypto nonce/replay contexts survive a rename. Random replacements avoid
+registered/reserved local IDs, registered/observed remote IDs and retained
+crypto IDs. The transport retains at most 64 local IDs, including retired and
+pre-media reservations, and 256 remote IDs. Capacity exhaustion or failure to
+complete recovery closes the transport explicitly rather than evicting crypto
+history or cycling IDs. Raw transport sends without a source owner cannot be
+transparently rewritten and fail closed on collision.

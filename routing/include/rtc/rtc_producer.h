@@ -18,6 +18,7 @@ typedef struct {
 
 typedef struct {
     bool closed;
+    uint32_t local_ssrc; /* local RTCP reporter, not the publisher source */
     bool source_active;
     bool source_ended;
     rtc_media_kind_t kind;

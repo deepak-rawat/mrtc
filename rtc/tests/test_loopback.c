@@ -309,8 +309,9 @@ static bool connect_endpoints(loop_endpoint_t *full, loop_endpoint_t *lite) {
            wait_for_dtls_connected(lite->transport, 5000);
 }
 
-static bool setup_media(loop_endpoint_t *endpoint, uint8_t send_pt, uint8_t recv_pt,
-                        uint32_t recv_local_ssrc, frame_rec_t *frames, feedback_rec_t *feedback) {
+static bool setup_media_with_ssrc(loop_endpoint_t *endpoint, uint8_t send_pt, uint8_t recv_pt,
+                                  uint32_t recv_local_ssrc, uint32_t send_ssrc, frame_rec_t *frames,
+                                  feedback_rec_t *feedback) {
     memset(&endpoint->media, 0, sizeof(endpoint->media));
     if (rtc_media_session_init(&endpoint->media, endpoint->transport, endpoint->worker) != RTC_OK)
         return false;
@@ -319,6 +320,7 @@ static bool setup_media(loop_endpoint_t *endpoint, uint8_t send_pt, uint8_t recv
     endpoint->send_stream = rtc_rtp_send_stream_create(&(rtc_rtp_send_stream_config_t){
         .payload_type = send_pt,
         .clock_rate = 90000,
+        .ssrc = send_ssrc,
     });
     endpoint->recv_stream = rtc_rtp_recv_stream_create(&(rtc_rtp_recv_stream_config_t){
         .payload_type = recv_pt,
@@ -340,6 +342,96 @@ static bool setup_media(loop_endpoint_t *endpoint, uint8_t send_pt, uint8_t recv
 
     return rtc_media_session_add_sender(&endpoint->media, endpoint->send_stream) == RTC_OK &&
            rtc_media_session_add_receiver(&endpoint->media, endpoint->recv_stream) == RTC_OK;
+}
+
+static bool setup_media(loop_endpoint_t *endpoint, uint8_t send_pt, uint8_t recv_pt,
+                        uint32_t recv_local_ssrc, frame_rec_t *frames, feedback_rec_t *feedback) {
+    return setup_media_with_ssrc(endpoint, send_pt, recv_pt, recv_local_ssrc, 0, frames, feedback);
+}
+
+TEST(loopback_collision_rotates_only_the_independent_local_reporter) {
+    frame_rec_t full_frames, lite_frames;
+    ASSERT(frame_rec_init(&full_frames));
+    ASSERT(frame_rec_init(&lite_frames));
+    loop_endpoint_t full, lite;
+    ASSERT(make_endpoint(&full, RTC_ICE_MODE_FULL));
+    ASSERT(make_endpoint(&lite, RTC_ICE_MODE_LITE));
+    const uint32_t collision = 0x11223344;
+    ASSERT(setup_media_with_ssrc(&full, 96, 97, 0, collision, &full_frames, NULL));
+    ASSERT(setup_media(&lite, 97, 96, collision, &lite_frames, NULL));
+    uint32_t independent_sender = rtc_rtp_send_stream_ssrc(lite.send_stream);
+    ASSERT(connect_endpoints(&full, &lite));
+    const uint8_t payload[] = {0x10, 0};
+    ASSERT_EQ(rtc_rtp_send_stream_send(full.send_stream, payload, sizeof(payload), 3000, true),
+              RTC_OK);
+    ASSERT(wait_for_frame(&lite_frames, 1, 1000));
+    ASSERT_EQ(rtc_rtp_send_stream_ssrc(full.send_stream), collision);
+    ASSERT_EQ(rtc_rtp_send_stream_generation(full.send_stream), 1);
+    ASSERT_EQ(rtc_rtp_send_stream_ssrc(lite.send_stream), independent_sender);
+    const rtc_rtcp_stats_t *receiver = rtc_rtp_recv_stream_stats(lite.recv_stream);
+    ASSERT(receiver->ssrc && receiver->ssrc != collision);
+    ASSERT(receiver->ssrc != independent_sender);
+    ASSERT_EQ(receiver->remote_ssrc, collision);
+    ASSERT_EQ(rtc_rtp_recv_stream_ssrc(lite.recv_stream), collision);
+    ASSERT_EQ(rtc_rtp_send_stream_send(full.send_stream, payload, sizeof(payload), 3000, true),
+              RTC_OK);
+    ASSERT(wait_for_frame(&lite_frames, 2, 1000));
+    ASSERT_EQ(rtc_rtp_send_stream_send(lite.send_stream, payload, sizeof(payload), 3000, true),
+              RTC_OK);
+    ASSERT(wait_for_frame(&full_frames, 1, 1000));
+    close_endpoint(&full);
+    close_endpoint(&lite);
+    frame_rec_destroy(&full_frames);
+    frame_rec_destroy(&lite_frames);
+}
+
+TEST(loopback_collision_cancels_staged_ciphertext_and_old_repair) {
+    frame_rec_t full_frames, lite_frames;
+    ASSERT(frame_rec_init(&full_frames));
+    ASSERT(frame_rec_init(&lite_frames));
+    loop_endpoint_t full, lite;
+    ASSERT(make_endpoint_ex(&full, RTC_ICE_MODE_FULL, true));
+    ASSERT(make_endpoint(&lite, RTC_ICE_MODE_LITE));
+    const uint32_t previous = 0x11223344;
+    ASSERT(setup_media_with_ssrc(&full, 96, 97, 0, previous, &full_frames, NULL));
+    ASSERT(setup_media(&lite, 97, 96, 0, &lite_frames, NULL));
+    ASSERT(connect_endpoints(&full, &lite));
+    uint8_t payload[1000] = {0x10};
+    rtc_rtp_packet_t staged, incoming;
+    ASSERT_EQ(rtc_rtp_build(&staged, 96, 123, 3000, previous, false, payload, sizeof(payload)),
+              RTC_OK);
+    size_t wire_len = staged.buf_len;
+    ASSERT_EQ(rtc_transport_send_rtp_media(full.transport, staged.buf, &wire_len,
+                                           sizeof(staged.buf), true, 1000),
+              RTC_OK);
+    rtc_transport_stats_t transport;
+    ASSERT_EQ(rtc_transport_get_stats(full.transport, &transport), RTC_OK);
+    ASSERT(transport.rtp_packets_queued > 0);
+    ASSERT_EQ(rtc_rtp_build(&incoming, 97, 456, 3000, previous, true, payload, 2), RTC_OK);
+    size_t incoming_len = incoming.buf_len;
+    ASSERT_EQ(rtc_transport_send_rtp(lite.transport, incoming.buf, &incoming_len,
+                                     sizeof(incoming.buf)),
+              RTC_OK);
+    ASSERT(wait_for_frame(&full_frames, 1, 1000));
+    ASSERT(rtc_rtp_send_stream_ssrc(full.send_stream) != previous);
+    ASSERT_EQ(rtc_rtp_send_stream_generation(full.send_stream), 2);
+    ASSERT_EQ(rtc_transport_get_stats(full.transport, &transport), RTC_OK);
+    ASSERT_EQ(transport.rtp_packets_queued, 0);
+    rtc_pacer_sent_t sent;
+    ASSERT(!rtc_transport_rtp_sent(full.transport, previous, &sent));
+    ASSERT_EQ(rtc_transport_retransmit_rtp(full.transport, staged.buf, wire_len), RTC_ERR_TIMEOUT);
+    ASSERT_EQ(rtc_rtp_build(&staged, 96, 124, 3000, previous, true, payload, 2), RTC_OK);
+    wire_len = staged.buf_len;
+    ASSERT_EQ(rtc_transport_send_rtp(full.transport, staged.buf, &wire_len, sizeof(staged.buf)),
+              RTC_ERR_INVALID);
+    ASSERT_EQ(rtc_rtp_send_stream_send(full.send_stream, payload, 2, 3000, true), RTC_OK);
+    ASSERT(wait_for_frame(&lite_frames, 1, 1000));
+    ASSERT_EQ(lite_frames.payload_len, 2);
+    ASSERT_EQ(lite_frames.ssrc, rtc_rtp_send_stream_ssrc(full.send_stream));
+    close_endpoint(&full);
+    close_endpoint(&lite);
+    frame_rec_destroy(&full_frames);
+    frame_rec_destroy(&lite_frames);
 }
 
 typedef struct {
@@ -672,6 +764,8 @@ TEST(paced_producer_races_discard_and_owner_destruction) {
 int main(void) {
     rtc_init();
     RUN_TEST(loopback_full_to_lite_media_feedback_and_data);
+    RUN_TEST(loopback_collision_rotates_only_the_independent_local_reporter);
+    RUN_TEST(loopback_collision_cancels_staged_ciphertext_and_old_repair);
     RUN_TEST(loopback_bye_expiry_and_replay_preserve_source_isolation);
     RUN_TEST(paced_producer_races_discard_and_owner_destruction);
     rtc_cleanup();

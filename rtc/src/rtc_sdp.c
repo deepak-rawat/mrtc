@@ -5,6 +5,7 @@
  */
 #include "rtc/rtc_sdp.h"
 #include "rtc/rtc_rtcp.h"
+#include "rtc/rtc_rtp_ext.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -742,10 +743,18 @@ int rtc_sdp_parse(rtc_sdp_t *sdp, const char *text, size_t len) {
             current_media < sdp->media_count) {
             int id_val = 0;
             char uri[SDP_EXTMAP_URI_LEN] = {0};
-            if (sscanf(line, "a=extmap:%d %95s", &id_val, uri) == 2 ||
-                sscanf(line, "a=extmap:%d/%*[^ ] %95s", &id_val, uri) == 2) {
+            if (sscanf(line, "a=extmap:%d/%*[^ ] %95s", &id_val, uri) == 2 ||
+                sscanf(line, "a=extmap:%d %95s", &id_val, uri) == 2) {
                 rtc_sdp_media_t *m = &sdp->media[current_media];
-                if (id_val >= 1 && id_val <= 14 && m->extmap_count < SDP_MAX_EXTMAP) {
+                if ((id_val < 1 || id_val > 14) && (strcmp(uri, RTC_EXT_URI_MID) == 0 ||
+                                                    strcmp(uri, RTC_EXT_URI_TRANSPORT_CC) == 0))
+                    return RTC_ERR_SDP;
+                if (id_val >= 1 && id_val <= 14) {
+                    if (m->extmap_count == SDP_MAX_EXTMAP)
+                        return RTC_ERR_SDP;
+                    for (int i = 0; i < m->extmap_count; i++)
+                        if (m->extmaps[i].id == id_val || strcmp(m->extmaps[i].uri, uri) == 0)
+                            return RTC_ERR_SDP;
                     m->extmaps[m->extmap_count].id = (uint8_t)id_val;
                     size_t ulen = strlen(uri);
                     if (ulen >= sizeof(m->extmaps[m->extmap_count].uri))
@@ -818,16 +827,19 @@ const rtc_ice_candidate_t *rtc_sdp_get_candidate(const rtc_sdp_t *sdp, size_t id
 }
 
 int rtc_sdp_media_add_extmap(rtc_sdp_media_t *m, uint8_t id, const char *uri) {
-    if (!m || !uri || id < 1 || id > 14)
+    if (!m || !uri || !uri[0] || strlen(uri) >= SDP_EXTMAP_URI_LEN || id < 1 || id > 14)
         return RTC_ERR_INVALID;
-    if (m->extmap_count >= SDP_MAX_EXTMAP)
-        return RTC_ERR_INVALID;
+    for (int i = 0; i < m->extmap_count; i++)
+        if (m->extmaps[i].id == id && strcmp(m->extmaps[i].uri, uri) != 0)
+            return RTC_ERR_INVALID;
     /* If URI already present, just update id */
     for (int i = 0; i < m->extmap_count; i++) {
         if (strcmp(m->extmaps[i].uri, uri) == 0) {
             m->extmaps[i].id = id;
             return RTC_OK;
         }
+        if (m->extmap_count >= SDP_MAX_EXTMAP)
+            return RTC_ERR_INVALID;
     }
     m->extmaps[m->extmap_count].id = id;
     size_t ulen = strlen(uri);
