@@ -233,6 +233,13 @@ in `cf054e4`. On macOS arm64:
   fuzzing 1,643,285 inputs, each over 61 seconds, without findings.
 - Benchmark/lifecycle-report contracts passed 23 tests; the optional compiled
   transport smoke is checked separately against each prepared Release build.
+- A separate 1,000-cycle same-process run passed fresh bidirectional decode and
+  exact SCTP delivery on every cycle. Sampling every ten cycles after a
+  100-cycle warmup, maximum RSS increases were 1.047 MiB for the server,
+  0 MiB for the observing client and 0.079 MiB for the rejoining client,
+  within explicit 64/16/16 MiB allowances. Final sampled RSS was below warmup
+  for all three processes. This is sampled growth evidence, not leak-freedom;
+  peaks between samples and growth inside allowances can be missed.
 - Firefox still fails during browser startup with `Could not find profile
   folder`, before loading the application. This is not a Firefox pass.
 
