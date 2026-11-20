@@ -94,6 +94,26 @@ typedef struct video_encoder_ops {
 
 **Frame format:** I420 (YUV 4:2:0 planar)
 
+Native VP8 output has a 112 KiB encoded-frame budget, leaving headroom for
+packet descriptors, negotiated RTP headers and SRTP tags under the transport's
+128 KiB wire-frame cap. libvpx can overshoot CBR substantially on startup:
+640×480 high-entropy input at 500 kbps produced a 209,299-byte initial frame
+in the regression environment. The encoder permits at most one immediate
+forced-keyframe retry before returning anything to RTP; this produced a
+42,707-byte independently decodable frame at the same target. A retry does
+not advance the logical sampling timestamp twice. If both attempts exceed
+the budget, encoding returns `RTC_ERR_NOMEM` and retains a keyframe request
+for the next input. Arbitrary higher-resolution/high-entropy profiles are
+not guaranteed to fit; no partial oversized frame is silently published.
+The startup quality/extra bounded encoding work is an intentional trade-off
+for the existing transport memory profile, not a simulcast policy.
+
+The pipeline no longer sleeps between fragments: bounded scheduling belongs
+to the transport. If fragment submission fails before its marker, it calls
+`rtc_rtp_sender_discard_frame` and consumes the abandoned frame's sampling
+interval. A failed timestamp therefore cannot permanently reject all later
+frames, and SRTP sequence/replay/nonce state is never reset for recovery.
+
 ### Audio Codec (`audio_codec.h/c`, `codec_opus.c`)
 
 Same vtable pattern as video codecs.

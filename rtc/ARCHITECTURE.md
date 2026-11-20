@@ -111,18 +111,41 @@ routing transports default to immediate sends. Composed streams explicitly
 identify video from negotiated media kind, never a fixed payload type.
 Audio, RTCP, ICE, DTLS and SCTP bypass the video queue.
 
-The transport protects RTP once, returns that ciphertext to the caller's
-bounded NACK history, and stages video until its marker. Dynamic storage is
+The transport protects RTP once and returns that ciphertext to the caller's
+bounded NACK history. Dynamic storage is
 limited to 256 KiB of wire data, 1,024 packets, 128 KiB per frame and 32 live
 source records per transport. There are no preallocated packet arrays per
-transport. Partial frames expire after 200 ms; complete frames have a separate
-200 ms queue deadline. Expiry or a write/resource failure discards the frame's
+transport. Native encoded batches stage until their marker, with a 200 ms
+assembly deadline and a separate 200 ms queue deadline after the marker.
+The media pipeline submits batches without fragment sleeps.
+
+SFU transports additionally select `streaming_rtp_pacing`: packets become
+eligible immediately, not after complete-frame reassembly. Each queued packet
+has a 200 ms residence limit measured from **its own** arrival. An incomplete
+frame can assemble for more than 200 ms while its prefix is already on the
+network: it has a sliding 200 ms inter-packet inactivity limit and an absolute
+4,395 ms assembly lease (128 KiB at the supported 100 kbps video floor's 2.5x
+pacing rate, plus 200 ms). Total frame wire bytes remain capped at 128 KiB
+even after earlier packets have drained; streamed input cannot evade this cap.
+Expiry or a write/resource failure discards the frame's
 remaining packets and disables repair for that frame, including any prefix
 already written. It cannot retract a prefix already on the network.
 
-A monotonic token bucket runs at 2.5 times the current video target, with a
-2,400-byte burst and worker timers while work remains. It never sleeps on a
-sender or worker thread. Repair reuses protected bytes, shares this credit,
+A monotonic token bucket normally runs at 2.5 times the current video target.
+Its explicit large-frame policy also permits the queued frame's wire size
+divided by 100 ms: a 128 KiB frame has a 10.49 Mbps serialization allowance,
+not an enlarged burst. This avoids permanently rejecting valid startup or
+scene-change frames just because their size exceeds 200 ms of average media
+rate. Streaming relays also track incoming frame rate, excluding the initial
+2,400-byte burst and capped at this same size-profile peak, to avoid serializing
+an already-paced keyframe a second time. The 2,400-byte token cap, memory caps,
+and 200 ms queue residence limit are unchanged. Sustained overload can still
+drop frames; this allowance is **not** a promise that a hard 500 kbps WAN link
+can deliver 128 KiB within 200 ms. Such a strict path/latency profile requires a
+smaller encoding or a different explicit latency profile.
+
+Worker timers never sleep on a sender or worker thread. Repair reuses
+protected bytes, shares this credit,
 and is allowed only for successful initial writes within 200 ms. Admission
 errors are explicit; asynchronous drops have transport/source counters and
 rate-limited warnings. `RTC_OK` from a paced send means accepted, not delivered.

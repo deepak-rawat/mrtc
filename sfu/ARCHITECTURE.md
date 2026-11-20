@@ -95,6 +95,9 @@ creates new epoch-scoped sessions.
   measurement. Simulcast selection is not provided.
 - Native publisher streams and SFU consumer streams use bounded, frame-aware
   transport pacing by default; audio and control bypass video staging.
+  SFU streaming mode forwards the eligible prefix while the rest of a frame
+  arrives, including frames assembled over more than 200 ms. Its 200 ms
+  packet queue limit is independent of its bounded frame assembly lease.
 - Negotiated single-source REMB and receiver-report AIMD estimates propagate
   the lowest fresh active-subscriber video bound upstream. This deliberately
   chooses common source quality rather than independent subscriber layers;
@@ -111,10 +114,14 @@ addressing and routes room messages; it is not part of RTP forwarding.
 
 `test_sfu_session` exercises real encrypted media/data, live publisher changes,
 restart continuity, codec rejection and actual TWCC feedback. Its real VP8
-regression uses negotiated PT 117, checks both paced legs' actual writes, and
-forces low-rate backlog expiry/recovery while audio and SCTP remain available.
+regression uses negotiated PT 117 and 640×480 high-entropy VP8 at 500 kbps,
+checks both paced legs' actual writes, and exercises incomplete-frame expiry,
+sampling-clock recovery and downstream mid-frame cancellation while audio and
+SCTP remain available. Native encoding retries startup overshoot before RTP.
 Deterministic pacer tests verify token spacing, burst limits, resource bounds,
-partial-frame expiry and repair cancellation without wall-clock sleeps.
+128 KiB atomic / 120,000-byte relayed frame delivery, streamed one-second
+assembly without whole-frame double pacing, partial-frame expiry and repair
+cancellation without sleeps.
 Routing tests
 cover loss/retransmission and wire-history wrap behavior. The real UI
 interoperability suite exercises the engine through the unified server in

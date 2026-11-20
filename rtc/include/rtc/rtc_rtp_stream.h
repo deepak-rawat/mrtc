@@ -78,6 +78,9 @@ uint32_t rtc_rtp_send_stream_max_bitrate(const rtc_rtp_send_stream_t *stream);
 
 int rtc_rtp_send_stream_send(rtc_rtp_send_stream_t *stream, const uint8_t *payload, size_t len,
                              uint32_t samples, bool marker);
+/* Abort a fragmented frame and advance its sampling interval if its marker
+ * was never attempted. Does not reset sequence numbers, SSRC or SRTP state. */
+int rtc_rtp_send_stream_discard_frame(rtc_rtp_send_stream_t *stream, uint32_t samples);
 int rtc_rtp_send_stream_get_target_bitrate(const rtc_rtp_send_stream_t *stream);
 bool rtc_rtp_send_stream_should_keyframe(rtc_rtp_send_stream_t *stream);
 

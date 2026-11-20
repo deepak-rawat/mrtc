@@ -34,6 +34,7 @@ typedef struct endpoint {
     rtc_vp8_depacketizer_t *depacketizer;
     _Atomic unsigned decoded_frames;
     _Atomic unsigned decode_errors;
+    int video_width, video_height;
 } endpoint_t;
 
 typedef struct {
@@ -147,7 +148,8 @@ static void received_video(const uint8_t *data, size_t len, uint16_t seq, uint32
                                 &frame_len, &keyframe) == RTC_OK) {
             video_frame_t decoded;
             if (video_decode(&endpoint->decoder, frame, (int)frame_len, &decoded) == RTC_OK &&
-                decoded.width == 160 && decoded.height == 120)
+                decoded.width == (endpoint->video_width ? endpoint->video_width : 160) &&
+                decoded.height == (endpoint->video_height ? endpoint->video_height : 120))
                 atomic_fetch_add(&endpoint->decoded_frames, 1);
             else
                 atomic_fetch_add(&endpoint->decode_errors, 1);
@@ -577,9 +579,9 @@ static int send_keyframe(rtc_rtp_sender_t *sender, video_encoder_t *encoder,
         rc = video_encode(encoder, frame, &encoded);
     if (rc != RTC_OK)
         return rc;
-    rtc_vp8_payload_t payloads[64];
+    rtc_vp8_payload_t payloads[128];
     int count;
-    rc = rtc_vp8_packetize(encoded.data, (size_t)encoded.len, true, payloads, 64, &count);
+    rc = rtc_vp8_packetize(encoded.data, (size_t)encoded.len, true, payloads, 128, &count);
     if (rc != RTC_OK)
         return rc;
     if (count < 3)
@@ -594,20 +596,9 @@ static int send_keyframe(rtc_rtp_sender_t *sender, video_encoder_t *encoder,
     return RTC_OK;
 }
 
-typedef struct {
-    rtc_rtp_sender_t *sender;
-    uint32_t bps;
-} sender_rate_t;
-
-static void set_sender_rate(void *user) {
-    sender_rate_t *rate = user;
-    rtc_rtp_send_stream_set_max_bitrate(rate->sender->stream, rate->bps);
-}
-
-static void constrain_subscription(void *user) {
+static void pause_subscription(void *user) {
     sfu_session_t *session = user;
-    session->last_allocation_ms = rtc_time_ms();
-    (void)rtc_consumer_set_bitrate_allocation(session->consumers[0], 1000);
+    rtc_consumer_pause(session->consumers[0]);
 }
 
 TEST(paced_real_vp8_both_sfu_legs_bound_queue_age_and_recover) {
@@ -619,8 +610,11 @@ TEST(paced_real_vp8_both_sfu_legs_bound_queue_age_and_recover) {
                                                      .user = &fixture});
     ASSERT(fixture.sfu != NULL);
     endpoint_t publisher = {.pc = rtc_peer_connection_create(NULL), .id = "publisher", .epoch = 1};
-    endpoint_t subscriber = {
-        .pc = rtc_peer_connection_create(NULL), .id = "subscriber", .epoch = 1};
+    endpoint_t subscriber = {.pc = rtc_peer_connection_create(NULL),
+                             .id = "subscriber",
+                             .epoch = 1,
+                             .video_width = 640,
+                             .video_height = 480};
     fixture.endpoints[0] = &publisher;
     fixture.endpoints[1] = &subscriber;
     ASSERT(publisher.pc && subscriber.pc);
@@ -654,18 +648,19 @@ TEST(paced_real_vp8_both_sfu_legs_bound_queue_age_and_recover) {
     ASSERT(subscription && subscription->consumers[0]);
     video_encoder_t encoder;
     video_frame_t frame;
-    ASSERT_EQ(video_encoder_create(&encoder, "VP8", 160, 120, 1000, 30), RTC_OK);
-    ASSERT_EQ(video_frame_alloc(&frame, 160, 120), RTC_OK);
+    ASSERT_EQ(video_encoder_create(&encoder, "VP8", 640, 480, 500, 30), RTC_OK);
+    ASSERT_EQ(video_frame_alloc(&frame, 640, 480), RTC_OK);
     uint32_t random = 1;
     for (int y = 0; y < frame.height; y++)
         for (int x = 0; x < frame.width; x++) {
             random = random * 1664525u + 1013904223u;
             frame.planes[0][y * frame.stride[0] + x] = (uint8_t)(random >> 24);
         }
-    memset(frame.planes[1], 128, 80 * 60);
-    memset(frame.planes[2], 128, 80 * 60);
+    memset(frame.planes[1], 128, 320 * 240);
+    memset(frame.planes[2], 128, 320 * 240);
     unsigned packets = 0;
     ASSERT_EQ(send_keyframe(video, &encoder, &frame, &packets), RTC_OK);
+    ASSERT(packets > 24); /* More than the old 200 ms / 1.25 Mbps service budget. */
     ASSERT(wait_count(&fixture, &subscriber.decoded_frames, 1));
     rtc_transport_stats_t up, down;
     ASSERT_EQ(rtc_transport_get_stats(publisher.pc->runtime_transport, &up), RTC_OK);
@@ -676,10 +671,8 @@ TEST(paced_real_vp8_both_sfu_legs_bound_queue_age_and_recover) {
     ASSERT_EQ(down.rtp_packets_dropped, 0);
     ASSERT_EQ(atomic_load(&subscriber.decode_errors), 0);
 
-    sender_rate_t rate = {.sender = video, .bps = 1000};
-    ASSERT_EQ(rtc_transport_invoke(publisher.pc->runtime_transport, set_sender_rate, &rate),
-              RTC_OK);
-    ASSERT_EQ(send_keyframe(video, &encoder, &frame, &packets), RTC_OK);
+    const uint8_t incomplete[] = {0x10, 0x00};
+    ASSERT_EQ(rtc_rtp_sender_send(video, incomplete, sizeof(incomplete), 0, false), RTC_OK);
     ASSERT_EQ(rtc_transport_get_stats(publisher.pc->runtime_transport, &up), RTC_OK);
     ASSERT(up.rtp_packets_queued > 0);
     unsigned before_audio = atomic_load(&subscriber.audio_packets);
@@ -699,39 +692,39 @@ TEST(paced_real_vp8_both_sfu_legs_bound_queue_age_and_recover) {
     ASSERT_EQ(up.rtp_packets_queued, 0);
     ASSERT(up.rtp_frames_dropped > 0);
 
-    rate.bps = 500000;
-    ASSERT_EQ(rtc_transport_invoke(publisher.pc->runtime_transport, set_sender_rate, &rate),
-              RTC_OK);
+    ASSERT_EQ(rtc_rtp_sender_discard_frame(video, 3000), RTC_OK);
     ASSERT_EQ(send_keyframe(video, &encoder, &frame, &packets), RTC_OK);
     ASSERT(wait_count(&fixture, &subscriber.decoded_frames, 2));
     ASSERT_EQ(rtc_transport_get_stats(subscription->transport, &down), RTC_OK);
     uint64_t prior_drops = down.rtp_frames_dropped;
+    uint64_t prior_packets = down.rtp_packets_sent;
     ASSERT_EQ(send_keyframe(video, &encoder, &frame, &packets), RTC_OK);
-    ASSERT_EQ(rtc_transport_invoke(subscription->transport, constrain_subscription, subscription),
-              RTC_OK);
     deadline = rtc_time_ms() + 1000;
     do {
         ASSERT(pump(&fixture));
         ASSERT_EQ(rtc_transport_get_stats(subscription->transport, &down), RTC_OK);
-        if (down.rtp_frames_dropped > prior_drops && !down.rtp_packets_queued)
+        if (down.rtp_packets_sent > prior_packets)
             break;
         SLEEP_MS(5);
     } while (rtc_time_ms() < deadline);
+    ASSERT(down.rtp_packets_sent > prior_packets);
+    ASSERT_EQ(rtc_transport_invoke(subscription->transport, pause_subscription, subscription),
+              RTC_OK);
+    deadline = rtc_time_ms() + 1000;
+    do {
+        ASSERT_EQ(rtc_transport_get_stats(publisher.pc->runtime_transport, &up), RTC_OK);
+        if (!up.rtp_packets_queued)
+            break;
+        ASSERT(pump(&fixture));
+        SLEEP_MS(5);
+    } while (rtc_time_ms() < deadline);
+    ASSERT_EQ(up.rtp_packets_queued, 0);
+    ASSERT_EQ(rtc_transport_get_stats(subscription->transport, &down), RTC_OK);
     ASSERT(down.rtp_frames_dropped > prior_drops);
     ASSERT_EQ(down.rtp_packets_queued, 0);
-    /* A subsequent frame updates the pacer rate after policy recovery. */
-    ASSERT_EQ(rtc_transport_invoke(publisher.pc->runtime_transport, set_sender_rate, &rate),
-              RTC_OK);
-    deadline = rtc_time_ms() + 2000;
-    while (rtc_time_ms() < deadline && atomic_load(&subscriber.decoded_frames) < 3) {
-        ASSERT_EQ(send_keyframe(video, &encoder, &frame, &packets), RTC_OK);
-        uint64_t next = rtc_time_ms() + 300;
-        while (rtc_time_ms() < next) {
-            ASSERT(pump(&fixture));
-            SLEEP_MS(5);
-        }
-    }
-    ASSERT(atomic_load(&subscriber.decoded_frames) >= 3);
+    rtc_consumer_resume(subscription->consumers[0]);
+    ASSERT_EQ(send_keyframe(video, &encoder, &frame, &packets), RTC_OK);
+    ASSERT(wait_count(&fixture, &subscriber.decoded_frames, 3));
     ASSERT_EQ(atomic_load(&subscriber.decode_errors), 0);
     ASSERT_EQ(rtc_transport_get_stats(subscription->transport, &down), RTC_OK);
     rtc_consumer_stats_t consumer_stats;
@@ -747,7 +740,12 @@ TEST(paced_real_vp8_both_sfu_legs_bound_queue_age_and_recover) {
     ASSERT_EQ(rtc_rtcp_parse(&parsed, report.buf, report.buf_len), RTC_OK);
     ASSERT_EQ(parsed.sr.sender_pkt_count, down.rtp_packets_sent);
     ASSERT_EQ(parsed.sr.sender_oct_count, consumer_stats.bytes_sent);
-    ASSERT(consumer_stats.packets_dropped > 0);
+    /* A streamed prefix can already be on the wire when cancellation runs:
+     * count the abandoned frame, not fictional unsent packets. */
+    ASSERT(down.rtp_frames_dropped > prior_drops);
+    ASSERT_EQ(consumer_stats.packets_queued, 0);
+    rtc_peer_connection_close(publisher.pc);
+    rtc_peer_connection_close(subscriber.pc);
     rtc_peer_connection_destroy(publisher.pc);
     rtc_peer_connection_destroy(subscriber.pc);
     rtc_sfu_destroy(fixture.sfu);

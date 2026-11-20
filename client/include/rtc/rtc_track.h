@@ -44,9 +44,13 @@ typedef struct rtc_rtp_sender rtc_rtp_sender_t;
 typedef struct rtc_rtp_receiver rtc_rtp_receiver_t;
 typedef struct rtc_rtp_transceiver rtc_rtp_transceiver_t;
 
-/* Send a media frame. Builds RTP + SRTP internally (fires on main thread). */
+/* Send one encoded RTP payload. RTP sequencing and protection are serialized
+ * on the transport worker; video payloads may be queued by its bounded pacer. */
 int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t len,
                         uint32_t samples, bool marker);
+/* Abandon a partial frame. Pass its sampling interval unless its final marker
+ * send was already attempted (that attempt already advanced the clock). */
+int rtc_rtp_sender_discard_frame(rtc_rtp_sender_t *sender, uint32_t samples);
 
 /* Get the codec parameters for this sender */
 const rtc_codec_t *rtc_rtp_sender_get_codec(const rtc_rtp_sender_t *sender);

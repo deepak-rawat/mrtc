@@ -403,6 +403,19 @@ static void stream_send_on_worker(void *user) {
         send_stream_send(args->stream, args->payload, args->len, args->samples, args->marker);
 }
 
+static void stream_discard_frame_on_worker(void *user) {
+    stream_send_args_t *args = user;
+    rtc_transport_discard_rtp(args->stream->transport, args->stream->rtp_session.ssrc);
+    args->stream->rtp_session.timestamp += args->samples;
+}
+
+int rtc_rtp_send_stream_discard_frame(rtc_rtp_send_stream_t *stream, uint32_t samples) {
+    if (!stream || !stream->transport)
+        return RTC_ERR_INVALID;
+    stream_send_args_t args = {.stream = stream, .samples = samples};
+    return rtc_transport_invoke(stream->transport, stream_discard_frame_on_worker, &args);
+}
+
 int rtc_rtp_send_stream_send(rtc_rtp_send_stream_t *stream, const uint8_t *payload, size_t len,
                              uint32_t samples, bool marker) {
     if (!stream || !stream->transport)

@@ -109,7 +109,9 @@ the upstream source is inactive.
 
 There is no unbounded per-subscriber queue. Closed/not-ready transports and
 failed sends produce checked failures and drop counters. Opt-in transport
-pacing stages complete video frames with bounded dynamic storage; the generic
+pacing has bounded dynamic storage; SFU streaming mode forwards eligible
+packets before their frame marker, with per-packet queue residence and bounded
+assembly/inactivity limits rather than complete-frame double pacing. The generic
 routing default remains immediate. Queued packets do not inflate public sent
 counters or sender-report packet/octet counts. Dropped/retired queued frames
 cannot be repaired from cached ciphertext.

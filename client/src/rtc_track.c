@@ -17,6 +17,10 @@ int rtc_rtp_sender_send(rtc_rtp_sender_t *sender, const uint8_t *payload, size_t
                   : RTC_ERR_INVALID;
 }
 
+int rtc_rtp_sender_discard_frame(rtc_rtp_sender_t *sender, uint32_t samples) {
+    return sender ? rtc_rtp_send_stream_discard_frame(sender->stream, samples) : RTC_ERR_INVALID;
+}
+
 const rtc_codec_t *rtc_rtp_sender_get_codec(const rtc_rtp_sender_t *sender) {
     return sender ? &sender->codec : NULL;
 }

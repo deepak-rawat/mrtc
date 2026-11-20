@@ -65,7 +65,9 @@ void media_pipeline_remove_send_peer(media_pipeline_t *p, const char *peer_id);
 /* Thread-safe BWE update; zero removes the cap. Other pipeline calls require
  * external serialization. Backpressure rejects whole frames, never queues
  * unbounded media; push returns an error if any peer send/admission fails.
- * With a cap, synchronous fragment pacing waits at most 50 ms per peer/frame. */
+ * Fragment scheduling belongs to the nonblocking transport pacer, not the
+ * encoder thread. Failed partial frames are discarded and their sampling
+ * interval is consumed before attempting the next frame. */
 int media_pipeline_set_peer_bitrate(media_pipeline_t *p, const char *peer_id, uint32_t bitrate_bps);
 
 /* Send streams (local tracks). */

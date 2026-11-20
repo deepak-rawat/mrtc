@@ -1058,6 +1058,7 @@ rtc_transport_t *rtc_transport_create(rtc_worker_t *worker, const rtc_transport_
     transport->initial_outgoing_bitrate_bps = cfg->initial_outgoing_bitrate_bps;
     transport->enable_rtp_pacing = cfg->enable_rtp_pacing;
     transport->pacer.bitrate_bps = cfg->initial_outgoing_bitrate_bps;
+    transport->pacer.streaming = cfg->streaming_rtp_pacing;
     transport->pacer_timer = RTC_WORKER_TIMER_INVALID;
     transport->controlling = cfg->ice_mode == RTC_ICE_MODE_FULL;
     transport->consent_timeout_ms = cfg->consent_timeout_ms ? cfg->consent_timeout_ms : 30000;

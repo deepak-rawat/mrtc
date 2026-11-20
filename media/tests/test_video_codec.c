@@ -176,6 +176,40 @@ TEST(vp8_invalid_codec) {
     printf("    invalid codec correctly rejected\n");
 }
 
+TEST(vp8_high_entropy_startup_and_scene_changes_fit_native_frame_budget) {
+    video_encoder_t encoder;
+    video_decoder_t decoder;
+    video_frame_t input;
+    ASSERT_EQ(video_encoder_create(&encoder, "VP8", 640, 480, 500, 30), RTC_OK);
+    ASSERT_EQ(video_decoder_create(&decoder, "VP8"), RTC_OK);
+    ASSERT_EQ(video_frame_alloc(&input, 640, 480), RTC_OK);
+    uint32_t random = 1;
+    for (unsigned frame = 0; frame < 4; frame++) {
+        for (int y = 0; y < input.height; y++)
+            for (int x = 0; x < input.width; x++) {
+                random = random * 1664525u + 1013904223u;
+                input.planes[0][y * input.stride[0] + x] = (uint8_t)(random >> 24);
+            }
+        memset(input.planes[1], 128, 320 * 240);
+        memset(input.planes[2], 128, 320 * 240);
+        ASSERT_EQ(video_encoder_request_keyframe(&encoder), RTC_OK);
+        video_packet_t encoded;
+        ASSERT_EQ(video_encode(&encoder, &input, &encoded), RTC_OK);
+        ASSERT(encoded.is_keyframe);
+        ASSERT(encoded.len > 33 * 1024);
+        ASSERT(encoded.len <= MEDIA_VIDEO_ENCODED_FRAME_BUDGET);
+        ASSERT_EQ(encoded.timestamp, (frame + 1) * 3000);
+        video_frame_t decoded;
+        ASSERT_EQ(video_decode(&decoder, encoded.data, encoded.len, &decoded), RTC_OK);
+        ASSERT_EQ(decoded.width, 640);
+        ASSERT_EQ(decoded.height, 480);
+        printf("    high-entropy keyframe %u: %d bytes\n", frame, encoded.len);
+    }
+    video_frame_free(&input);
+    video_encoder_destroy(&encoder);
+    video_decoder_destroy(&decoder);
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  Video Codec Tests (VP8)\n");
@@ -188,6 +222,7 @@ int main(void) {
     RUN_TEST(vp8_bitrate_change);
     RUN_TEST(vp8_multiple_frames);
     RUN_TEST(vp8_invalid_codec);
+    RUN_TEST(vp8_high_entropy_startup_and_scene_changes_fit_native_frame_budget);
 
     TEST_SUMMARY();
     return _test_fail_count > 0 ? 1 : 0;

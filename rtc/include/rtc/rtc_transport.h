@@ -76,7 +76,8 @@ typedef struct {
     rtc_ice_mode_t ice_mode;
     bool enable_sctp;
     bool enable_twcc;
-    bool enable_rtp_pacing; /* composed video streams only; raw RTP remains immediate */
+    bool enable_rtp_pacing;    /* composed video streams only; raw RTP remains immediate */
+    bool streaming_rtp_pacing; /* relay mode: do not wait for a complete incoming frame */
     uint32_t initial_outgoing_bitrate_bps;
     uint32_t consent_timeout_ms; /* zero: RFC 7675 default of 30 seconds */
 } rtc_transport_config_t;

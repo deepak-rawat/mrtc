@@ -228,6 +228,162 @@ TEST(protection_failure_aborts_staging_without_double_counting_the_rejection) {
     rtc_rtp_pacer_close(&p);
 }
 
+TEST(large_atomic_frame_has_bounded_serialization_without_a_large_burst) {
+    rtc_rtp_pacer_t p = {.bitrate_bps = 500000};
+    writer_t writer = {.fail_after = -1};
+    uint8_t wire[1200];
+    for (uint16_t seq = 0; seq < 110; seq++) {
+        size_t len = seq == 109 ? RTC_PACER_MAX_FRAME_BYTES - 109 * sizeof(wire) : sizeof(wire);
+        packet(wire, 42, 9000, seq, seq == 109);
+        ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, len, len - 22, 100), RTC_OK);
+    }
+    uint64_t completed = 0;
+    for (uint64_t now = 100; now < 300; now++) {
+        size_t before = writer.bytes;
+        rtc_rtp_pacer_run(&p, now, write_packet, &writer);
+        ASSERT(writer.bytes - before <= RTC_PACER_BURST_BYTES);
+        if (writer.packets == 110) {
+            completed = now;
+            break;
+        }
+    }
+    ASSERT(completed > 100 && completed <= 200);
+    ASSERT_EQ(writer.bytes, RTC_PACER_MAX_FRAME_BYTES);
+    ASSERT_EQ(p.frames_dropped, 0);
+    ASSERT_EQ(p.bytes, 0);
+    printf("    %zu-byte atomic frame: %llu ms, burst <= %u bytes\n", writer.bytes,
+           (unsigned long long)(completed - 100), RTC_PACER_BURST_BYTES);
+    rtc_rtp_pacer_close(&p);
+}
+
+TEST(streamed_frame_assembly_is_not_packet_queue_residence) {
+    rtc_rtp_pacer_t p = {.bitrate_bps = 500000, .streaming = true};
+    writer_t writer = {.fail_after = -1};
+    uint8_t wire[1200];
+    for (uint16_t seq = 0; seq < 100; seq++) {
+        uint64_t now = 100 + (uint64_t)seq * 10;
+        packet(wire, 42, 9000, seq, seq == 99);
+        ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, now), RTC_OK);
+        rtc_rtp_pacer_run(&p, now, write_packet, &writer);
+        ASSERT_EQ(writer.packets, (unsigned)seq + 1);
+        ASSERT_EQ(p.bytes, 0);
+        ASSERT_EQ(rtc_rtp_pacer_pending(&p), seq != 99);
+    }
+    ASSERT_EQ(p.frames_dropped, 0);
+    ASSERT_EQ(writer.bytes, 120000);
+    rtc_rtp_pacer_close(&p);
+}
+
+typedef struct {
+    rtc_rtp_pacer_t *relay;
+    uint64_t now;
+    writer_t output;
+    size_t max_queued;
+} relay_t;
+
+static int relay_packet(const uint8_t *wire, size_t len, void *user) {
+    relay_t *relay = user;
+    int rc = rtc_rtp_pacer_enqueue(relay->relay, wire, len, 1178, relay->now);
+    if (relay->relay->bytes > relay->max_queued)
+        relay->max_queued = relay->relay->bytes;
+    return rc;
+}
+
+TEST(large_native_frame_streams_through_sfu_without_whole_frame_double_pacing) {
+    rtc_rtp_pacer_t native = {.bitrate_bps = 500000};
+    rtc_rtp_pacer_t sfu = {.bitrate_bps = 500000, .streaming = true};
+    relay_t relay = {.relay = &sfu, .output = {.fail_after = -1}};
+    uint8_t wire[1200];
+    for (uint16_t seq = 0; seq < 100; seq++) {
+        packet(wire, 42, 9000, seq, seq == 99);
+        ASSERT_EQ(rtc_rtp_pacer_enqueue(&native, wire, sizeof(wire), 1178, 100), RTC_OK);
+    }
+    uint64_t first = 0, completed = 0;
+    for (relay.now = 100; relay.now < 300; relay.now++) {
+        rtc_rtp_pacer_run(&native, relay.now, relay_packet, &relay);
+        rtc_rtp_pacer_run(&sfu, relay.now, write_packet, &relay.output);
+        if (!first && relay.output.packets)
+            first = relay.now;
+        if (relay.output.packets == 100) {
+            completed = relay.now;
+            break;
+        }
+    }
+    ASSERT_EQ(first, 100);
+    ASSERT(completed > first && completed < 250);
+    ASSERT(relay.max_queued < 120000 / 2);
+    ASSERT_EQ(native.frames_dropped, 0);
+    ASSERT_EQ(sfu.frames_dropped, 0);
+    printf("    120000-byte native/SFU stream: first=%llu ms complete=%llu ms relay_peak=%zu "
+           "bytes\n",
+           (unsigned long long)(first - 100), (unsigned long long)(completed - 100),
+           relay.max_queued);
+    rtc_rtp_pacer_close(&native);
+    rtc_rtp_pacer_close(&sfu);
+}
+
+TEST(streamed_frame_gap_and_stalled_queue_cancel_repairs_and_recover) {
+    rtc_rtp_pacer_t p = {.bitrate_bps = 500000, .streaming = true};
+    writer_t writer = {.fail_after = -1};
+    uint8_t wire[1200];
+    packet(wire, 42, 9000, 0, false);
+    ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, 100), RTC_OK);
+    rtc_rtp_pacer_run(&p, 100, write_packet, &writer);
+    ASSERT_EQ(writer.packets, 1);
+    rtc_rtp_pacer_run(&p, 300, write_packet, &writer);
+    ASSERT(!rtc_rtp_pacer_repair(&p, wire, sizeof(wire), 300));
+    ASSERT_EQ(p.frames_dropped, 1);
+    ASSERT_EQ(p.packets_dropped, 0);
+    packet(wire, 42, 12000, 1, false);
+    ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, 301), RTC_OK);
+    rtc_rtp_pacer_run(&p, 501, write_packet, &writer);
+    ASSERT_EQ(writer.packets, 1);
+    ASSERT_EQ(p.packets_dropped, 1);
+    packet(wire, 42, 15000, 2, true);
+    ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, 502), RTC_OK);
+    rtc_rtp_pacer_run(&p, 502, write_packet, &writer);
+    ASSERT_EQ(writer.packets, 2);
+    rtc_rtp_pacer_close(&p);
+}
+
+TEST(streaming_cannot_evade_total_frame_bytes_or_assembly_lease) {
+    rtc_rtp_pacer_t p = {.bitrate_bps = 500000, .streaming = true};
+    writer_t writer = {.fail_after = -1};
+    uint8_t wire[1200];
+    bool rejected = false;
+    for (uint16_t seq = 0; seq < 120; seq++) {
+        uint64_t now = 100 + (uint64_t)seq * 10;
+        packet(wire, 42, 9000, seq, false);
+        if (rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, now) != RTC_OK) {
+            rejected = true;
+            break;
+        }
+        rtc_rtp_pacer_run(&p, now, write_packet, &writer);
+        ASSERT_EQ(p.bytes, 0);
+    }
+    ASSERT(rejected);
+    ASSERT_EQ(p.frames_dropped, 1);
+    ASSERT(!rtc_rtp_pacer_pending(&p));
+    rtc_rtp_pacer_close(&p);
+    for (uint16_t seq = 0; seq < 50; seq++) {
+        uint64_t now = 2000 + (uint64_t)seq * 100;
+        packet(wire, 42, 12000, seq, false);
+        int rc = rtc_rtp_pacer_enqueue(&p, wire, 12, 0, now);
+        if (now - 2000 >= RTC_PACER_STREAM_ASSEMBLY_MS) {
+            ASSERT_EQ(rc, RTC_ERR_NOMEM);
+            break;
+        }
+        ASSERT_EQ(rc, RTC_OK);
+        rtc_rtp_pacer_run(&p, now, write_packet, &writer);
+    }
+    ASSERT(!rtc_rtp_pacer_pending(&p));
+    packet(wire, 42, 15000, 50, true);
+    ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, 12, 0, 7000), RTC_OK);
+    rtc_rtp_pacer_run(&p, 7000, write_packet, &writer);
+    ASSERT(!rtc_rtp_pacer_pending(&p));
+    rtc_rtp_pacer_close(&p);
+}
+
 typedef struct {
     size_t remaining, live;
 } allocation_t;
@@ -252,30 +408,32 @@ static void limited_release(void *memory, void *user) {
 }
 
 TEST(allocation_failure_cancels_partial_frame_and_recovers) {
-    for (size_t budget = 0; budget <= 3; budget++) {
-        rtc_rtp_pacer_t p = {.bitrate_bps = 384000};
-        allocation_t allocation = {.remaining = budget};
-        ASSERT_EQ(rtc_rtp_pacer_set_allocator(&p, limited_allocate, NULL, &allocation),
-                  RTC_ERR_INVALID);
-        ASSERT_EQ(rtc_rtp_pacer_set_allocator(&p, limited_allocate, limited_release, &allocation),
-                  RTC_OK);
-        uint8_t wire[1200];
-        packet(wire, 42, 9000, 1, true);
-        ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, 100),
-                  budget < 3 ? RTC_ERR_NOMEM : RTC_OK);
-        allocation.remaining = SIZE_MAX;
-        packet(wire, 42, 12000, 2, true);
-        ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, 101), RTC_OK);
-        writer_t writer = {.fail_after = -1};
-        rtc_rtp_pacer_run(&p, 101, write_packet, &writer);
-        ASSERT_EQ(writer.packets, budget < 3 ? 1 : 2);
-        ASSERT_EQ(p.bytes, 0);
-        ASSERT_EQ(p.packets, 0);
-        ASSERT_EQ(rtc_rtp_pacer_set_allocator(&p, NULL, NULL, NULL), RTC_ERR_INVALID);
-        rtc_rtp_pacer_close(&p);
-        ASSERT_EQ(allocation.live, 0);
-        ASSERT_EQ(rtc_rtp_pacer_set_allocator(&p, NULL, NULL, NULL), RTC_OK);
-    }
+    for (unsigned mode = 0; mode < 2; mode++)
+        for (size_t budget = 0; budget <= 3; budget++) {
+            rtc_rtp_pacer_t p = {.bitrate_bps = 384000, .streaming = mode != 0};
+            allocation_t allocation = {.remaining = budget};
+            ASSERT_EQ(rtc_rtp_pacer_set_allocator(&p, limited_allocate, NULL, &allocation),
+                      RTC_ERR_INVALID);
+            ASSERT_EQ(rtc_rtp_pacer_set_allocator(&p, limited_allocate, limited_release,
+                                                  &allocation),
+                      RTC_OK);
+            uint8_t wire[1200];
+            packet(wire, 42, 9000, 1, true);
+            ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, 100),
+                      budget < 3 ? RTC_ERR_NOMEM : RTC_OK);
+            allocation.remaining = SIZE_MAX;
+            packet(wire, 42, 12000, 2, true);
+            ASSERT_EQ(rtc_rtp_pacer_enqueue(&p, wire, sizeof(wire), 1178, 101), RTC_OK);
+            writer_t writer = {.fail_after = -1};
+            rtc_rtp_pacer_run(&p, 101, write_packet, &writer);
+            ASSERT_EQ(writer.packets, budget < 3 ? 1 : 2);
+            ASSERT_EQ(p.bytes, 0);
+            ASSERT_EQ(p.packets, 0);
+            ASSERT_EQ(rtc_rtp_pacer_set_allocator(&p, NULL, NULL, NULL), RTC_ERR_INVALID);
+            rtc_rtp_pacer_close(&p);
+            ASSERT_EQ(allocation.live, 0);
+            ASSERT_EQ(rtc_rtp_pacer_set_allocator(&p, NULL, NULL, NULL), RTC_OK);
+        }
 }
 
 int main(void) {
@@ -288,5 +446,10 @@ int main(void) {
     RUN_TEST(shared_wire_and_packet_limits_cancel_the_whole_failed_frame);
     RUN_TEST(protection_failure_aborts_staging_without_double_counting_the_rejection);
     RUN_TEST(allocation_failure_cancels_partial_frame_and_recovers);
+    RUN_TEST(large_atomic_frame_has_bounded_serialization_without_a_large_burst);
+    RUN_TEST(streamed_frame_assembly_is_not_packet_queue_residence);
+    RUN_TEST(large_native_frame_streams_through_sfu_without_whole_frame_double_pacing);
+    RUN_TEST(streamed_frame_gap_and_stalled_queue_cancel_repairs_and_recover);
+    RUN_TEST(streaming_cannot_evade_total_frame_bytes_or_assembly_lease);
     TEST_SUMMARY();
 }

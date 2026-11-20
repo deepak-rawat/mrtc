@@ -270,6 +270,7 @@ static sfu_session_t *new_session(rtc_sfu_t *sfu, const rtc_sfu_command_t *comma
                                                .ice_mode = RTC_ICE_MODE_LITE,
                                                .enable_twcc = publishing,
                                                .enable_rtp_pacing = true,
+                                               .streaming_rtp_pacing = true,
                                                .initial_outgoing_bitrate_bps = 1500000});
     if (!s->transport) {
         if (s->listener != sfu->listener)

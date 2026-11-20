@@ -83,7 +83,6 @@ struct media_pipeline {
     mp_send_peer_t send_peers[MP_MAX_SEND_PEERS];
     int send_peer_count;
     rtc_mutex_t peer_mutex;
-    rtc_cond_t pacing_cond;
     media_renderer_t renderer;
 
     char default_video_codec[16];
@@ -141,11 +140,6 @@ media_pipeline_t *media_pipeline_create(const media_pipeline_config_t *cfg) {
         free(p);
         return NULL;
     }
-    if (rtc_cond_init(&p->pacing_cond) != RTC_OK) {
-        rtc_mutex_destroy(&p->peer_mutex);
-        free(p);
-        return NULL;
-    }
 
     if (cfg->renderer)
         p->renderer = *cfg->renderer;
@@ -170,7 +164,6 @@ void media_pipeline_destroy(media_pipeline_t *p) {
         video_dump_close(p->dbg.send_dump);
     if (p->dbg.recv_dump)
         video_dump_close(p->dbg.recv_dump);
-    rtc_cond_destroy(&p->pacing_cond);
     rtc_mutex_destroy(&p->peer_mutex);
     free(p);
 }
@@ -381,14 +374,6 @@ static bool has_send_targets(media_pipeline_t *p, bool video) {
     return false;
 }
 
-static void pace_until(media_pipeline_t *p, uint64_t deadline) {
-    rtc_mutex_lock(&p->peer_mutex);
-    uint64_t now;
-    while ((now = rtc_time_ms()) < deadline)
-        rtc_cond_wait_timeout(&p->pacing_cond, &p->peer_mutex, (int)(deadline - now));
-    rtc_mutex_unlock(&p->peer_mutex);
-}
-
 static int push_video_to_stream(media_pipeline_t *p, media_send_stream_t *s,
                                 const video_frame_t *frame) {
     if (!s->active || !s->has_encoder || !has_send_targets(p, true))
@@ -485,27 +470,21 @@ static int push_video_to_stream(media_pipeline_t *p, media_send_stream_t *s,
             }
             sp->budget_bytes -= pkt.len;
         }
-        uint64_t pacing_ms = bitrate ? (uint64_t)pkt.len * 8000 / bitrate : 0;
-        if (pacing_ms > 50)
-            pacing_ms = 50;
-        uint64_t pacing_start = rtc_time_ms();
-        size_t bytes_sent = 0;
         uint32_t send_samples = sp->pending_samples;
         sp->pending_samples = 0;
         for (int i = 0; i < payload_count; i++) {
-            if (pacing_ms)
-                pace_until(p, pacing_start + pacing_ms * bytes_sent / (size_t)pkt.len);
             /* The sender advances its timestamp AFTER sending this packet. */
             rc = rtc_rtp_sender_send(sp->video_sender, payloads[i].data, payloads[i].len,
                                      payloads[i].marker ? send_samples : 0, payloads[i].marker);
             if (rc != RTC_OK) {
                 result = rc;
+                (void)rtc_rtp_sender_discard_frame(sp->video_sender,
+                                                   i == payload_count - 1 ? 0 : send_samples);
                 video_encoder_request_keyframe(&s->video_enc);
                 break;
             }
             s->send_stats.packets_sent++;
             s->send_stats.bytes_sent += payloads[i].len;
-            bytes_sent += payloads[i].len - VP8_PD_SIZE;
         }
     }
 

@@ -82,7 +82,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         if (rtc_media_session_add_receiver(&session, streams[i]) != RTC_OK)
             abort();
     }
-    rtc_rtp_pacer_t pacer = {.bitrate_bps = 384000};
+    rtc_rtp_pacer_t pacer = {.bitrate_bps = 384000, .streaming = (data[0] & 128) != 0};
     fuzz_state_t state = {.remaining = SIZE_MAX};
     if (rtc_rtp_pacer_set_allocator(&pacer, allocate, release, &state) != RTC_OK)
         abort();

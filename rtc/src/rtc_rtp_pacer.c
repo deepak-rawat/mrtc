@@ -6,6 +6,7 @@
 typedef struct rtc_pacer_packet {
     struct rtc_pacer_packet *next;
     size_t len, payload_len;
+    uint64_t queued_ms;
     uint8_t wire[];
 } rtc_pacer_packet_t;
 
@@ -14,9 +15,27 @@ struct rtc_pacer_frame {
     rtc_pacer_source_t *source;
     rtc_pacer_packet_t *head, *tail;
     uint32_t timestamp;
-    uint64_t created_ms, ready_ms;
+    uint64_t created_ms, ready_ms, last_packet_ms;
     size_t bytes;
+    bool queued, complete;
 };
+
+static void unlink_frame(rtc_rtp_pacer_t *p, rtc_pacer_frame_t *f) {
+    if (!f->queued)
+        return;
+    rtc_pacer_frame_t **link = &p->head;
+    rtc_pacer_frame_t *previous = NULL;
+    while (*link && *link != f) {
+        previous = *link;
+        link = &(*link)->next;
+    }
+    if (*link) {
+        *link = f->next;
+        if (p->tail == f)
+            p->tail = previous;
+    }
+    f->queued = false;
+}
 
 struct rtc_pacer_source {
     rtc_pacer_source_t *next;
@@ -74,6 +93,9 @@ static rtc_pacer_source_t *source(const rtc_rtp_pacer_t *p, uint32_t ssrc) {
 }
 
 static void free_frame(rtc_rtp_pacer_t *p, rtc_pacer_frame_t *f, bool dropped) {
+    unlink_frame(p, f);
+    if (f->source->stage == f)
+        f->source->stage = NULL;
     if (dropped) {
         p->frames_dropped++;
         for (size_t i = 0; i < 128; i++)
@@ -97,6 +119,28 @@ static void free_frame(rtc_rtp_pacer_t *p, rtc_pacer_frame_t *f, bool dropped) {
     pacer_release(p, f);
 }
 
+static uint64_t pacing_rate(const rtc_rtp_pacer_t *p) {
+    uint64_t rate = (p->bitrate_bps ? p->bitrate_bps : 1500000ULL) * 5 / 2;
+    /* A bounded serialization allowance, not a larger token burst. A maximum
+     * supported frame can clear an otherwise idle queue in 100 ms. */
+    for (const rtc_pacer_frame_t *f = p->head; f; f = f->next) {
+        uint64_t frame_rate =
+            (f->bytes * 8000ULL + RTC_PACER_SERIALIZATION_MS - 1) / RTC_PACER_SERIALIZATION_MS;
+        if (p->streaming && f->bytes > RTC_PACER_BURST_BYTES && f->last_packet_ms > f->created_ms) {
+            uint64_t arrival_rate =
+                (f->bytes - RTC_PACER_BURST_BYTES) * 8000ULL / (f->last_packet_ms - f->created_ms);
+            uint64_t peak = RTC_PACER_MAX_FRAME_BYTES * 8000ULL / RTC_PACER_SERIALIZATION_MS;
+            if (arrival_rate > peak)
+                arrival_rate = peak;
+            if (arrival_rate > frame_rate)
+                frame_rate = arrival_rate;
+        }
+        if (frame_rate > rate)
+            rate = frame_rate;
+    }
+    return rate;
+}
+
 static void replenish(rtc_rtp_pacer_t *p, uint64_t now) {
     /* Credit is in bit-milliseconds: 2.5 times the media target, capped at two MTUs. */
     const uint64_t cap = RTC_PACER_BURST_BYTES * 8000ULL;
@@ -105,7 +149,7 @@ static void replenish(rtc_rtp_pacer_t *p, uint64_t now) {
         p->clock_valid = true;
     } else {
         uint64_t elapsed = now > p->last_ms ? now - p->last_ms : 0;
-        uint64_t rate = (p->bitrate_bps ? p->bitrate_bps : 1500000ULL) * 5 / 2;
+        uint64_t rate = pacing_rate(p);
         if (elapsed > 1000)
             elapsed = 1000;
         p->credit += elapsed * rate;
@@ -152,16 +196,19 @@ int rtc_rtp_pacer_enqueue(rtc_rtp_pacer_t *p, const uint8_t *wire, size_t len, s
         s->stage->source = s;
         s->stage->timestamp = timestamp;
         s->stage->created_ms = now;
+        s->stage->last_packet_ms = now;
     }
     rtc_pacer_frame_t *f = s->stage;
-    if (now - f->created_ms >= RTC_PACER_STAGE_AGE_MS ||
+    if ((!p->streaming && now - f->created_ms >= RTC_PACER_STAGE_AGE_MS) ||
+        (p->streaming && (now - f->last_packet_ms >= RTC_PACER_STAGE_AGE_MS ||
+                          now - f->created_ms >= RTC_PACER_STREAM_ASSEMBLY_MS)) ||
         len > RTC_PACER_MAX_FRAME_BYTES - f->bytes || len > RTC_PACER_MAX_BYTES - p->bytes ||
         p->packets >= 1024)
         goto failed;
     rtc_pacer_packet_t *packet = pacer_allocate(p, sizeof(*packet) + len, false);
     if (!packet)
         goto failed;
-    *packet = (rtc_pacer_packet_t){.len = len, .payload_len = payload_len};
+    *packet = (rtc_pacer_packet_t){.len = len, .payload_len = payload_len, .queued_ms = now};
     memcpy(packet->wire, wire, len);
     if (f->tail)
         f->tail->next = packet;
@@ -169,13 +216,18 @@ int rtc_rtp_pacer_enqueue(rtc_rtp_pacer_t *p, const uint8_t *wire, size_t len, s
         f->head = packet;
     f->tail = packet;
     f->bytes += len;
+    f->last_packet_ms = now;
     p->bytes += len;
     p->packets++;
     s->sent.packets_queued++;
     if (wire[1] & 0x80) {
         f->ready_ms = now;
+        f->complete = true;
         s->stage = NULL;
         s->complete = true;
+    }
+    if ((p->streaming || f->complete) && !f->queued) {
+        f->queued = true;
         if (p->tail)
             p->tail->next = f;
         else
@@ -199,15 +251,22 @@ rejected:
 void rtc_rtp_pacer_run(rtc_rtp_pacer_t *p, uint64_t now, rtc_pacer_write_fn write, void *user) {
     replenish(p, now);
     for (rtc_pacer_source_t *s = p->sources; s; s = s->next)
-        if (s->stage && now - s->stage->created_ms >= RTC_PACER_STAGE_AGE_MS) {
+        if (s->stage &&
+            ((!p->streaming && now - s->stage->created_ms >= RTC_PACER_STAGE_AGE_MS) ||
+             (p->streaming && (now - s->stage->last_packet_ms >= RTC_PACER_STAGE_AGE_MS ||
+                               now - s->stage->created_ms >= RTC_PACER_STREAM_ASSEMBLY_MS)))) {
             free_frame(p, s->stage, true);
-            s->stage = NULL;
         }
-    while (p->head) {
-        rtc_pacer_frame_t *f = p->head;
-        if (now - f->ready_ms >= RTC_PACER_MAX_AGE_MS) {
-            p->head = f->next;
+    for (rtc_pacer_frame_t *f = p->head, *next; f; f = next) {
+        next = f->next;
+        if (f->head &&
+            now - (p->streaming ? f->head->queued_ms : f->ready_ms) >= RTC_PACER_MAX_AGE_MS)
             free_frame(p, f, true);
+    }
+    rtc_pacer_frame_t *f = p->head;
+    while (f) {
+        if (!f->head) {
+            f = f->next;
             continue;
         }
         rtc_pacer_packet_t *packet = f->head;
@@ -216,8 +275,9 @@ void rtc_rtp_pacer_run(rtc_rtp_pacer_t *p, uint64_t now, rtc_pacer_write_fn writ
             break;
         p->credit -= cost;
         if (write(packet->wire, packet->len, user) != RTC_OK) {
-            p->head = f->next;
+            rtc_pacer_frame_t *next = f->next;
             free_frame(p, f, true);
+            f = next;
             continue;
         }
         rtc_pacer_source_t *s = f->source;
@@ -237,10 +297,13 @@ void rtc_rtp_pacer_run(rtc_rtp_pacer_t *p, uint64_t now, rtc_pacer_write_fn writ
         p->packets--;
         s->sent.packets_queued--;
         f->head = packet->next;
+        if (!f->head)
+            f->tail = NULL;
         pacer_release(p, packet);
-        if (!f->head) {
-            p->head = f->next;
-            pacer_release(p, f);
+        if (!f->head && f->complete) {
+            rtc_pacer_frame_t *next = f->next;
+            free_frame(p, f, false);
+            f = next;
         }
     }
     if (!p->head)
@@ -248,24 +311,28 @@ void rtc_rtp_pacer_run(rtc_rtp_pacer_t *p, uint64_t now, rtc_pacer_write_fn writ
 }
 
 bool rtc_rtp_pacer_pending(const rtc_rtp_pacer_t *p) {
-    return p->packets != 0;
+    return p->packets != 0 || p->head != NULL;
 }
 
 uint32_t rtc_rtp_pacer_delay_ms(const rtc_rtp_pacer_t *p, uint64_t now) {
-    if (!p->head)
+    const rtc_pacer_frame_t *frame = p->head;
+    while (frame && !frame->head)
+        frame = frame->next;
+    if (!frame)
         return 5;
-    if (!p->clock_valid || now - p->head->ready_ms >= RTC_PACER_MAX_AGE_MS)
+    uint64_t queued_ms = p->streaming ? frame->head->queued_ms : frame->ready_ms;
+    if (!p->clock_valid || now - queued_ms >= RTC_PACER_MAX_AGE_MS)
         return 1;
-    uint64_t rate = (p->bitrate_bps ? p->bitrate_bps : 1500000ULL) * 5 / 2;
+    uint64_t rate = pacing_rate(p);
     uint64_t elapsed = now > p->last_ms ? now - p->last_ms : 0;
     if (elapsed > 1000)
         elapsed = 1000;
     uint64_t credit = p->credit + elapsed * rate;
-    uint64_t cost = p->head->head->len * 8000ULL;
+    uint64_t cost = frame->head->len * 8000ULL;
     if (credit >= cost)
         return 1;
     uint64_t delay = (cost - credit + rate - 1) / rate;
-    uint64_t remaining = RTC_PACER_MAX_AGE_MS - (now - p->head->ready_ms);
+    uint64_t remaining = RTC_PACER_MAX_AGE_MS - (now - queued_ms);
     if (delay > remaining)
         delay = remaining;
     /* A stage can complete on another sending thread; keep that latency
@@ -285,16 +352,10 @@ void rtc_rtp_pacer_discard(rtc_rtp_pacer_t *p, uint32_t ssrc) {
     if (s->stage)
         free_frame(p, s->stage, true);
     s->stage = NULL;
-    rtc_pacer_frame_t **link = &p->head;
-    p->tail = NULL;
-    while (*link) {
-        rtc_pacer_frame_t *f = *link;
+    for (rtc_pacer_frame_t *f = p->head, *next; f; f = next) {
+        next = f->next;
         if (f->source == s) {
-            *link = f->next;
             free_frame(p, f, true);
-        } else {
-            p->tail = f;
-            link = &f->next;
         }
     }
     memset(s->history, 0, sizeof(s->history));

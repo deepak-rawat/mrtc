@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define MEDIA_VIDEO_ENCODED_FRAME_BUDGET (112 * 1024)
+
 /* Raw video frame (YUV420 / I420) */
 typedef struct {
     uint8_t *planes[3]; /* Y, U, V plane pointers */

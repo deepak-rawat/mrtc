@@ -3,12 +3,15 @@
 
 #include "rtc_common.h"
 
-#define RTC_PACER_MAX_BYTES       (256 * 1024)
-#define RTC_PACER_MAX_FRAME_BYTES (128 * 1024)
-#define RTC_PACER_MAX_AGE_MS      200
-#define RTC_PACER_STAGE_AGE_MS    200
-#define RTC_PACER_BURST_BYTES     2400
-#define RTC_PACER_MAX_SOURCES     32
+#define RTC_PACER_MAX_BYTES        (256 * 1024)
+#define RTC_PACER_MAX_FRAME_BYTES  (128 * 1024)
+#define RTC_PACER_MAX_AGE_MS       200
+#define RTC_PACER_STAGE_AGE_MS     200
+#define RTC_PACER_BURST_BYTES      2400
+#define RTC_PACER_MAX_SOURCES      32
+#define RTC_PACER_SERIALIZATION_MS 100
+#define RTC_PACER_STREAM_ASSEMBLY_MS \
+    ((RTC_PACER_MAX_FRAME_BYTES * 8000ULL + 249999) / 250000 + RTC_PACER_STAGE_AGE_MS)
 
 typedef struct rtc_pacer_frame rtc_pacer_frame_t;
 typedef struct rtc_pacer_source rtc_pacer_source_t;
@@ -30,6 +33,7 @@ typedef struct {
     uint64_t last_ms, credit;
     uint64_t packets_sent, bytes_sent, packets_dropped, frames_dropped;
     bool clock_valid;
+    bool streaming; /* relay already-paced RTP without waiting for its marker */
     rtc_pacer_allocate_fn allocate;
     rtc_pacer_release_fn release;
     void *allocator_user;

@@ -14,6 +14,7 @@ typedef struct {
     vpx_image_t img;
     int width, height;
     int pts;
+    uint64_t frames;
     int fps;
     bool force_keyframe;
     uint8_t *out_buf;
@@ -26,6 +27,7 @@ static int vp8_enc_init(void *ctx, int w, int h, int bitrate_kbps, int fps) {
     e->height = h;
     e->fps = fps;
     e->pts = 0;
+    e->frames = 0;
     e->force_keyframe = false;
 
     vpx_codec_enc_cfg_t cfg;
@@ -63,7 +65,7 @@ static int vp8_enc_init(void *ctx, int w, int h, int bitrate_kbps, int fps) {
     return RTC_OK;
 }
 
-static int vp8_enc_encode(void *ctx, const video_frame_t *frame, video_packet_t *out) {
+static int vp8_enc_encode_once(void *ctx, const video_frame_t *frame, video_packet_t *out) {
     vp8_encoder_ctx_t *e = (vp8_encoder_ctx_t *)ctx;
 
     /* Copy planes into vpx_image_t */
@@ -107,6 +109,29 @@ static int vp8_enc_encode(void *ctx, const video_frame_t *frame, video_packet_t 
     }
 
     return (out->data) ? RTC_OK : RTC_ERR_GENERIC;
+}
+
+static int vp8_enc_encode(void *ctx, const video_frame_t *frame, video_packet_t *out) {
+    vp8_encoder_ctx_t *e = ctx;
+    uint32_t timestamp = (uint32_t)(++e->frames * 90000 / (unsigned)e->fps);
+    for (unsigned attempt = 0; attempt < 2; attempt++) {
+        int rc = vp8_enc_encode_once(ctx, frame, out);
+        if (rc != RTC_OK)
+            return rc;
+        if (out->len <= MEDIA_VIDEO_ENCODED_FRAME_BUDGET) {
+            out->timestamp = timestamp;
+            return RTC_OK;
+        }
+        /* libvpx can overshoot CBR on startup. Retry as an independent frame
+         * before exposing any fragments or advancing the RTP sampling clock. */
+        e->force_keyframe = true;
+        if (e->frames % (unsigned)e->fps == 1)
+            RTC_LOG_WARN("VP8 frame exceeds %u-byte encoded budget; retrying keyframe",
+                         (unsigned)MEDIA_VIDEO_ENCODED_FRAME_BUDGET);
+    }
+    out->data = NULL;
+    out->len = 0;
+    return RTC_ERR_NOMEM;
 }
 
 static int vp8_enc_set_bitrate(void *ctx, int bitrate_kbps) {
