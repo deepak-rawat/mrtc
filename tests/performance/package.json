@@ -1,0 +1,18 @@
+{
+  "name": "mrtc-performance",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "test": "node --test benchmark.test.mjs benchmark-transport.test.mjs benchmark-suite.test.mjs",
+    "benchmark": "node benchmark.mjs",
+    "benchmark:compare": "node benchmark-compare.mjs",
+    "benchmark:transport:build": "node benchmark-transport.mjs build",
+    "benchmark:transport:smoke": "node benchmark-transport.mjs smoke",
+    "benchmark:transport": "node benchmark-transport.mjs run",
+    "benchmark:suite": "node benchmark-suite.mjs"
+  },
+  "license": "MIT"
+}

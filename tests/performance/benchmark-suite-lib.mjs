@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
-import { readFile } from 'node:fs/promises';
-import { compare, host, integer, percentile } from './benchmark-lib.mjs';
+import { readFile, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { compare, hash, host, integer, percentile } from './benchmark-lib.mjs';
 
 export const releaseOptions = [
     '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_C_FLAGS=', '-DCMAKE_C_FLAGS_RELEASE=-O3 -DNDEBUG',
@@ -10,6 +11,16 @@ export const releaseOptions = [
     '-DMRTC_ENABLE_CLIENT_API=ON', '-DMRTC_ENABLE_ROUTING_API=ON',
     '-DMRTC_ENABLE_TWCC=ON', '-DMRTC_ENABLE_RATE_CONTROL=ON', '-DMRTC_ENABLE_ASAN=OFF',
 ];
+
+export async function toolingIdentity(root) {
+    const names = (await readdir(join(root, 'tests/performance')))
+        .filter(name => /^benchmark.*\.(?:mjs|c)$/.test(name))
+        .map(name => `tests/performance/${name}`)
+        .concat(['fixture.mjs', 'native-client.mjs', 'native-checks.mjs']
+            .map(name => `tests/e2e/${name}`)).sort();
+    return Object.fromEntries(await Promise.all(names.map(async name =>
+        [name, hash(await readFile(join(root, name)))])));
+}
 
 export function suiteSettings(env) {
     return {

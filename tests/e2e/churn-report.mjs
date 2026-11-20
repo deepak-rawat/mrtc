@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, open } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { host, integer, percentile, provenance, resources } from './benchmark-lib.mjs';
+import { host, integer, percentile, provenance, resources } from '../performance/benchmark-lib.mjs';
 
 const names = ['server', 'observer', 'churn'];
 export function churnReportSettings(env, cycles) {

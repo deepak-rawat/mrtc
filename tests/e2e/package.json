@@ -1,0 +1,24 @@
+{
+  "name": "mrtc-e2e",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "install:browser": "node install-browser.mjs",
+    "test": "npm run test:all",
+    "test:browser": "node browser.mjs",
+    "test:browser-native": "node browser-native.mjs",
+    "test:churn": "node churn.mjs",
+    "test:migration": "node migration.mjs",
+    "test:native": "node native.mjs",
+    "test:controller": "node --test controller.test.mjs soak.test.mjs churn-report.test.mjs",
+    "test:all": "npm run test:controller && npm run test:native && npm run test:browser && npm run test:browser-native && npm run test:migration && npm run test:churn",
+    "test:soak": "node soak.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.65.1"
+  },
+  "license": "MIT"
+}

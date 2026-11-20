@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { access, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hash, host, parseReport, provenance, run } from './benchmark-lib.mjs';
 import { assertCompatible, combineEvidence, normalizedProfile, pairedPlan, pressureEvidence,
-    releaseOptions, runOwned, suiteExitCode, suiteSettings } from './benchmark-suite-lib.mjs';
+    releaseOptions, runOwned, suiteExitCode, suiteSettings, toolingIdentity } from './benchmark-suite-lib.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const action = process.argv[2];
@@ -17,21 +17,13 @@ const directory = resolve(root, process.env.MRTC_PERF_DIR);
 const manifestPath = join(directory, 'manifest.json'), comparisonPath = join(directory, 'comparison.json');
 const write = (path, value) => writeFile(path, JSON.stringify(value, null, 2) + '\n',
     { flag: 'wx', mode: 0o600 });
-const node = process.execPath, script = name => join(root, 'tests/interop', name);
+const node = process.execPath, script = name => join(root, 'tests/performance', name);
 const within = (parent, child) => {
     const path = relative(parent, child);
     return !path || (!path.startsWith('..') && !isAbsolute(path));
 };
 let manifest, deadline;
 const entries = [];
-async function toolingIdentity() {
-    const names = (await readdir(join(root, 'tests/interop')))
-        .filter(name => /^benchmark.*\.(?:mjs|c)$/.test(name))
-        .concat(['fixture.mjs', 'native-client.mjs', 'native-checks.mjs']).sort();
-    return Object.fromEntries(await Promise.all(names.map(async name =>
-        [name, hash(await readFile(script(name)))])));
-}
-
 async function command(command, args, label, env = process.env, timeoutMs = 600000) {
     try {
         return await runOwned(command, args, { cwd: root, env,
@@ -90,7 +82,7 @@ async function validateSource(source, expectedRef) {
 
 async function prepare(buildProjects) {
     const settings = suiteSettings(process.env);
-    const tooling = await toolingIdentity();
+    const tooling = await toolingIdentity(root);
     deadline = Date.now() + settings.timeoutSeconds * 1000;
     await mkdir(dirname(directory), { recursive: true });
     await mkdir(directory); // Never reuse a partially completed preparation or old reports.
@@ -149,7 +141,7 @@ async function prepare(buildProjects) {
         preparedAt: new Date().toISOString(), host: host(), settings, releaseOptions, variants, tooling,
         compatibility: { matched: true, profile: variants.baseline.profile },
         priorEvidence, warning: 'Preparation is not a measurement/pass. Coordinate an exclusive frozen-source window before run.' };
-    assert.deepEqual(await toolingIdentity(), tooling, 'Benchmark/controller sources changed during preparation');
+    assert.deepEqual(await toolingIdentity(root), tooling, 'Benchmark/controller sources changed during preparation');
     await write(manifestPath, manifest);
     console.log(`Prepared/verified both variants: ${manifestPath}`);
 }
@@ -167,7 +159,7 @@ async function loadManifest() {
 }
 
 async function verifyFrozen() {
-    assert.deepEqual(await toolingIdentity(), manifest.tooling, 'Benchmark/controller sources changed; prepare a new suite');
+    assert.deepEqual(await toolingIdentity(root), manifest.tooling, 'Benchmark/controller sources changed; prepare a new suite');
     for (const value of Object.values(manifest.variants)) {
         assert.deepEqual(await provenance(value.build), value.provenance, 'Prepared source/build changed; prepare a new suite');
         assert.deepEqual(normalizedProfile(value.provenance, await dependencies(value.provenance),
@@ -257,7 +249,7 @@ try {
     }
     if (['run', 'all', 'compare'].includes(action)) {
         const result = combineEvidence(manifest, entries);
-        result.comparisonTooling = await toolingIdentity();
+        result.comparisonTooling = await toolingIdentity(root);
         await write(comparisonPath, result);
         console.log(`Suite ${result.status}: ${comparisonPath}`);
         process.exitCode = suiteExitCode(result);

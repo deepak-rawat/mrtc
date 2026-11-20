@@ -3,9 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, open } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fixture, build } from './fixture.mjs';
-import { NativeClient } from './native-client.mjs';
-import { active, media, exchange, delay } from './native-checks.mjs';
+import { fixture, build } from '../e2e/fixture.mjs';
+import { NativeClient } from '../e2e/native-client.mjs';
+import { active, media, exchange, delay } from '../e2e/native-checks.mjs';
 import { integer, host, resources, provenance, decodedDelta, mediaObservations, percentile } from './benchmark-lib.mjs';
 
 const seconds = integer(process.env, 'MRTC_BENCH_SECONDS', 60, 60, 600);

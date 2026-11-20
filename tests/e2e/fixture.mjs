@@ -7,8 +7,8 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-process.env.PLAYWRIGHT_BROWSERS_PATH ||= resolve(root, 'tests/interop/node_modules/.cache/ms-playwright');
-export const build = resolve(root, process.env.MRTC_BUILD_DIR || 'build/reorg-web');
+process.env.PLAYWRIGHT_BROWSERS_PATH ||= resolve(root, 'tests/e2e/node_modules/.cache/ms-playwright');
+export const build = resolve(root, process.env.MRTC_BUILD_DIR || 'build');
 export async function until(predicate, label, timeout = 30000) {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
@@ -56,7 +56,7 @@ export async function fixture(mode, extra = [], { withBrowser = true } = {}) {
             ...(withBrowser ? ['--web-root', resolve(root, process.env.MRTC_WEB_ROOT || 'app/web/dist')] : []),
             ...extra]);
     async function artifacts(error) {
-        const destination = resolve(process.env.MRTC_TEST_ARTIFACTS || resolve(root, 'build/interop-failures'),
+        const destination = resolve(process.env.MRTC_TEST_ARTIFACTS || resolve(root, 'build/e2e-failures'),
             `${Date.now()}-${mode}-${randomUUID().slice(0, 8)}`);
         const snapshots = {};
         for (const [name, client] of nativeClients) {

@@ -10,7 +10,7 @@ import { splitFlags, parseTransportOutput } from './benchmark-transport-lib.mjs'
 
 const execute = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const harness = resolve(root, 'tests/interop/benchmark-transport.c');
+const harness = resolve(root, 'tests/performance/benchmark-transport.c');
 const action = process.argv[2];
 assert(['build', 'smoke', 'run'].includes(action) && process.argv.length === 3,
     'Usage: node benchmark-transport.mjs build|smoke|run');

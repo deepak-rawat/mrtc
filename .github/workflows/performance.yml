@@ -66,9 +66,9 @@ jobs:
           mkdir -p build
           git worktree add --detach "$MRTC_PERF_BASELINE_SOURCE" "$baseline_commit"
       - name: Test performance parsing and orchestration
-        run: npm --prefix tests/interop run test:benchmark
+        run: npm --prefix tests/performance test
       - name: Build identical Release profiles and run bounded pairs
-        run: node tests/interop/benchmark-suite.mjs all
+        run: node tests/performance/benchmark-suite.mjs all
       - name: Upload all evidence even on regression or inconclusive exit
         if: always()
         uses: actions/upload-artifact@v4

@@ -99,7 +99,7 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
         run: ctest --test-dir build/asan --output-on-failure --timeout 120
 
-  browser-interop:
+  end-to-end:
     timeout-minutes: 15
     runs-on: ubuntu-latest
     env:
@@ -113,7 +113,7 @@ jobs:
           cache: npm
           cache-dependency-path: |
             app/web/package-lock.json
-            tests/interop/package-lock.json
+            tests/e2e/package-lock.json
       - name: Install native dependencies
         run: |
           sudo apt-get update
@@ -130,24 +130,24 @@ jobs:
             -DMRTC_BUILD_DESKTOP=OFF
           cmake --build build/browser --parallel 4 --target mrtc_server mrtc_cli
       - name: Install browser dependencies
-        working-directory: tests/interop
+        working-directory: tests/e2e
         run: |
           npm ci
           npx playwright install --with-deps chromium
-      - name: Verify real UI, native interoperability, migration and churn
-        working-directory: tests/interop
+      - name: Test performance tools
+        run: npm --prefix tests/performance test
+      - name: Verify real UI, native media, migration and churn
+        working-directory: tests/e2e
         env:
           MRTC_BUILD_DIR: ${{ github.workspace }}/build/browser
           MRTC_WEB_ROOT: ${{ github.workspace }}/app/web/dist
-          MRTC_TEST_ARTIFACTS: ${{ github.workspace }}/build/interop-failures
-        run: |
-          npm run test:benchmark
-          npm run test:all
-      - name: Save interoperability failure evidence
+          MRTC_TEST_ARTIFACTS: ${{ github.workspace }}/build/e2e-failures
+        run: npm test
+      - name: Save end-to-end failure evidence
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: browser-interop-failures-chromium
-          path: build/interop-failures
+          name: e2e-failures-chromium
+          path: build/e2e-failures
           if-no-files-found: ignore
 
