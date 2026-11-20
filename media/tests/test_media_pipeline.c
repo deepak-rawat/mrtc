@@ -385,7 +385,7 @@ TEST(pipeline_loss_reorder_keyframe_recovery) {
         ASSERT_EQ(video_encode(&encoder, &input, &packet), RTC_OK);
         if (frame == 2)
             ASSERT(!packet.is_keyframe);
-        rtc_vp8_payload_t payloads[64];
+        video_payload_t payloads[64];
         int count;
         ASSERT_EQ(rtc_vp8_packetize(packet.data, (size_t)packet.len, packet.is_keyframe, payloads,
                                     64, &count),
@@ -436,7 +436,7 @@ TEST(pipeline_padding_does_not_stall_delta_frames) {
         video_packet_t packet;
         ASSERT_EQ(video_encode(&encoder, &input, &packet), RTC_OK);
         ASSERT_EQ(packet.is_keyframe, i == 0);
-        rtc_vp8_payload_t payloads[16];
+        video_payload_t payloads[16];
         int count;
         ASSERT_EQ(rtc_vp8_packetize(packet.data, (size_t)packet.len, packet.is_keyframe, payloads,
                                     16, &count),
@@ -454,6 +454,27 @@ TEST(pipeline_padding_does_not_stall_delta_frames) {
     ASSERT_EQ(media_pipeline_get_recv_stats(p, 0)->depack_frames_dropped, 0);
     video_frame_free(&input);
     video_encoder_destroy(&encoder);
+    media_pipeline_destroy(p);
+}
+
+TEST(pipeline_debug_dump_failure_is_reported) {
+    media_pipeline_t *p = media_pipeline_create(&(media_pipeline_config_t){0});
+    ASSERT(p != NULL);
+    char blocker[80], path[100];
+    snprintf(blocker, sizeof(blocker), "pipeline-debug-%llu.tmp",
+             (unsigned long long)rtc_time_ms());
+    snprintf(path, sizeof(path), "%s/frame.ivf", blocker);
+    FILE *file = fopen(blocker, "wb");
+    ASSERT(file != NULL);
+    fclose(file);
+    media_debug_config_t debug = {
+        .send_dump_path = path, .dump_width = 160, .dump_height = 120, .dump_fps = 30};
+    int rc = media_pipeline_set_debug(p, &debug);
+    remove(blocker);
+    ASSERT(rc != RTC_OK);
+    ASSERT_EQ(media_pipeline_set_debug(p, NULL), RTC_OK);
+    ASSERT(media_pipeline_add_recv_stream(p, "peer", "video", 1, true, "H264") == NULL);
+    ASSERT(media_pipeline_add_recv_stream(p, "peer", "video", 1, true, "VP8") != NULL);
     media_pipeline_destroy(p);
 }
 
@@ -477,6 +498,7 @@ int main(void) {
     RUN_TEST(pipeline_slot_churn_and_capacity);
     RUN_TEST(pipeline_loss_reorder_keyframe_recovery);
     RUN_TEST(pipeline_padding_does_not_stall_delta_frames);
+    RUN_TEST(pipeline_debug_dump_failure_is_reported);
 
     rtc_client_cleanup();
     TEST_SUMMARY();

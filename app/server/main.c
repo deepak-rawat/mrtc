@@ -1,7 +1,7 @@
 /*
  * WebSocket signaling server using libwebsockets.
  *
- * Usage: signaling_server [port]   (default: 8080)
+ * Usage: mrtc_server [port]   (default: 8080)
  */
 #include "meeting.h"
 #include "signaling/signaling_msg.h"

@@ -4,9 +4,9 @@ import { open, mkdir, readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { fixture, build } from './fixture.mjs';
-import { NativeClient } from './native-client.mjs';
-import { active, media, exchange, delay } from './native-checks.mjs';
+import { fixture, build } from '../support/fixture.mjs';
+import { NativeClient } from '../support/native-client.mjs';
+import { active, media, exchange, delay } from '../support/native-checks.mjs';
 
 const execute = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -52,7 +52,7 @@ try {
     const dirty = Boolean((await execute('git', ['status', '--porcelain'], { cwd: root })).stdout);
     await record({ type: 'configuration', commit, dirty, build, platform: process.platform,
         seconds, peers, rooms, sampleMs, serverGrowth, clientGrowthPerProcess: clientGrowth });
-    f = await fixture('sfu', [], { withBrowser: false });
+    f = await fixture('sfu');
     const groups = [];
     for (let room = 0; room < rooms; room++) {
         const group = [];

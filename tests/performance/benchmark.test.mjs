@@ -5,7 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cpuSeconds, integer, parseReport, compare, metricRules, decodedDelta } from './benchmark-lib.mjs';
+import { cpuSeconds, integer } from '../support/process.mjs';
+import { parseReport, compare, metricRules, decodedDelta } from './benchmark-lib.mjs';
 
 const script = fileURLToPath(new URL('./benchmark.mjs', import.meta.url));
 function result(scale = 1) {

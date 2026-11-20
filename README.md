@@ -37,6 +37,8 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 ```sh
 cmake --build build --parallel 4
 ```
+Only `mrtc_server`, `mrtc_cli` and optional `mrtc_desktop` app targets are built;
+legacy `signaling_server`, `chat` and `conf_sdl` targets have been removed.
 Configure a separate build directory for each profile:
 
 | CMake option | Effect |

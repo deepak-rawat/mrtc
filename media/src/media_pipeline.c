@@ -8,7 +8,7 @@
 #include "media/video_stats.h"
 #include "video_dump.h"
 #include "video_debug.h"
-#include "vp8_packetizer.h"
+#include "video_payload.h"
 #include "jitter_buffer.h"
 #include <rtc/rtc_track.h>
 #include <stdio.h>
@@ -17,11 +17,6 @@
 #include <stdatomic.h>
 #include <limits.h>
 
-/* media_send_stream_t and media_recv_stream_t are the public opaque handles.
- * Their layouts diverge: send streams hold only encoder state (~14 KB),
- * recv streams hold the decoder + VP8 reassembly buffer + jitter buffer
- * (~270 KB dominated by the depacketizer). Keeping them split saves the
- * unused side per stream. */
 struct media_send_stream {
     char label[MP_LABEL_SIZE];
     uint32_t ssrc;
@@ -34,6 +29,7 @@ struct media_send_stream {
     video_encoder_t video_enc;
     audio_encoder_t audio_enc;
     bool has_encoder;
+    const video_payload_format_t *video_format;
     uint8_t audio_out[4000];
 
     /* Debug stats */
@@ -50,7 +46,8 @@ struct media_recv_stream {
     /* Decode side */
     video_decoder_t video_dec;
     audio_decoder_t audio_dec;
-    rtc_vp8_depacketizer_t vp8_depack;
+    const video_payload_format_t *video_format;
+    void *video_depacketizer;
     jitter_buffer_t *jb;
     bool has_decoder;
     bool waiting_keyframe;
@@ -92,6 +89,8 @@ struct media_pipeline {
     struct {
         video_dump_t *send_dump;
         video_dump_t *recv_dump;
+        const video_payload_format_t *send_format;
+        const video_payload_format_t *recv_format;
         bool frame_checksum;
         int psnr_interval;
     } dbg;
@@ -127,6 +126,8 @@ static void recv_stream_destroy(media_recv_stream_t *s) {
     }
     if (s->jb)
         jitter_buffer_destroy(s->jb);
+    if (s->video_depacketizer)
+        s->video_format->destroy_depacketizer(s->video_depacketizer);
     s->active = false;
 }
 
@@ -143,9 +144,8 @@ media_pipeline_t *media_pipeline_create(const media_pipeline_config_t *cfg) {
 
     if (cfg->renderer)
         p->renderer = *cfg->renderer;
-    if (cfg->default_video_codec)
-        snprintf(p->default_video_codec, sizeof(p->default_video_codec), "%s",
-                 cfg->default_video_codec);
+    snprintf(p->default_video_codec, sizeof(p->default_video_codec), "%s",
+             cfg->default_video_codec ? cfg->default_video_codec : "VP8");
     if (cfg->default_audio_codec)
         snprintf(p->default_audio_codec, sizeof(p->default_audio_codec), "%s",
                  cfg->default_audio_codec);
@@ -243,13 +243,20 @@ int media_pipeline_set_peer_bitrate(media_pipeline_t *p, const char *peer_id,
 media_send_stream_t *media_pipeline_add_send_stream(media_pipeline_t *p, const char *label,
                                                     bool is_video, const char *codec, int width,
                                                     int height, int fps, int bitrate) {
-    if (!p || !label || !codec || p->send_count >= MP_MAX_SEND_STREAMS || fps > 90000)
+    if (!p || !label || !codec || p->send_count >= MP_MAX_SEND_STREAMS)
         return NULL;
+    const video_payload_format_t *format = is_video ? video_payload_format_find(codec) : NULL;
+    if (is_video && (!format || (fps > 0 && (uint32_t)fps > format->clock_rate) ||
+                     (p->dbg.send_dump && p->dbg.send_format != format))) {
+        RTC_LOG_ERR("Pipeline: invalid video send format, frame rate or dump configuration");
+        return NULL;
+    }
 
     media_send_stream_t *s = &p->send[p->send_count];
     memset(s, 0, sizeof(*s));
     snprintf(s->label, MP_LABEL_SIZE, "%s", label);
     s->is_video = is_video;
+    s->video_format = format;
     s->active = true;
     s->fps = (uint32_t)(fps > 0 ? fps : 30);
     video_send_stats_init(&s->send_stats);
@@ -300,6 +307,11 @@ media_recv_stream_t *media_pipeline_add_recv_stream(media_pipeline_t *p, const c
     media_recv_stream_t *existing = find_recv_by_ssrc(p, ssrc);
     if (existing)
         return existing;
+    const video_payload_format_t *format = is_video ? video_payload_format_find(codec) : NULL;
+    if (is_video && (!format || (p->dbg.recv_dump && p->dbg.recv_format != format))) {
+        RTC_LOG_ERR("Pipeline: invalid video receive format or dump configuration");
+        return NULL;
+    }
 
     int slot = 0;
     while (slot < p->recv_count && p->recv[slot].active)
@@ -312,6 +324,7 @@ media_recv_stream_t *media_pipeline_add_recv_stream(media_pipeline_t *p, const c
     snprintf(s->peer_id, MP_LABEL_SIZE, "%s", peer_id);
     s->ssrc = ssrc;
     s->is_video = is_video;
+    s->video_format = format;
     s->active = true;
     s->waiting_keyframe = is_video;
     video_recv_stats_init(&s->recv_stats);
@@ -321,7 +334,12 @@ media_recv_stream_t *media_pipeline_add_recv_stream(media_pipeline_t *p, const c
             s->active = false;
             return NULL;
         }
-        rtc_vp8_depacketizer_init(&s->vp8_depack);
+        s->has_decoder = true;
+        s->video_depacketizer = format->create_depacketizer();
+        if (!s->video_depacketizer) {
+            recv_stream_destroy(s);
+            return NULL;
+        }
         jitter_buffer_config_t jb_cfg = {.target_delay_ms = 50, .max_delay_ms = 500};
         s->jb = jitter_buffer_create(&jb_cfg);
         s->has_decoder = true;
@@ -427,14 +445,13 @@ static int push_video_to_stream(media_pipeline_t *p, media_send_stream_t *s,
     if (p->dbg.send_dump)
         video_dump_write_frame(p->dbg.send_dump, pkt.data, (size_t)pkt.len, pkt.timestamp);
 
-    /* Fragment into VP8 payloads (no RTP header) */
-    rtc_vp8_payload_t payloads[VP8_MAX_FRAME_PACKETS];
+    video_payload_t payloads[VIDEO_PAYLOAD_MAX_FRAME_PACKETS];
     int payload_count = 0;
-    if (pkt.len <= 0 || pkt.len > VP8_MAX_FRAME_SIZE)
+    if (pkt.len <= 0 || (size_t)pkt.len > s->video_format->max_frame_size)
         rc = RTC_ERR_NOMEM;
     else
-        rc = rtc_vp8_packetize(pkt.data, (size_t)pkt.len, pkt.is_keyframe, payloads,
-                               VP8_MAX_FRAME_PACKETS, &payload_count);
+        rc = s->video_format->packetize(pkt.data, (size_t)pkt.len, pkt.is_keyframe, payloads,
+                                        VIDEO_PAYLOAD_MAX_FRAME_PACKETS, &payload_count);
     if (rc != RTC_OK) {
         s->send_stats.frames_dropped++;
         video_encoder_request_keyframe(&s->video_enc);
@@ -442,7 +459,7 @@ static int push_video_to_stream(media_pipeline_t *p, media_send_stream_t *s,
     }
 
     /* Fan out to all registered send peers */
-    s->timestamp_remainder += 90000;
+    s->timestamp_remainder += s->video_format->clock_rate;
     uint32_t samples = s->timestamp_remainder / s->fps;
     s->timestamp_remainder %= s->fps;
     int result = RTC_OK;
@@ -462,7 +479,7 @@ static int push_video_to_stream(media_pipeline_t *p, media_send_stream_t *s,
             int64_t burst = (int64_t)bitrate / 8;
             if (sp->budget_bytes > burst)
                 sp->budget_bytes = burst;
-            if (sp->budget_bytes < 0 || pkt.len > VP8_MAX_FRAME_SIZE) {
+            if (sp->budget_bytes < 0) {
                 s->send_stats.frames_dropped++;
                 video_encoder_request_keyframe(&s->video_enc);
                 result = RTC_ERR_NOMEM;
@@ -565,19 +582,18 @@ static void recv_video_on_stream(media_pipeline_t *p, media_recv_stream_t *s, co
     }
 
     /* Depacketize */
-    uint32_t dropped = s->vp8_depack.dropped_frames;
-    const uint8_t *frame_data;
-    size_t frame_len;
-    bool is_key;
-
-    int depack_rc = rtc_vp8_depacketize(&s->vp8_depack, data, (size_t)len, seq, timestamp, marker,
-                                        &frame_data, &frame_len, &is_key);
-    if (s->vp8_depack.dropped_frames != dropped) {
-        s->recv_stats.depack_frames_dropped += s->vp8_depack.dropped_frames - dropped;
+    video_payload_frame_t frame;
+    int depack_rc = s->video_format->depacketize(s->video_depacketizer, data, (size_t)len, seq,
+                                                 timestamp, marker, &frame);
+    if (frame.dropped_frames) {
+        s->recv_stats.depack_frames_dropped += frame.dropped_frames;
         s->waiting_keyframe = true;
         request_stream_keyframe(s);
     }
     if (depack_rc == RTC_OK) {
+        const uint8_t *frame_data = frame.data;
+        size_t frame_len = frame.len;
+        bool is_key = frame.is_keyframe;
         if (frame_data && frame_len > 0) {
             if (s->waiting_keyframe && !is_key) {
                 request_stream_keyframe(s);
@@ -616,7 +632,7 @@ static void recv_video_on_stream(media_pipeline_t *p, media_recv_stream_t *s, co
                 s->waiting_keyframe = true;
                 request_stream_keyframe(s);
                 s->recv_stats.frames_decode_failed++;
-                RTC_LOG_WARN("VP8 decode failed (rc=%d, %zu B, key=%d)", rc, frame_len, is_key);
+                RTC_LOG_WARN("Video decode failed (rc=%d, %zu B, key=%d)", rc, frame_len, is_key);
             }
         }
     }
@@ -662,31 +678,70 @@ int media_pipeline_recv_rtp(media_pipeline_t *p, media_recv_stream_t *stream, co
     return RTC_OK;
 }
 
+static const video_payload_format_t *dump_format(media_pipeline_t *p, bool send) {
+    const video_payload_format_t *format = NULL;
+    int count = send ? p->send_count : p->recv_count;
+    for (int i = 0; i < count; i++) {
+        bool active = send ? p->send[i].active : p->recv[i].active;
+        bool video = send ? p->send[i].is_video : p->recv[i].is_video;
+        if (!active || !video)
+            continue;
+        const video_payload_format_t *candidate =
+            send ? p->send[i].video_format : p->recv[i].video_format;
+        if (format && format != candidate) {
+            RTC_LOG_ERR("Pipeline: cannot combine video payload formats in one IVF dump");
+            return NULL;
+        }
+        format = candidate;
+    }
+    if (!format)
+        format = video_payload_format_find(p->default_video_codec);
+    if (format && !format->ivf_fourcc) {
+        RTC_LOG_ERR("Pipeline: selected video format does not support IVF dumps");
+        return NULL;
+    }
+    return format;
+}
+
 int media_pipeline_set_debug(media_pipeline_t *p, const media_debug_config_t *cfg) {
     if (!p)
         return RTC_ERR_INVALID;
 
-    /* Close existing dumps */
-    if (p->dbg.send_dump) {
-        video_dump_close(p->dbg.send_dump);
-        p->dbg.send_dump = NULL;
-    }
-    if (p->dbg.recv_dump) {
-        video_dump_close(p->dbg.recv_dump);
-        p->dbg.recv_dump = NULL;
-    }
-    p->dbg.frame_checksum = false;
-    p->dbg.psnr_interval = 0;
-
+    video_dump_close(p->dbg.send_dump);
+    video_dump_close(p->dbg.recv_dump);
+    memset(&p->dbg, 0, sizeof(p->dbg));
     if (!cfg)
-        return RTC_OK; /* disable everything */
+        return RTC_OK;
 
-    if (cfg->send_dump_path)
-        p->dbg.send_dump = video_dump_open(cfg->send_dump_path, "VP80", cfg->dump_width,
-                                           cfg->dump_height, cfg->dump_fps);
-    if (cfg->recv_dump_path)
-        p->dbg.recv_dump = video_dump_open(cfg->recv_dump_path, "VP80", cfg->dump_width,
-                                           cfg->dump_height, cfg->dump_fps);
+    video_dump_t *send_dump = NULL, *recv_dump = NULL;
+    const video_payload_format_t *send_format = NULL, *recv_format = NULL;
+    if (cfg->send_dump_path) {
+        send_format = dump_format(p, true);
+        if (!send_format)
+            return RTC_ERR_INVALID;
+        send_dump = video_dump_open(cfg->send_dump_path, send_format->ivf_fourcc, cfg->dump_width,
+                                    cfg->dump_height, cfg->dump_fps);
+        if (!send_dump)
+            return RTC_ERR_GENERIC;
+    }
+    if (cfg->recv_dump_path) {
+        recv_format = dump_format(p, false);
+        if (!recv_format) {
+            video_dump_close(send_dump);
+            return RTC_ERR_INVALID;
+        }
+        recv_dump = video_dump_open(cfg->recv_dump_path, recv_format->ivf_fourcc, cfg->dump_width,
+                                    cfg->dump_height, cfg->dump_fps);
+        if (!recv_dump) {
+            video_dump_close(send_dump);
+            return RTC_ERR_GENERIC;
+        }
+    }
+    p->dbg.send_dump = send_dump;
+    p->dbg.recv_dump = recv_dump;
+    p->dbg.send_format = send_format;
+    p->dbg.recv_format = recv_format;
+
     p->dbg.frame_checksum = cfg->enable_frame_checksum;
     p->dbg.psnr_interval = cfg->psnr_sample_interval;
 

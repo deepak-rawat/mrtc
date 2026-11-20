@@ -4,13 +4,13 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 process.env.MRTC_BUILD_DIR ||= 'build';
-const { fixture, until, build } = await import('../../tests/e2e/fixture.mjs');
-const { NativeClient } = await import('../../tests/e2e/native-client.mjs');
+const { fixture, until, build } = await import('../../tests/support/fixture.mjs');
+const { NativeClient } = await import('../../tests/support/native-client.mjs');
 const destination = resolve(build, 'desktop-media-smoke', `${Date.now()}-${process.pid}`);
 await mkdir(destination, { recursive: true });
 const statsFile = resolve(destination, 'desktop.json');
 const room = `desktop-${randomUUID().slice(0, 8)}`;
-const f = await fixture('mesh', [], { withBrowser: false });
+const f = await fixture('mesh');
 let desktop, cli;
 let report;
 try {

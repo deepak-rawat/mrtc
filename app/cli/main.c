@@ -328,14 +328,8 @@ int main(int argc, char **argv) {
         .server = APP_SESSION_DEFAULT_SERVER,
         .name = "native",
         .stun = APP_SESSION_DEFAULT_STUN,
-#ifdef APP_CHAT_COMPAT
-        .video = APP_MEDIA_NONE,
-        .audio = APP_MEDIA_NONE,
-        .data_only = true,
-#else
         .video = APP_MEDIA_SYNTHETIC,
         .audio = APP_MEDIA_SYNTHETIC,
-#endif
     };
     cli_t cli = {0};
     bool interactive = true;

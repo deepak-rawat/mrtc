@@ -601,7 +601,7 @@ static int send_keyframe(rtc_rtp_sender_t *sender, video_encoder_t *encoder,
         rc = video_encode(encoder, frame, &encoded);
     if (rc != RTC_OK)
         return rc;
-    rtc_vp8_payload_t payloads[128];
+    video_payload_t payloads[128];
     int count;
     rc = rtc_vp8_packetize(encoded.data, (size_t)encoded.len, true, payloads, 128, &count);
     if (rc != RTC_OK)

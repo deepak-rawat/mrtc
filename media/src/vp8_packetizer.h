@@ -19,30 +19,23 @@
 #ifndef RTC_MEDIA_VP8_PACKETIZER_H
 #define RTC_MEDIA_VP8_PACKETIZER_H
 
-#include <rtc/rtc_common.h>
+#include "video_payload.h"
 
 /* VP8 payload descriptor size (1-byte minimal form) */
 #define VP8_PD_SIZE 1
 
 /* Safe MTU for RTP payload (matches RTP_MAX_PACKET in rtc_rtp.h) */
-#define VP8_MTU_SIZE 1400
+#define VP8_MTU_SIZE VIDEO_PAYLOAD_MAX_SIZE
 
 /* Max VP8 data per payload (minus descriptor) */
 #define VP8_MAX_FRAG_SIZE (VP8_MTU_SIZE - VP8_PD_SIZE)
 
 /* Max reassembly buffer (640x480 keyframe can be ~100KB+) */
 #define VP8_MAX_FRAME_SIZE    (256 * 1024)
-#define VP8_MAX_FRAME_PACKETS 256
+#define VP8_MAX_FRAME_PACKETS VIDEO_PAYLOAD_MAX_FRAME_PACKETS
 
 /* Max VP8 payload size (descriptor + VP8 data) */
 #define VP8_MAX_PAYLOAD (VP8_PD_SIZE + VP8_MAX_FRAG_SIZE)
-
-/* VP8 payload (descriptor + VP8 data, no RTP header) */
-typedef struct {
-    uint8_t data[VP8_MAX_PAYLOAD]; /* VP8 descriptor + VP8 data */
-    size_t len;
-    bool marker; /* true for last payload of frame */
-} rtc_vp8_payload_t;
 
 /* VP8 depacketizer: reassembles payloads into complete frames */
 typedef struct {
@@ -83,7 +76,7 @@ typedef struct {
  * Returns RTC_OK or error.
  */
 int rtc_vp8_packetize(const uint8_t *frame, size_t frame_len, bool is_keyframe,
-                      rtc_vp8_payload_t *payloads, int max_payloads, int *payload_count);
+                      video_payload_t *payloads, int max_payloads, int *payload_count);
 
 /* Initialize VP8 depacketizer */
 int rtc_vp8_depacketizer_init(rtc_vp8_depacketizer_t *d);

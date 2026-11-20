@@ -75,7 +75,7 @@ int media_pipeline_set_peer_bitrate(media_pipeline_t *p, const char *peer_id, ui
 /*
  * Add a local send stream. Returns an opaque handle, or NULL on error.
  * label: "camera", "screen", "mic", etc.
- * codec: "VP8", "opus"
+ * codec: "VP8", "opus"; video requires both a codec backend and RTP payload format.
  * For video: width, height, fps, bitrate_kbps are used.
  * For audio: width/height/fps ignored, bitrate = bitrate_bps.
  */
@@ -138,7 +138,9 @@ typedef struct {
     int psnr_sample_interval;              /* 0=off, N=every Nth encoded frame */
 } media_debug_config_t;
 
-/* Configure all debug features at once. Pass NULL to disable everything. */
+/* Replace debug configuration; failure leaves debug features disabled.
+ * IVF dumps require compatible video payload formats across their streams.
+ * Pass NULL to disable everything. */
 int media_pipeline_set_debug(media_pipeline_t *p, const media_debug_config_t *cfg);
 
 /* Stats access — app polls these, computes rates by diffing. */

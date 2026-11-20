@@ -19,7 +19,7 @@ TEST(vp8_packetize_small) {
     uint8_t frame[100];
     memset(frame, 0x42, sizeof(frame));
 
-    rtc_vp8_payload_t payloads[16];
+    video_payload_t payloads[16];
     int count = 0;
     int rc = rtc_vp8_packetize(frame, sizeof(frame), true, payloads, 16, &count);
     ASSERT_EQ(rc, RTC_OK);
@@ -45,7 +45,7 @@ TEST(vp8_packetize_large) {
     ASSERT(frame != NULL);
     memset(frame, 0xAB, frame_size);
 
-    rtc_vp8_payload_t payloads[16];
+    video_payload_t payloads[16];
     int count = 0;
     int rc = rtc_vp8_packetize(frame, frame_size, false, payloads, 16, &count);
     ASSERT_EQ(rc, RTC_OK);
@@ -99,7 +99,7 @@ TEST(vp8_roundtrip_small) {
         frame[i] = (uint8_t)(i & 0xFF);
 
     /* Packetize */
-    rtc_vp8_payload_t payloads[4];
+    video_payload_t payloads[4];
     int count = 0;
     int rc = rtc_vp8_packetize(frame, sizeof(frame), true, payloads, 4, &count);
     ASSERT_EQ(rc, RTC_OK);
@@ -133,7 +133,7 @@ TEST(vp8_roundtrip_large) {
     frame[0] = 1;
 
     /* Packetize */
-    rtc_vp8_payload_t payloads[16];
+    video_payload_t payloads[16];
     int count = 0;
     int rc = rtc_vp8_packetize(frame, frame_size, false, payloads, 16, &count);
     ASSERT_EQ(rc, RTC_OK);
@@ -200,7 +200,7 @@ TEST(vp8_multiple_frames) {
         memset(frame, (uint8_t)(f + 1), sizeof(frame));
 
         /* Packetize */
-        rtc_vp8_payload_t payloads[4];
+        video_payload_t payloads[4];
         int count = 0;
         int rc = rtc_vp8_packetize(frame, sizeof(frame), (f == 0), payloads, 4, &count);
         ASSERT_EQ(rc, RTC_OK);
@@ -266,7 +266,7 @@ TEST(vp8_depacketize_long_picid) {
 TEST(vp8_reorder_loss_wrap_and_metadata) {
     uint8_t frame[VP8_MAX_FRAG_SIZE * 2 + 20];
     memset(frame, 0x54, sizeof(frame));
-    rtc_vp8_payload_t payloads[4];
+    video_payload_t payloads[4];
     int count;
     ASSERT_EQ(rtc_vp8_packetize(frame, sizeof(frame), true, payloads, 4, &count), RTC_OK);
     ASSERT_EQ(count, 3);
@@ -343,6 +343,52 @@ TEST(vp8_padding_preserves_sequence_continuity_without_creating_frames) {
     ASSERT_EQ(d.dropped_frames, 1);
 }
 
+TEST(video_payload_format_reassembly_isolated_and_loss_reported) {
+    const video_payload_format_t *format = video_payload_format_find("VP8");
+    ASSERT(format != NULL);
+    ASSERT(video_payload_format_find("H264") == NULL);
+    void *a = format->create_depacketizer();
+    void *b = format->create_depacketizer();
+    ASSERT(a && b);
+    uint8_t input_a[2000] = {0};
+    uint8_t input_b[2000] = {1};
+    memset(input_a + 1, 0x31, sizeof(input_a) - 1);
+    memset(input_b + 1, 0x72, sizeof(input_b) - 1);
+    video_payload_t payloads_a[2], payloads_b[2];
+    int count_a, count_b;
+    ASSERT_EQ(format->packetize(input_a, sizeof(input_a), true, payloads_a, 2, &count_a), RTC_OK);
+    ASSERT_EQ(format->packetize(input_b, sizeof(input_b), false, payloads_b, 2, &count_b), RTC_OK);
+    ASSERT_EQ(count_a, 2);
+    ASSERT_EQ(count_b, 2);
+    video_payload_frame_t frame;
+    ASSERT_EQ(format->depacketize(a, payloads_a[0].data, payloads_a[0].len, 65535, 3000, false,
+                                  &frame),
+              RTC_ERR_GENERIC);
+    ASSERT_EQ(format->depacketize(b, payloads_b[1].data, payloads_b[1].len, 0, 3000, true, &frame),
+              RTC_ERR_GENERIC);
+    ASSERT_EQ(format->depacketize(b, payloads_b[0].data, payloads_b[0].len, 65535, 3000, false,
+                                  &frame),
+              RTC_OK);
+    ASSERT_EQ(frame.len, sizeof(input_b));
+    ASSERT_MEM_EQ(frame.data, input_b, sizeof(input_b));
+    ASSERT(!frame.is_keyframe);
+    ASSERT_EQ(frame.dropped_frames, 0);
+    ASSERT_EQ(format->depacketize(a, payloads_a[1].data, payloads_a[1].len, 0, 3000, true, &frame),
+              RTC_OK);
+    ASSERT_EQ(frame.len, sizeof(input_a));
+    ASSERT_MEM_EQ(frame.data, input_a, sizeof(input_a));
+    ASSERT(frame.is_keyframe);
+    ASSERT_EQ(format->depacketize(a, NULL, 0, 1, 3000, false, &frame), RTC_ERR_GENERIC);
+    ASSERT_EQ(frame.dropped_frames, 0);
+    ASSERT_EQ(format->depacketize(a, payloads_a[0].data, payloads_a[0].len, 2, 6000, false, &frame),
+              RTC_ERR_GENERIC);
+    ASSERT_EQ(format->depacketize(a, payloads_a[0].data, payloads_a[0].len, 4, 9000, false, &frame),
+              RTC_ERR_GENERIC);
+    ASSERT_EQ(frame.dropped_frames, 1);
+    format->destroy_depacketizer(a);
+    format->destroy_depacketizer(b);
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  VP8 RTP Packetization Tests\n");
@@ -361,5 +407,6 @@ int main(void) {
     RUN_TEST(vp8_reorder_loss_wrap_and_metadata);
     RUN_TEST(vp8_padding_preserves_sequence_continuity_without_creating_frames);
 
+    RUN_TEST(video_payload_format_reassembly_isolated_and_loss_reported);
     TEST_SUMMARY();
 }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { fixture, until, stats, decoded, chat } from './fixture.mjs';
-import { NativeClient } from './native-client.mjs';
-import { media, exchange, active } from './native-checks.mjs';
+import { NativeClient } from '../support/native-client.mjs';
+import { media, exchange, active } from '../support/native-checks.mjs';
 
 async function exerciseChat(f, prefix) {
     const a = new NativeClient(f, `${prefix}-a`);

@@ -3,10 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, open } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fixture, build } from '../e2e/fixture.mjs';
-import { NativeClient } from '../e2e/native-client.mjs';
-import { active, media, exchange, delay } from '../e2e/native-checks.mjs';
-import { integer, host, resources, provenance, decodedDelta, mediaObservations, percentile } from './benchmark-lib.mjs';
+import { fixture, build } from '../support/fixture.mjs';
+import { NativeClient } from '../support/native-client.mjs';
+import { active, media, exchange, delay } from '../support/native-checks.mjs';
+import { integer, host, resources, provenance, percentile } from '../support/process.mjs';
+import { decodedDelta, mediaObservations } from './benchmark-lib.mjs';
 
 const seconds = integer(process.env, 'MRTC_BENCH_SECONDS', 60, 60, 600);
 const warmupSeconds = integer(process.env, 'MRTC_BENCH_WARMUP_SECONDS', 15, 5, 120);
@@ -34,7 +35,7 @@ try {
         throughput: 'sum of per-remote-source decoded video frames and audio samples per second',
         latency: 'application SCTP RTT including Node/stdio/controller scheduling; NOT media one-way/capture-to-render latency' };
     await record({ type: 'configuration', schema: 1, runId, startedAt, provenance: identity, host: machine, workload });
-    f = await fixture('sfu', [], { withBrowser: false });
+    f = await fixture('sfu');
     for (let i = 0; i < peers; i++) {
         const client = new NativeClient(f, `benchmark-${i}`);
         clients.push(client);

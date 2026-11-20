@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fixture, build } from './fixture.mjs';
-import { NativeClient } from './native-client.mjs';
-import { active, media, exchange, absent } from './native-checks.mjs';
+import { fixture, build } from '../support/fixture.mjs';
+import { NativeClient } from '../support/native-client.mjs';
+import { active, media, exchange, absent } from '../support/native-checks.mjs';
 import { openChurnReport } from './churn-report.mjs';
 
 const cycles = Number(process.env.MRTC_CHURN_CYCLES || 120);
@@ -18,7 +18,7 @@ try {
         await report.initialize();
     }
     assert(Number.isSafeInteger(cycles) && cycles > 0, 'MRTC_CHURN_CYCLES must be a positive integer');
-    f = await fixture('sfu', [], { withBrowser: false });
+    f = await fixture('sfu');
     const observer = new NativeClient(f, 'observer');
     const churn = new NativeClient(f, 'churn');
     await observer.join(f.url, 'churn', 'Observer', { stun: '' });

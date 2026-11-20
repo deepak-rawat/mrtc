@@ -6,6 +6,7 @@ pkg_check_modules(OPUS REQUIRED IMPORTED_TARGET opus)
 
 set(MEDIA_SOURCES
     src/vp8_packetizer.c
+    src/video_payload.c
     src/video_codec.c
     src/codec_vp8.c
     src/audio_codec.c

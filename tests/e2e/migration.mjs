@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { fixture, until, stats, decoded, chat } from './fixture.mjs';
-import { NativeClient } from './native-client.mjs';
-import { media } from './native-checks.mjs';
+import { NativeClient } from '../support/native-client.mjs';
+import { media } from '../support/native-checks.mjs';
 
 async function nativeReply(native, page, peerId, text) {
     const cursor = native.cursor;

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { test } from 'node:test';
-import { NativeClient, ControlError } from './native-client.mjs';
+import { NativeClient, ControlError } from '../support/native-client.mjs';
 
 function controller(t, script) {
     const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['pipe', 'pipe', 'pipe'] });

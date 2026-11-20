@@ -1,8 +1,8 @@
 /*
  * Pluggable video codec interface via vtable.
  *
- * Supports VP8 (libvpx), with H.264 (OpenH264) and FFmpeg backends
- * addable by implementing the ops vtable.
+ * Codec backends implement these encode/decode ops. RTP payload formats
+ * are selected separately by the media pipeline.
  */
 #ifndef MEDIA_VIDEO_CODEC_H
 #define MEDIA_VIDEO_CODEC_H
@@ -57,7 +57,7 @@ typedef struct {
     const video_decoder_ops_t *ops;
 } video_decoder_t;
 
-/* Factory: create encoder/decoder by codec name ("VP8", "H264") */
+/* Factory by codec name; the shipped video backend is "VP8". */
 int video_encoder_create(video_encoder_t *enc, const char *codec_name, int width, int height,
                          int bitrate_kbps, int fps);
 int video_decoder_create(video_decoder_t *dec, const char *codec_name);

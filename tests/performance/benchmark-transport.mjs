@@ -5,7 +5,7 @@ import { access, mkdir, open, readFile, realpath, stat, writeFile } from 'node:f
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { hash, host, integer, provenance, run } from './benchmark-lib.mjs';
+import { hash, host, integer, provenance, run } from '../support/process.mjs';
 import { splitFlags, parseTransportOutput } from './benchmark-transport-lib.mjs';
 
 const execute = promisify(execFile);

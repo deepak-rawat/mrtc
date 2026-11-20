@@ -7,7 +7,7 @@
 #include <stdio.h>
 
 int rtc_vp8_packetize(const uint8_t *frame, size_t frame_len, bool is_keyframe,
-                      rtc_vp8_payload_t *payloads, int max_payloads, int *payload_count) {
+                      video_payload_t *payloads, int max_payloads, int *payload_count) {
     if (!frame || !payloads || !payload_count)
         return RTC_ERR_INVALID;
     if (frame_len == 0)
@@ -29,7 +29,7 @@ int rtc_vp8_packetize(const uint8_t *frame, size_t frame_len, bool is_keyframe,
 
         bool last = (offset + frag_payload_len >= frame_len);
 
-        rtc_vp8_payload_t *p = &payloads[*payload_count];
+        video_payload_t *p = &payloads[*payload_count];
 
         /* VP8 payload descriptor (1 byte) */
         uint8_t pd = 0;

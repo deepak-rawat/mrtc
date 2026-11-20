@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { fixture } from './fixture.mjs';
-import { NativeClient } from './native-client.mjs';
-import { active, media, exchange, absent, delay, peer } from './native-checks.mjs';
+import { fixture } from '../support/fixture.mjs';
+import { NativeClient } from '../support/native-client.mjs';
+import { active, media, exchange, absent, delay, peer } from '../support/native-checks.mjs';
 
 async function mutedSource(sender, receiver, source) {
     await sender.mute(source, true);
@@ -33,8 +33,7 @@ async function receiveOnly(sender, receiver, mode) {
 async function scenario(mode, threshold) {
     let f;
     try {
-        f = await fixture(mode, threshold ? ['--p2p-max', String(threshold), '--downgrade-delay-ms', '250'] : [],
-            { withBrowser: false });
+        f = await fixture(mode, threshold ? ['--p2p-max', String(threshold), '--downgrade-delay-ms', '250'] : []);
         const clients = [];
         async function add(name, options) {
             const client = new NativeClient(f, name);

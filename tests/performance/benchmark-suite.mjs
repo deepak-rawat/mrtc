@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { access, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { hash, host, parseReport, provenance, run } from './benchmark-lib.mjs';
+import { parseReport } from './benchmark-lib.mjs';
+import { hash, host, provenance, run } from '../support/process.mjs';
 import { assertCompatible, combineEvidence, normalizedProfile, pairedPlan, pressureEvidence,
     releaseOptions, runOwned, suiteExitCode, suiteSettings, toolingIdentity } from './benchmark-suite-lib.mjs';
 

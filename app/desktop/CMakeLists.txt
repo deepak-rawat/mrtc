@@ -1,4 +1,4 @@
-# SDL3 desktop application; conf_sdl retains the historic launch path.
+# SDL3 desktop application.
 
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
@@ -10,30 +10,21 @@ if(NOT TARGET PkgConfig::SDL3)
     return()
 endif()
 
-foreach(desktop_target mrtc_desktop conf_sdl)
-    add_executable(${desktop_target} main.c ui_sdl3.c)
-    if(APPLE)
-        set_target_properties(${desktop_target} PROPERTIES
-            MACOSX_BUNDLE TRUE
-            MACOSX_BUNDLE_BUNDLE_NAME "mrtc Desktop"
-            MACOSX_BUNDLE_GUI_IDENTIFIER "dev.mrtc.desktop"
-            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
-        )
-    endif()
-    if(desktop_target STREQUAL "conf_sdl")
-        set_target_properties(conf_sdl PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "$<1:${CMAKE_BINARY_DIR}/app/conf_sdl>")
-    endif()
-    target_include_directories(${desktop_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    if(MINGW)
-        target_link_options(${desktop_target} PRIVATE -mconsole)
-    endif()
-    target_link_libraries(${desktop_target} PRIVATE
-        mrtc_app_common
-        PkgConfig::SDL3
+add_executable(mrtc_desktop main.c ui_sdl3.c)
+if(APPLE)
+    set_target_properties(mrtc_desktop PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_BUNDLE_NAME "mrtc Desktop"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "dev.mrtc.desktop"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
     )
-    mrtc_set_warnings(${desktop_target})
-endforeach()
+endif()
+target_include_directories(mrtc_desktop PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+if(MINGW)
+    target_link_options(mrtc_desktop PRIVATE -mconsole)
+endif()
+target_link_libraries(mrtc_desktop PRIVATE mrtc_app_common PkgConfig::SDL3)
+mrtc_set_warnings(mrtc_desktop)
 
 if(MRTC_BUILD_TESTS)
     add_executable(test_ui_sdl3 test_ui_sdl3.c ui_sdl3.c)

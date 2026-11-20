@@ -5,7 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mediaObservations, metricRules, normalizeLinkedLibraries, transportMetricRules } from './benchmark-lib.mjs';
+import { normalizeLinkedLibraries } from '../support/process.mjs';
+import { mediaObservations, metricRules, transportMetricRules } from './benchmark-lib.mjs';
 import { assertCompatible, combineEvidence, normalizedProfile, pairedPlan, runOwned,
     suiteExitCode, suiteSettings, toolingIdentity } from './benchmark-suite-lib.mjs';
 
@@ -42,13 +43,14 @@ test('bounded suite defaults and chronological AB/BA/AB plan are explicit', () =
     assert.throws(() => pairedPlan(2), /3..5/);
 });
 
-test('source freezing detects changes and missing dependencies across performance and E2E directories', async () => {
+test('source freezing detects changes and missing dependencies across performance and support directories', async () => {
     const directory = resolve('build', `suite-tooling-${randomUUID()}`);
     await mkdir(resolve(directory, 'tests/performance'), { recursive: true });
-    await mkdir(resolve(directory, 'tests/e2e'), { recursive: true });
+    await mkdir(resolve(directory, 'tests/support'), { recursive: true });
     try {
         const files = ['tests/performance/benchmark.mjs', 'tests/performance/benchmark-transport.c',
-            'tests/e2e/fixture.mjs', 'tests/e2e/native-client.mjs', 'tests/e2e/native-checks.mjs'];
+            'tests/support/fixture.mjs', 'tests/support/native-client.mjs',
+            'tests/support/native-checks.mjs', 'tests/support/process.mjs'];
         for (const file of files) await writeFile(resolve(directory, file), 'original');
         const original = await toolingIdentity(directory);
         for (const file of files) {
@@ -56,7 +58,7 @@ test('source freezing detects changes and missing dependencies across performanc
             assert.notDeepEqual(await toolingIdentity(directory), original);
             await writeFile(resolve(directory, file), 'original');
         }
-        await rm(resolve(directory, 'tests/e2e/fixture.mjs'));
+        await rm(resolve(directory, 'tests/support/fixture.mjs'));
         await assert.rejects(toolingIdentity(directory), { code: 'ENOENT' });
     } finally { await rm(directory, { recursive: true, force: true }); }
 });

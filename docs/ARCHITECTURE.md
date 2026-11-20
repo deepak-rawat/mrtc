@@ -44,13 +44,13 @@ One server process contains separate control and media threads; there is no IPC.
 | [routing/](../routing/) | Router, incoming producers, outgoing consumers and feedback translation |
 | [sfu/](../sfu/) | Publisher/subscription negotiation and media graph ownership |
 | [signaling/](../signaling/) | JSON wire messages and libwebsockets client |
-| [media/](../media/) | VP8/Opus backends, packetization, jitter/recovery and encode/decode pipeline |
+| [media/](../media/) | Codec backends, codec-selected RTP payload formats, jitter/recovery and media pipeline |
 | [conference/](../conference/) | Native participants, sources and active/pending topology graphs |
 | [app/common/](../app/common/) | Session lifecycle, synthetic inputs and thread-safe app snapshots |
 | [app/server/](../app/server/) | HTTP/WS loop, room policy and stable-ID boundary to SFU |
 | [app/desktop/](../app/desktop/), [app/cli/](../app/cli/) | SDL devices/rendering versus headless JSONL/terminal frontend |
 | [app/web/](../app/web/) | TypeScript room controller, browser capture and UI |
-| [tests/](../tests/) | Shared C harness, application E2E orchestration and performance tools |
+| [tests/](../tests/) | Shared C harness and [process/controller support](../tests/support/), E2E scenarios and performance tools |
 
 The client and routing libraries are siblings over `mrtc`, not layers on each
 other. `mrtc_media` adds codecs to the client; `mrtc_conference` adds signaling.
@@ -74,7 +74,7 @@ illustrative, not configured constants.
 |---|---|
 | Alice app thread | [app_session_start](../app/common/app_session.c) validates options, increments `generation`, creates conference/sources, and sets up signaling; accepted is not connected. |
 | Same thread | `conference_join()` binds the signaling client; `signaling_connect()` starts its network thread. Snapshot becomes active while `joined` is still false. |
-| Server control loop | [handle_message](../app/server/signaling_server.c) parses join; `meeting_join_message()` admits Alice and replies with concrete mode, identity, epoch and Bob's ID. |
+| Server control loop | [handle_message](../app/server/main.c) parses join; `meeting_join_message()` admits Alice and replies with concrete mode, identity, epoch and Bob's ID. |
 | Alice signaling thread | [sig_on_event](../conference/src/conference.c) records identity/epoch and calls `build_graph()`; publishing session is `p:1:a1b2c3`. Offers/candidates carry this identity. |
 | Server control to media worker | `meeting_validate_session()` checks ownership; [rtc_sfu_handle](../sfu/src/rtc_sfu.c) copies the command and synchronously invokes `handle_worker()` on the SFU worker. |
 | SFU worker | `publish()` applies SDP, creates producers and an answer; `subscribe()` creates Bob's consumer session `s:1:b4c5d6:a1b2c3`. Events are copied back to the control queue for WS delivery. |
@@ -109,7 +109,9 @@ sequenceDiagram
    video at 15 fps. Real devices push frames through the same conference API.
 2. [conference_push_video](../conference/src/conference.c) pins eligible peer
    sessions and serializes pipeline access. `media_pipeline_push_video()`
-   encodes once, packetizes VP8 and fans out to registered senders.
+   encodes once, selects [Video payload ops](../media/src/video_payload.h) by codec,
+   and fans out to senders. Payload ops own fragment/reassembly state and limits;
+   encoder ops remain independent. VP8 is the sole current video implementation.
 3. [rtc_rtp_sender_send](../client/src/rtc_track.c) delegates to
    `rtc_rtp_send_stream_send()`, which invokes the RTC worker. Fragments of one
    frame share a timestamp; the marker advances a 90 kHz clock by 6000 at 15 fps.

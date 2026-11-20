@@ -2,7 +2,7 @@
 
 Use Linux or macOS with the [native dependencies](../README.md#dependencies-and-build).
 Compare native SFU media and a separate C DTLS/SRTP UDP workload.
-No browser/npm dependencies are needed; native runs reuse the [E2E helpers](../tests/e2e/).
+No browser/npm dependencies are needed; native runs use [shared support](../tests/support/).
 
 ## Recommended procedure
 

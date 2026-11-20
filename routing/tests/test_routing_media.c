@@ -628,7 +628,7 @@ static bool routed_connect(rtc_transport_t *client, rtc_transport_t *server,
 }
 
 static int routed_send(rtc_transport_t *publisher, uint16_t seq, uint32_t timestamp,
-                       const rtc_vp8_payload_t *payload) {
+                       const video_payload_t *payload) {
     rtc_rtp_packet_t packet;
     int rc = rtc_rtp_build(&packet, 96, seq, timestamp, 0x12345678, payload->marker, payload->data,
                            payload->len);
@@ -709,7 +709,7 @@ TEST(routed_loss_wrap_and_bounded_retransmission) {
     rtc_transport_on_rtcp(sfu.transport, routed_publisher_reports, &receiver);
     rtc_transport_on_rtcp(subscriber, routed_downstream_reports, &receiver);
 
-    rtc_vp8_payload_t orphan = {.data = {0, 1}, .len = 2, .marker = false};
+    video_payload_t orphan = {.data = {0, 1}, .len = 2, .marker = false};
     uint16_t source_seq = 1000;
     int received = 1;
     ASSERT_EQ(routed_send(publisher, source_seq, 1, &orphan), RTC_OK);
@@ -735,7 +735,7 @@ TEST(routed_loss_wrap_and_bounded_retransmission) {
         }
     memset(frame.planes[1], 128, 80 * 60);
     memset(frame.planes[2], 128, 80 * 60);
-    rtc_vp8_payload_t payloads[64];
+    video_payload_t payloads[64];
     for (int f = 0; f < 3; f++) {
         video_packet_t encoded;
         ASSERT_EQ(video_encoder_request_keyframe(&encoder), RTC_OK);

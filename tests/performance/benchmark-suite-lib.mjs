@@ -3,7 +3,8 @@ import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { compare, hash, host, integer, percentile } from './benchmark-lib.mjs';
+import { compare } from './benchmark-lib.mjs';
+import { hash, host, integer, percentile } from '../support/process.mjs';
 
 export const releaseOptions = [
     '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_C_FLAGS=', '-DCMAKE_C_FLAGS_RELEASE=-O3 -DNDEBUG',
@@ -16,8 +17,8 @@ export async function toolingIdentity(root) {
     const names = (await readdir(join(root, 'tests/performance')))
         .filter(name => /^benchmark.*\.(?:mjs|c)$/.test(name))
         .map(name => `tests/performance/${name}`)
-        .concat(['fixture.mjs', 'native-client.mjs', 'native-checks.mjs']
-            .map(name => `tests/e2e/${name}`)).sort();
+        .concat(['fixture.mjs', 'native-client.mjs', 'native-checks.mjs', 'process.mjs']
+            .map(name => `tests/support/${name}`)).sort();
     return Object.fromEntries(await Promise.all(names.map(async name =>
         [name, hash(await readFile(join(root, name)))])));
 }
@@ -79,7 +80,7 @@ export async function pressureEvidence() {
             try { value.memoryPressureStall = await readFile('/proc/pressure/memory', 'utf8'); }
             catch (error) { value.memoryPressureStall = { status: 'unknown', reason: String(error) }; }
         } else if (process.platform === 'darwin') {
-            const { run } = await import('./benchmark-lib.mjs');
+            const { run } = await import('../support/process.mjs');
             value.vmStat = await run('/usr/bin/vm_stat', []);
         } else throw Error('Unsupported VM pressure interface');
     } catch (error) { value.status = 'unknown'; value.reason = String(error); }

@@ -2,9 +2,10 @@
 
 Run commands from the repository root after the [build](../README.md).
 Component-local C suites check libraries (including real transport integration);
-application-local suites check policy/UI/control. Root [E2E](../tests/e2e/)
-runners orchestrate real applications with JS/Playwright, not replacement
-signaling. [Performance tools](../tests/performance/) are separate.
+application-local suites check policy/UI/control. [Shared support](../tests/support/)
+owns process/controller/resource helpers; [E2E](../tests/e2e/) adds real scenarios
+and Playwright, not replacement signaling. [Performance tools](../tests/performance/)
+use the same browser-independent support.
 
 ## Choose a suite
 
