@@ -17,7 +17,7 @@
     "test:soak": "node soak.mjs",
     "benchmark": "node benchmark.mjs",
     "benchmark:compare": "node benchmark-compare.mjs",
-    "test:benchmark": "node --test benchmark.test.mjs benchmark-transport.test.mjs benchmark-suite.test.mjs",
+    "test:benchmark": "node --test benchmark.test.mjs benchmark-transport.test.mjs benchmark-suite.test.mjs churn-report.test.mjs",
     "benchmark:transport:build": "node benchmark-transport.mjs build",
     "benchmark:transport:smoke": "node benchmark-transport.mjs smoke",
     "benchmark:transport": "node benchmark-transport.mjs run",

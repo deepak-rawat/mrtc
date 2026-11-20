@@ -374,6 +374,65 @@ exit 1; otherwise shared-runner evidence is exit 2. Run the coordinated local
 suite for controlled follow-up. Neither workflow status nor either latency
 metric establishes capture-to-render media latency, capacity or leak-freedom.
 
+### Optional 1,000-cycle lifecycle resource evidence
+
+`MRTC_CHURN_REPORT` enables JSONL resource evidence for the existing native churn
+runner, using the same owned-process CPU/RSS and actual CMake-source provenance
+helpers as the benchmarks. With the variable absent, its default **120 cycles,
+360,000 ms deadline and all media/message assertions remain unchanged**.
+Reporting requires Linux or macOS and creates a new file without overwriting.
+
+Run only after the final candidate is frozen and a separate resource-test window
+is coordinated; this command is intentionally not part of the default suite:
+
+```sh
+MRTC_BUILD_DIR=/absolute/path/to/frozen-release-build \
+  MRTC_CHURN_CYCLES=1000 MRTC_CHURN_TIMEOUT_MS=3600000 \
+  MRTC_CHURN_REPORT=build/churn-1000.jsonl \
+  MRTC_CHURN_SAMPLE_CYCLES=10 MRTC_CHURN_WARMUP_CYCLES=100 \
+  npm --prefix tests/interop run test:churn
+```
+
+The one-hour timeout is a workload allowance, not a duration/capacity claim.
+The two exact-message exchanges deliberately sleep a combined **500 ms per
+cycle** before counting join, fresh-media, leave and teardown time: the default
+six-minute deadline cannot possibly cover 1,000 cycles.
+
+Each resource sample occurs **after leave, peer-left acknowledgement and observer
+absence**, with the churn session stopped and the observer still joined with
+no remote peers/sources. State evidence records both generations/epochs; stopped
+client snapshot caches are informational, not asserted to represent live routes.
+Sampling defaults to every ten cycles, plus the final cycle. Warmup defaults to
+the smaller of 100 cycles and one tenth of the requested run. The first sampled
+post-warmup state becomes the RSS baseline; at least three post-warmup samples
+are required. `MRTC_CHURN_SAMPLE_CYCLES` accepts 1..1000 and
+`MRTC_CHURN_WARMUP_CYCLES` accepts 0..cycles-1. Invalid/insufficient plans fail
+before native traffic starts.
+
+Reports contain configuration, source/build commit/dirty state and binary hashes,
+cycle timing, cumulative owned server/observer/churn CPU time and RSS, interval CPU
+deltas/percentages, sampled post-warmup RSS deltas, maximum increases, min/max,
+median/MAD variability, and exactly one terminal `churn-result`. CPU percentages
+cover first-to-last sampled states; separately reported post-warmup CPU starts at
+the actual RSS baseline cycle. The first CPU interval is explicitly unavailable,
+not reported as zero. Cycle timing spans join through verified absence, excluding
+resource-report overhead. Missing/invalid measurements, growth-cap violations,
+functional failures, source/build changes or insufficient samples produce a
+failed terminal result/nonzero exit, never partial successful evidence.
+
+Growth limits are **opt-in**: `MRTC_CHURN_SERVER_GROWTH_MIB` and
+`MRTC_CHURN_CLIENT_GROWTH_MIB` (per CLI process) accept integer 0..4096 MiB.
+For example, set both to `0` to fail on **any sampled post-warmup increase**, or
+predeclare explicit nonzero allowances for bounded working-set variation.
+The gate uses the maximum sampled increase, not merely final-minus-baseline;
+a transient excess remains a failure after RSS falls. Unset limits remain
+`growthGate.status: "not-configured"` (or `"partially-configured"` if only one
+class has a limit), not a memory-growth pass. A successful functional/resource
+report alone therefore does not meet a separately defined “without growth”
+release gate. Even `"within-explicit-allowances"` is only sampled RSS evidence:
+review every delta and range/noise alongside VM pressure, repeat if ambiguous,
+and do not claim leak-freedom or absence of allocation growth between samples.
+
 ## Headless native controller
 
 `test:native` and `test:churn` use only Node built-ins: they need no browser,

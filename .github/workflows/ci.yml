@@ -194,6 +194,7 @@ jobs:
       - name: Exercise parsers and media state
         run: |
           mkdir -p build/fuzz/corpus build/fuzz/media-corpus build/fuzz/findings
+          cp rtc/tests/fuzz_corpus/* build/fuzz/corpus/
           build/fuzz/rtc/fuzz_packet_parsers build/fuzz/corpus \
             -max_total_time=60 -max_len=8192 -print_final_stats=1 \
             -artifact_prefix=build/fuzz/findings/
@@ -232,7 +233,7 @@ jobs:
           MRTC_TEST_ARTIFACTS: ${{ github.workspace }}/build/interop-failures
         run: |
           npm --prefix tests/interop run test:controller
-          node --test tests/interop/benchmark*.test.mjs
+          npm --prefix tests/interop run test:benchmark
           npm --prefix tests/interop run test:native
       - name: Save headless failure evidence
         if: failure()
