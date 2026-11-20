@@ -1,0 +1,153 @@
+name: manual validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            shell: bash
+          - os: macos-latest
+            shell: bash
+          - os: windows-latest
+            shell: msys2 {0}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config libssl-dev \
+            libwebsockets-dev libcjson-dev libvpx-dev libopus-dev libusrsctp-dev coturn
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install cmake ninja pkgconf openssl@4 libwebsockets cjson \
+            libvpx opus sdl3 libusrsctp
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-libwebsockets
+            mingw-w64-ucrt-x86_64-cjson
+            mingw-w64-ucrt-x86_64-libvpx
+            mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-sdl3
+            mingw-w64-ucrt-x86_64-usrsctp
+      - name: Configure
+        run: |
+          args=()
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            args+=("-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@4)")
+            args+=("-DCMAKE_PREFIX_PATH=$(brew --prefix)")
+          fi
+          cmake -S . -B build/ci -G Ninja -DCMAKE_BUILD_TYPE=Debug "${args[@]}"
+      - name: Build
+        run: cmake --build build/ci --parallel 4
+      - name: Test
+        run: ctest --test-dir build/ci --output-on-failure --timeout 120
+      - name: Verify server without the native client facade
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S . -B build/server-only -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DMRTC_ENABLE_CLIENT_API=OFF -DMRTC_BUILD_TESTS=OFF
+          cmake --build build/server-only --parallel 2 --target mrtc_server
+
+  address-sanitizer:
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config libssl-dev \
+            libwebsockets-dev libcjson-dev libvpx-dev libopus-dev libusrsctp-dev coturn
+      - name: Configure
+        run: >-
+          cmake -S . -B build/asan -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug -DMRTC_ENABLE_ASAN=ON -DMRTC_ENABLE_UBSAN=ON
+      - name: Build
+        run: cmake --build build/asan --parallel 4
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+        run: ctest --test-dir build/asan --output-on-failure --timeout 120
+
+  browser-interop:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/build/playwright
+      MRTC_BROWSER: chromium
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: |
+            app/web/package-lock.json
+            tests/interop/package-lock.json
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config libssl-dev \
+            libwebsockets-dev libcjson-dev libvpx-dev libopus-dev libusrsctp-dev
+      - name: Build the browser application
+        run: |
+          npm --prefix app/web ci
+          npm --prefix app/web test
+          npm --prefix app/web run build
+      - name: Build local server and native fixtures
+        run: |
+          cmake -S . -B build/browser -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DMRTC_BUILD_DESKTOP=OFF
+          cmake --build build/browser --parallel 4 --target mrtc_server mrtc_cli
+      - name: Install browser dependencies
+        working-directory: tests/interop
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Verify real UI, native interoperability, migration and churn
+        working-directory: tests/interop
+        env:
+          MRTC_BUILD_DIR: ${{ github.workspace }}/build/browser
+          MRTC_WEB_ROOT: ${{ github.workspace }}/app/web/dist
+          MRTC_TEST_ARTIFACTS: ${{ github.workspace }}/build/interop-failures
+        run: |
+          npm run test:benchmark
+          npm run test:all
+      - name: Save interoperability failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-interop-failures-chromium
+          path: build/interop-failures
+          if-no-files-found: ignore
+

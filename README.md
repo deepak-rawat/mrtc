@@ -280,10 +280,17 @@ distribution package). Unix CTests `test_network_turn` / `test_peer_turn`
 exercise relay connectivity when available; packet-format unit tests alone
 are not relay verification.
 
-CI includes Linux/macOS/Windows native builds, Linux ASan/leak checks, the web
-build/contract tests, actual browser/native migration tests and a
-client-disabled SFU build. Remote CI results are separate from local validation.
-macOS ASan runs do not provide LeakSanitizer coverage.
+CI is manual-only: open **Actions > manual validation > Run workflow** on GitHub
+and select a branch. Pushes and pull requests do not start it automatically.
+The five jobs cover Debug builds/tests on Linux, macOS and Windows, Linux
+ASan/UBSan/leak checks, and Chromium interoperability. The Chromium job also
+builds the web app, runs its contract tests, and checks headless native media,
+migration and churn. Linux additionally verifies a client-disabled SFU build.
+Release, Firefox, TSan, fuzzing and soak runs are not part of this simplified
+workflow; their local tooling remains available. The separate performance
+comparison workflow is also manual-only.
+Remote CI results are separate from local validation. macOS ASan runs do not
+provide LeakSanitizer coverage.
 
 ## Build Profiles
 

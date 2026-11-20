@@ -20,6 +20,10 @@
  *     dual-stack v6 socket still works there; only PKTINFO is gated.
  *     TODO-test: Windows PKTINFO.
  */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#  define _GNU_SOURCE
+#endif
+
 #ifdef __APPLE__
 #  define __APPLE_USE_RFC_3542
 #endif
@@ -370,8 +374,12 @@ static int packet_io_fill_bind_addr(struct sockaddr_in6 *bind_addr,
         return RTC_OK;
     }
 
-    if (inet_pton(AF_INET6, cfg->listen_ip, &bind_addr->sin6_addr) == 1)
+    /* Winsock may partially write the output even when IPv6 parsing fails. */
+    struct in6_addr v6;
+    if (inet_pton(AF_INET6, cfg->listen_ip, &v6) == 1) {
+        bind_addr->sin6_addr = v6;
         return RTC_OK;
+    }
 
     struct in_addr v4;
     if (inet_pton(AF_INET, cfg->listen_ip, &v4) == 1) {
@@ -412,11 +420,18 @@ int rtc_packet_io_init_ex(rtc_packet_io_t *t, const rtc_packet_io_config_t *cfg,
     struct sockaddr_in6 bind_addr;
     rc = packet_io_fill_bind_addr(&bind_addr, cfg);
     if (rc != RTC_OK) {
+        RTC_LOG_ERR("Transport: invalid listen address '%s'", cfg->listen_ip);
         rtc_close_socket(s);
         return rc;
     }
     if (bind(s, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
-        RTC_LOG_ERR("Transport: bind failed");
+#ifdef _WIN32
+        int error = WSAGetLastError();
+#else
+        int error = errno;
+#endif
+        RTC_LOG_ERR("Transport: bind failed on [%s]:%u (socket error %d)",
+                    cfg && cfg->listen_ip ? cfg->listen_ip : "::", cfg ? cfg->port : 0, error);
         rtc_close_socket(s);
         return RTC_ERR_SOCKET;
     }

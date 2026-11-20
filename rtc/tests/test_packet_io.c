@@ -302,6 +302,39 @@ TEST(transport_v6_dualstack_socket) {
     rtc_packet_io_close(&t);
 }
 
+TEST(transport_explicit_loopback_bind) {
+    const char *listen_ips[] = {"127.0.0.1", "::1", "::ffff:127.0.0.1"};
+    const char *bound_ips[] = {"::ffff:127.0.0.1", "::1", "::ffff:127.0.0.1"};
+    for (size_t i = 0; i < sizeof(listen_ips) / sizeof(listen_ips[0]); i++) {
+        rtc_packet_io_t t;
+        rtc_packet_io_config_t cfg = {.listen_ip = listen_ips[i]};
+        g_recv_count = 0;
+        ASSERT_EQ(rtc_packet_io_init_ex(&t, &cfg, test_recv_callback, NULL), RTC_OK);
+        g_drain_target = &t;
+
+        rtc_addr_t local;
+        ASSERT_EQ(rtc_packet_io_get_local_addr(&t, &local), RTC_OK);
+        const struct sockaddr_in6 *bound = (const struct sockaddr_in6 *)&local.addr;
+        struct in6_addr expected;
+        ASSERT_EQ(inet_pton(AF_INET6, bound_ips[i], &expected), 1);
+        ASSERT_EQ(bound->sin6_family, AF_INET6);
+        ASSERT(memcmp(&bound->sin6_addr, &expected, sizeof(expected)) == 0);
+        ASSERT(ntohs(bound->sin6_port) > 0);
+
+        rtc_addr_t self;
+        ASSERT_EQ(rtc_addr_from_string(&self, listen_ips[i], ntohs(bound->sin6_port)), RTC_OK);
+        uint8_t packet[12] = {0x80, 96};
+        ASSERT_EQ(rtc_packet_io_send(&t, packet, sizeof(packet), &self), RTC_OK);
+        ASSERT(wait_for_recv(1, 2000));
+        ASSERT_EQ((int)g_recv_type, (int)RTC_PKT_RTP);
+        ASSERT_EQ(g_recv_len, sizeof(packet));
+        ASSERT(memcmp(g_recv_buf, packet, sizeof(packet)) == 0);
+
+        rtc_packet_io_close(&t);
+        g_drain_target = NULL;
+    }
+}
+
 TEST(transport_v4_sender_seen_as_v4) {
     rtc_packet_io_t t;
     g_recv_count = 0;
@@ -560,6 +593,7 @@ int main(void) {
     RUN_TEST(transport_send_to_remote);
     RUN_TEST(transport_classify_rtcp);
     RUN_TEST(transport_v6_dualstack_socket);
+    RUN_TEST(transport_explicit_loopback_bind);
     RUN_TEST(transport_v4_sender_seen_as_v4);
     RUN_TEST(transport_v6_sender_seen_as_v6);
     RUN_TEST(transport_socket_leak_regression);
