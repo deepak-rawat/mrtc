@@ -1,0 +1,90 @@
+name: manual bounded performance comparison
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: Same-repository pre-hardening baseline ref
+        required: true
+        default: "9a9319b"
+        type: string
+      warmup_seconds:
+        description: Fixed media warmup (5..120 seconds)
+        default: "60"
+        type: string
+      measurement_seconds:
+        description: Fixed media steady-state interval (60..300 seconds)
+        default: "120"
+        type: string
+      repeats:
+        description: Bounded paired repeats (3..5, alternating AB/BA)
+        default: "3"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manual-performance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      BASELINE_REF: "${{ inputs.baseline_ref }}"
+      MRTC_PERF_BASELINE_REF: "${{ inputs.baseline_ref }}"
+      MRTC_PERF_CANDIDATE_REF: "${{ github.sha }}"
+      MRTC_PERF_WARMUP_SECONDS: "${{ inputs.warmup_seconds }}"
+      MRTC_PERF_SECONDS: "${{ inputs.measurement_seconds }}"
+      MRTC_PERF_REPEATS: "${{ inputs.repeats }}"
+      MRTC_PERF_SHARED_RUNNER: "1"
+      MRTC_PERF_TIMEOUT_SECONDS: "3600"
+      MRTC_PERF_BUILD_JOBS: "4"
+      MRTC_PERF_DIR: build/performance-evidence
+      MRTC_PERF_BASELINE_SOURCE: build/performance-baseline-source
+      MRTC_PERF_CANDIDATE_SOURCE: "."
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install one shared set of Release dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config libssl-dev \
+            libwebsockets-dev libcjson-dev libvpx-dev libopus-dev libusrsctp-dev
+      - name: Resolve same-repository baseline without shell interpolation
+        shell: bash
+        run: |
+          baseline_commit="$(git rev-parse --verify --end-of-options "${BASELINE_REF}^{commit}")"
+          mkdir -p build
+          git worktree add --detach "$MRTC_PERF_BASELINE_SOURCE" "$baseline_commit"
+      - name: Test performance parsing and orchestration
+        run: npm --prefix tests/interop run test:benchmark
+      - name: Build identical Release profiles and run bounded pairs
+        run: node tests/interop/benchmark-suite.mjs all
+      - name: Upload all evidence even on regression or inconclusive exit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/performance-evidence/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Explain advisory shared-runner results
+        if: always()
+        shell: bash
+        run: |
+          printf '%s\n' \
+            '## Bounded performance evidence' \
+            'Review comparison.json and every raw repeat, pressure capture and build log in the artifact.' \
+            'Shared-runner CPU, memory pressure and scheduling are uncontrolled: results are advisory/inconclusive, not production certification.' \
+            'SCTP/controller RTT and transport/socket/worker one-way timing are distinct. Neither measures media capture-to-render latency.' \
+            'Exit 1 flags regression/functional/comparability failures; exit 2 flags insufficient or noisy evidence. Both preserve artifacts.' \
+            >> "$GITHUB_STEP_SUMMARY"

@@ -232,7 +232,7 @@ jobs:
           MRTC_TEST_ARTIFACTS: ${{ github.workspace }}/build/interop-failures
         run: |
           npm --prefix tests/interop run test:controller
-          node --test tests/interop/benchmark.test.mjs
+          node --test tests/interop/benchmark*.test.mjs
           npm --prefix tests/interop run test:native
       - name: Save headless failure evidence
         if: failure()

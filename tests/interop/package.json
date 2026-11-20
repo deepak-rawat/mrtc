@@ -14,7 +14,14 @@
     "test:native": "node native.mjs",
     "test:controller": "node --test controller.test.mjs soak.test.mjs",
     "test:all": "npm run test:controller && npm run test:native && npm run test:browser && npm test && npm run test:migration && npm run test:churn",
-    "test:soak": "node soak.mjs"
+    "test:soak": "node soak.mjs",
+    "benchmark": "node benchmark.mjs",
+    "benchmark:compare": "node benchmark-compare.mjs",
+    "test:benchmark": "node --test benchmark.test.mjs benchmark-transport.test.mjs benchmark-suite.test.mjs",
+    "benchmark:transport:build": "node benchmark-transport.mjs build",
+    "benchmark:transport:smoke": "node benchmark-transport.mjs smoke",
+    "benchmark:transport": "node benchmark-transport.mjs run",
+    "benchmark:suite": "node benchmark-suite.mjs"
   },
   "devDependencies": {
     "playwright": "1.65.1"
