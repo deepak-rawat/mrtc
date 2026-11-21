@@ -143,6 +143,10 @@ a rewritten NACK upstream would identify the wrong packet.
 | Browser controller | UI/capture/session selection; browser owns transport/media internals |
 
 - A listener owns a socket; multiple logical transports share routing over it.
+  Listeners gather local candidates; each transport owns an ICE agent from
+  [rtc_ice.c](../rtc/src/rtc_ice.c) for credentials, checks, nomination, consent
+  and restart state. ICE shares the transport worker and send mutex; the
+  transport supplies direct/TURN packet I/O and retains crypto ownership.
   Separate remote DTLS associations need distinguishable tuples. SFU
   subscriptions deliberately use extra ephemeral listeners: simpler ownership,
   at the cost of ports/connections rather than one bidirectional PC per user.
@@ -178,7 +182,7 @@ switching remote endpoints creates new DTLS/SCTP sessions.
 
 | Change | Start here; add focused coverage |
 |---|---|
-| Packet/transport behavior | [rtc/src/](../rtc/src/) and [rtc/tests/](../rtc/tests/); runtime is the active path, not only the standalone ICE agent |
+| Packet/transport behavior | [rtc/src/](../rtc/src/) and [rtc/tests/](../rtc/tests/); ICE changes need component and active runtime coverage |
 | Public native peer behavior | [client/include/rtc/](../client/include/rtc/) and peer integration tests |
 | Forwarding/feedback | [routing/src/](../routing/src/), then SFU session tests |
 | Room/topology policy | [meeting.c](../app/server/meeting.c), topology/runtime tests, then migration E2E |

@@ -25,6 +25,24 @@ support boundaries, not certification.
 
 Measure performance from priority 1 onward; maintain design clarity throughout.
 
+## Conditional future work
+
+These are deferred scope, not features to remove or commitments to implement.
+Revisit only when a concrete use case, interoperability gap or measurement
+justifies the complexity; preserve the working baseline.
+
+| Capability | Revisit when |
+|---|---|
+| RFC 8888 congestion feedback | A target peer needs its wire format or comparison shows value beyond current TWCC/REMB and RR-based control |
+| VP9/AV1 and further codec options | Quality/bandwidth gains justify backend, CPU, platform and negotiation costs; H.264 remains priority 4 |
+| Simulcast/SVC | Different subscriber bandwidths or larger rooms need independently selectable encodings/layers |
+| Additional TURN behavior | Deployment evidence requires TCP media relays, NAT64, simultaneous dual-family allocations or healthy-allocation migration; retain existing UDP/TCP/TLS server legs and failover |
+| Broader PeerConnection negotiation | An application needs fuller Unified Plan behavior or established codec mutation beyond the supported conferencing model |
+| Large-group RTP/RTCP details | The actual RTP-session topology needs large-group BYE backoff or other scale-specific behavior; retain reports, membership, consent and source retirement |
+
+Optional for our product scope does not mean optional for a conforming WebRTC
+endpoint. Keep omitted requirements explicit in [standards](STANDARDS.md).
+
 ## Parallel experimentation
 
 - Start early: explore codecs, congestion algorithms, media processing and new

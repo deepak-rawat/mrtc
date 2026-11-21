@@ -1,114 +1,124 @@
 /*
- * ICE (RFC 8445) - Minimal ICE-lite / ICE-controlling implementation.
+ * ICE (RFC 8445) with consent freshness (RFC 7675) for logical transports.
  *
- * Gathers host and server-reflexive candidates, performs connectivity checks.
- * Uses an rtc_packet_io_t for all socket I/O (transport is not owned by ICE).
+ * Manages credentials, remote candidates, authenticated connectivity checks,
+ * nomination and restart state on the transport worker. The listener gathers
+ * local candidates; the transport owns TURN allocations and encrypted media.
  */
 #ifndef RTC_ICE_H
 #define RTC_ICE_H
 
-#include "rtc_common.h"
-#include "rtc_stun.h"
-#include "rtc/rtc_sdp.h" /* for rtc_ice_candidate_t, ICE_MAX_CANDIDATES, etc. */
+#include "rtc/rtc_transport.h"
+#include "rtc_listener_internal.h"
+#include <stdatomic.h>
 
-/* Forward declaration - avoid including rtc_packet_io.h to prevent circular deps */
-typedef struct rtc_packet_io rtc_packet_io_t;
-
-typedef enum {
-    ICE_STATE_NEW,
-    ICE_STATE_GATHERING,
-    ICE_STATE_CHECKING,
-    ICE_STATE_CONNECTED,
-    ICE_STATE_FAILED,
-    ICE_STATE_CLOSED,
-} rtc_ice_state_t;
+/* Transport-provided direct/relay I/O and peer permission setup */
+typedef int (*rtc_ice_send_fn)(const uint8_t *data, size_t len, const rtc_addr_t *to, void *user);
+typedef int (*rtc_ice_prepare_peer_fn)(const rtc_addr_t *to, void *user);
 
 typedef struct {
-    /* Local credentials */
-    char ufrag[ICE_UFRAG_LEN];
-    char pwd[ICE_PWD_LEN];
+    /* Borrowed transport resources; must outlive ICE close */
+    rtc_worker_t *worker;
+    rtc_listener_t *listener;
+    rtc_mutex_t *send_mutex;   /* guards selected-address publication and media sends */
+    const atomic_bool *closed; /* transport closure flag */
+    rtc_ice_send_fn send;
+    rtc_ice_prepare_peer_fn prepare_peer;
+    rtc_listener_packet_fn on_packet;
+    void *user;
+    rtc_ice_mode_t mode;
+    uint32_t consent_timeout_ms; /* zero: 30 seconds */
+} rtc_ice_config_t;
 
-    /* Remote credentials */
-    char remote_ufrag[ICE_UFRAG_LEN];
-    char remote_pwd[ICE_PWD_LEN];
+typedef struct {
+    rtc_ice_config_t config;
 
-    /* Candidates */
-    rtc_ice_candidate_t local_candidates[ICE_MAX_CANDIDATES];
-    int local_candidate_count;
-    rtc_ice_candidate_t remote_candidates[ICE_MAX_CANDIDATES];
-    int remote_candidate_count;
+    /* Local and remote credentials */
+    char ufrag[RTC_ICE_UFRAG_MAX];
+    char pwd[RTC_ICE_PWD_MAX];
+    char remote_ufrag[RTC_ICE_UFRAG_MAX];
+    char remote_pwd[RTC_ICE_PWD_MAX];
+    rtc_ice_mode_t mode;
 
-    /* Selected pair */
-    rtc_addr_t selected_local;
+    /* Selected path and remote candidate rotation */
     rtc_addr_t selected_remote;
+    atomic_bool selected_remote_valid;
+    rtc_addr_t remote_candidate;
+    rtc_addr_t remote_candidates[ICE_MAX_CANDIDATES];
+    int remote_candidate_count;
+    unsigned remote_candidate_index;
+    uint32_t remote_candidates_deferred;   /* unresolved mDNS candidates */
+    uint32_t remote_candidates_ineligible; /* TCP or incompatible relay family */
+    bool remote_ice_valid;
+    bool remote_candidate_valid;
 
-    /* State */
-    rtc_ice_state_t state;
+    /* Outstanding connectivity check and listener registrations */
+    uint8_t txn_id[STUN_TXN_ID_SIZE];
+    bool txn_registered;
+    bool txn_controlling; /* role used by the outstanding request */
+    bool ufrag_registered;
+    rtc_worker_timer_t timer;
+    int check_count;
 
-    /* Transport (borrowed pointer, not owned) */
-    rtc_packet_io_t *transport;
-
-    /* STUN server for srflx gathering */
-    char stun_server[64];
-    uint16_t stun_port;
-
-    /* Controlling / controlled */
+    /* ICE role and consent state */
     bool controlling;
     uint64_t tie_breaker;
-
-    /* Async connectivity-check state (set by rtc_ice_connect /
-     * rtc_ice_send_check, read by rtc_ice_handle_stun on BINDING_RESPONSE). */
-    uint8_t last_txn_id[STUN_TXN_ID_SIZE];
-    uint64_t check_deadline_ms; /* overall deadline (rtc_time_ms) */
-    int check_round;            /* round-robin index across remote candidates */
+    atomic_uint_fast64_t consent_last_ms;
+    uint32_t consent_timeout_ms;
+    bool consent_expired;
+    bool restarting;
+    bool relayed; /* selected path uses TURN, not a direct listener tuple */
 } rtc_ice_agent_t;
 
-/* Initialize an ICE agent with a borrowed transport, generate ufrag/pwd */
-int rtc_ice_init(rtc_ice_agent_t *agent, rtc_packet_io_t *transport, const char *stun_server,
-                 uint16_t stun_port);
+/* Initialize credentials and state without registering listener routes */
+int rtc_ice_init(rtc_ice_agent_t *ice, const rtc_ice_config_t *config);
 
-/* Regenerate ufrag/pwd. Used by peer connection restart_ice() before
- * the next offer/answer is generated. Caller must not invoke after
- * connectivity checks have started. */
-int rtc_ice_restart_credentials(rtc_ice_agent_t *agent);
+/* Register the local ufrag after transport resources are ready */
+int rtc_ice_bind(rtc_ice_agent_t *ice);
 
-/* Gather local candidates (host + srflx) */
-int rtc_ice_gather(rtc_ice_agent_t *agent);
+/* Unregister routes and cancel checks on the worker; shared resources remain owned by transport */
+void rtc_ice_close(rtc_ice_agent_t *ice);
 
-/* Set remote ICE credentials */
-int rtc_ice_set_remote_credentials(rtc_ice_agent_t *agent, const char *ufrag, const char *pwd);
+/* Copy local credentials for signaling */
+void rtc_ice_get_parameters(const rtc_ice_agent_t *ice, rtc_ice_parameters_t *out);
 
-/* Add a remote candidate */
-int rtc_ice_add_remote_candidate(rtc_ice_agent_t *agent, const rtc_ice_candidate_t *cand);
+/* Detect changed credentials in an established remote ICE generation */
+bool rtc_ice_remote_changed(const rtc_ice_agent_t *ice, const rtc_ice_parameters_t *remote);
 
-/*
- * Kick off connectivity checks (non-blocking).
- * Sends the first STUN binding request and sets state to CHECKING. The caller
- * is responsible for scheduling periodic rtc_ice_send_check() retries (e.g.
- * via a worker timer) until state transitions to CONNECTED or
- * rtc_ice_check_deadline_passed() returns true.
- *
- * STUN binding responses are processed asynchronously through the transport's
- * recv callback dispatching to rtc_ice_handle_stun().
- */
-int rtc_ice_connect(rtc_ice_agent_t *agent);
+/* Rotate local credentials and reset checks, retaining the selected path for media continuity */
+int rtc_ice_restart(rtc_ice_agent_t *ice);
 
-/* Send the next round-robin connectivity check. Returns RTC_ERR_ICE if no
- * remote candidates or state is not CHECKING. */
-int rtc_ice_send_check(rtc_ice_agent_t *agent);
+/* Apply remote credentials; a new generation clears candidates and outstanding checks */
+int rtc_ice_set_remote_parameters(rtc_ice_agent_t *ice, const rtc_ice_parameters_t *remote);
 
-/* True if the overall ICE deadline set by rtc_ice_connect has elapsed. */
-bool rtc_ice_check_deadline_passed(const rtc_ice_agent_t *agent);
+/* Add a numeric UDP candidate; defer mDNS and ignore stale/ineligible candidates.
+ * AF_UNSPEC disables relay-family filtering. */
+int rtc_ice_add_remote_candidate(rtc_ice_agent_t *ice, const rtc_transport_candidate_t *candidate,
+                                 int relay_family);
 
-/*
- * Handle an incoming STUN packet (called by transport's recv callback).
- * Processes binding requests (sends response) and binding responses
- * (completes connectivity checks).
- */
-void rtc_ice_handle_stun(rtc_ice_agent_t *agent, const uint8_t *data, size_t len,
+/* Convert a parsed SDP candidate while preserving mDNS and transport metadata */
+int rtc_ice_candidate_from_sdp(rtc_transport_candidate_t *out, const rtc_ice_candidate_t *in);
+
+/* Set the local role; ICE-lite cannot be controlling */
+int rtc_ice_set_controlling(rtc_ice_agent_t *ice, bool controlling);
+
+/* Begin full-ICE checks and schedule retries; an established path is left unchanged */
+int rtc_ice_start(rtc_ice_agent_t *ice);
+
+/* Process authenticated checks, role conflicts, nomination and consent responses */
+void rtc_ice_handle_stun(rtc_ice_agent_t *ice, const uint8_t *data, size_t len,
                          const rtc_addr_t *from);
 
-/* Close ICE agent (does NOT close the transport) */
-void rtc_ice_close(rtc_ice_agent_t *agent);
+/* Schedule the next check/consent deadline unless already armed or closed */
+void rtc_ice_arm_timer(rtc_ice_agent_t *ice);
+
+/* Invalidate the selected path and remove its direct listener route */
+void rtc_ice_clear_selected(rtc_ice_agent_t *ice);
+
+/* Receive-path gate: only the selected address with unexpired consent is eligible */
+bool rtc_ice_accepts_media(const rtc_ice_agent_t *ice, const rtc_addr_t *from);
+
+/* Send-path consent check with the transport send mutex held; no worker-state mutation */
+bool rtc_ice_can_send(const rtc_ice_agent_t *ice);
 
 #endif /* RTC_ICE_H */

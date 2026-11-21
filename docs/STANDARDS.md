@@ -6,8 +6,10 @@ Unsupported means no shipped implementation. Evidence links identify coverage,
 not results from a new test run. External platform/network qualification remains
 on the [roadmap](ROADMAP.md).
 
-The active path is worker/listener/logical transport. The standalone ICE agent
-is a protocol fixture; passing its tests alone does not qualify client/SFU ICE.
+The active path is worker/listener/logical transport. Transports share the
+worker-owned [ICE implementation](../rtc/src/rtc_ice.c); listeners gather local
+candidates and transports own TURN allocations and encrypted media. Component
+tests exercise the same ICE implementation as client/SFU runtime integration.
 
 ## Transport and negotiation
 
