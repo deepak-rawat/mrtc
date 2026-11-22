@@ -29,11 +29,11 @@ async function peer(url, room, version = 2) {
     ws.addEventListener('message', event => messages.push(JSON.parse(event.data)));
     await once(ws, 'open');
     const send = message => ws.send(JSON.stringify(message));
-    const take = (type, epoch) => until(() => {
+    const take = (type, epoch, timeout = 5000) => until(() => {
         const index = messages.findIndex(message => message.type === type &&
             (epoch === undefined || message.epoch === epoch));
         return index < 0 ? null : messages.splice(index, 1)[0];
-    }, `${type} epoch=${epoch}`);
+    }, `${type} epoch=${epoch}`, timeout);
     send(version === 1 ? { type: 'join', meeting: room } : {
         type: 'join', version, meeting: room, display_name: '<Alice & Bob>',
         capabilities: { mesh: true, sfu: true, topology_switch: true }
@@ -142,6 +142,25 @@ try {
     a.send({ type: 'topology_request', version: 2, epoch: 5, mode: 'sfu', reason: 'ICE failed' });
     assert.match((await a.take('error')).message, /invalid topology/);
     assert.equal(isolated.messages.some(message => message.type === 'topology_prepare'), false);
+    const quiet = [];
+    for (let i = 0; i < 2; i++)
+        quiet.push(await peer(url, 'quiet'));
+    const started = Date.now();
+    quiet.push(await peer(url, 'quiet'));
+    const pending = await quiet[0].take('topology_prepare', 2);
+    const aborted = await quiet[0].take('topology_abort', pending.epoch, 15000);
+    assert.equal(aborted.reason, 'topology preparation timed out');
+    assert(Date.now() - started >= 9900, 'preserve the configured ten-second preparation budget');
+    for (const participant of quiet.slice(1))
+        assert.equal((await participant.take('topology_abort', pending.epoch)).reason, aborted.reason);
+    for (const participant of quiet)
+        assert.equal(participant.ws.readyState, WebSocket.OPEN, 'timeout must not disconnect participants');
+    const quietFirst = quiet[0].id < quiet[1].id ? quiet[0] : quiet[1];
+    const quietSecond = quietFirst === quiet[0] ? quiet[1] : quiet[0];
+    quietFirst.send({ type: 'offer', version: 2, epoch: 1,
+        session_id: `m:1:${quietFirst.id}:${quietSecond.id}`, to: quietSecond.id, sdp: 'v=0\r\n' });
+    assert.equal((await quietSecond.take('offer', 1)).from, quietFirst.id);
+    await Promise.all(quiet.map(close));
     await Promise.all([close(a), close(b), close(isolated)]);
     console.log('HTTP mounts and real WebSocket room/epoch/membership/failure routing passed');
 } finally {

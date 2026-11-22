@@ -77,3 +77,5 @@ browser privacy/autoplay. They are not blanket browser/OS certification.
 Actual Safari, broader external Firefox/native-OS runs, hostile networks,
 long soaks, capacity, lip-sync/media latency and independent protocol/security
 review remain gates. The SFU terminates per-hop crypto, not participant E2EE.
+Local browser automation uses the [pinned Chromium baseline](TESTING.md#e2e-setup-and-failures);
+newer Chromium audio-playout failures remain an external qualification boundary.

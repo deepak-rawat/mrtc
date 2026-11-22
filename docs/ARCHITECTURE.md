@@ -33,6 +33,8 @@ or encrypted client-to-SFU-to-client in SFU mode. The SFU decrypts/re-encrypts
 per hop but never decodes/composites video. It is not participant-to-participant E2EE.
 The SFU depends on routing/shared SCTP, **not** native client/codecs.
 One server process contains separate control and media threads; there is no IPC.
+The control loop's scheduled libwebsockets callback advances room deadlines and
+drains media events/outgoing notifications independently of new socket traffic.
 
 ## Source map
 

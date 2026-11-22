@@ -196,6 +196,8 @@ static void queue_message(struct per_session_data *pss, const char *json) {
     rtc_mutex_lock(&pss->mutex);
     char *copy = pss->msg_count < 64 ? strdup(json) : NULL;
     if (!copy) {
+        RTC_LOG_ERR("Signaling output queue failed for peer %s (queued=%d)",
+                    pss->peer ? pss->peer->id : "unregistered", pss->msg_count);
         pss->overflow = true;
     } else {
         pss->pending_msgs[pss->msg_tail] = copy;
@@ -343,8 +345,10 @@ static int callback_signaling(struct lws *wsi, enum lws_callback_reasons reason,
             break;
 
         case LWS_CALLBACK_RECEIVE:
-            if (len > sizeof(pss->incoming) - pss->incoming_len)
+            if (len > sizeof(pss->incoming) - pss->incoming_len) {
+                RTC_LOG_ERR("Signaling message exceeds the input limit");
                 return -1;
+            }
             memcpy(pss->incoming + pss->incoming_len, in, len);
             pss->incoming_len += len;
             if (pss->peer && lws_is_final_fragment(wsi) && lws_remaining_packet_payload(wsi) == 0) {
@@ -371,9 +375,14 @@ static int callback_signaling(struct lws *wsi, enum lws_callback_reasons reason,
                         memcpy(buf + LWS_PRE, json, json_len);
                         int written = lws_write(wsi, buf + LWS_PRE, json_len, LWS_WRITE_TEXT);
                         free(buf);
-                        if (written != (int)json_len)
+                        if (written != (int)json_len) {
+                            RTC_LOG_ERR("Signaling write failed for peer %s: %d of %zu bytes",
+                                        pss->peer ? pss->peer->id : "unregistered", written,
+                                        json_len);
                             pss->overflow = true;
+                        }
                     } else {
+                        RTC_LOG_ERR("Signaling write buffer allocation failed");
                         pss->overflow = true;
                     }
                     free(json);
@@ -431,6 +440,12 @@ static lws_sorted_usec_list_t g_tick;
 
 static void control_tick(lws_sorted_usec_list_t *timer) {
     (void)timer;
+    meeting_tick(&g_mgr, rtc_time_ms());
+#ifdef MRTC_SIGNALING_SFU
+    drain_media_events();
+#endif
+    if (atomic_exchange(&g_pending, false))
+        lws_callback_on_writable_all_protocol(g_context, &protocols[1]);
     lws_sul_schedule(g_context, 0, &g_tick, control_tick, 10000);
 }
 
@@ -617,12 +632,6 @@ int main(int argc, char *argv[]) {
                                          : "mesh");
 
     while (!interrupted) {
-        meeting_tick(&g_mgr, rtc_time_ms());
-#ifdef MRTC_SIGNALING_SFU
-        drain_media_events();
-#endif
-        if (atomic_exchange(&g_pending, false))
-            lws_callback_on_writable_all_protocol(ctx, &protocols[1]);
         lws_service(ctx, 10);
     }
 

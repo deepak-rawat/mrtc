@@ -38,7 +38,13 @@ npm --prefix tests/e2e ci
 npm --prefix tests/e2e run install:browser
 npm --prefix tests/e2e test
 ```
-Defaults: native `build/`, web `app/web/dist/`, Chromium. Override with
+Defaults: native `build/`, web `app/web/dist/`, Playwright 1.60.0 / Chromium
+148.0.7778.96 for local automation. The pin avoids the received-packets/no-audio-
+playout failure observed with newer Chromium builds, matching the
+[upstream receiver-startup report](https://issues.webrtc.org/issues/525729347).
+Assertions still require decoded audio; this is not a recommendation to
+downgrade production browsers or a qualification claim for newer releases.
+Override with
 `MRTC_BUILD_DIR` / `MRTC_WEB_ROOT` (root-relative or absolute).
 For Firefox: `(cd tests/e2e && npx playwright install firefox)`, then set
 `MRTC_BROWSER=firefox` for a browser suite. `MRTC_CHROME_PATH` selects an existing
@@ -47,6 +53,8 @@ Chromium executable; `PLAYWRIGHT_BROWSERS_PATH` overrides the browser cache.
 Runners reserve loopback ports and stop only children they start. They require
 fresh per-source decoded media and delivered SCTP messages, not just ICE state.
 Browser tests preserve normal privacy/autoplay and click the real Join control.
+Server control deadlines and queued events run from a periodic libwebsockets
+callback, so a quiet room still receives its preparation-timeout abort.
 Failures write logs/snapshots to `build/e2e-failures/`; override with
 `MRTC_TEST_ARTIFACTS`. `*.test.mjs` files validate runner/report behavior.
 
