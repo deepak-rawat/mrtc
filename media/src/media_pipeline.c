@@ -340,7 +340,8 @@ media_recv_stream_t *media_pipeline_add_recv_stream(media_pipeline_t *p, const c
             recv_stream_destroy(s);
             return NULL;
         }
-        jitter_buffer_config_t jb_cfg = {.target_delay_ms = 50, .max_delay_ms = 500};
+        jitter_buffer_config_t jb_cfg = {
+            .target_delay_ms = 50, .max_delay_ms = 500, .clock_rate = format->clock_rate};
         s->jb = jitter_buffer_create(&jb_cfg);
         s->has_decoder = true;
     } else {
@@ -348,7 +349,8 @@ media_recv_stream_t *media_pipeline_add_recv_stream(media_pipeline_t *p, const c
             s->active = false;
             return NULL;
         }
-        jitter_buffer_config_t jb_cfg = {.target_delay_ms = 40, .max_delay_ms = 300};
+        jitter_buffer_config_t jb_cfg = {
+            .target_delay_ms = 40, .max_delay_ms = 300, .clock_rate = 48000};
         s->jb = jitter_buffer_create(&jb_cfg);
         s->has_decoder = true;
     }
@@ -647,18 +649,31 @@ int media_pipeline_set_recv_feedback(media_pipeline_t *p, media_recv_stream_t *s
     return RTC_OK;
 }
 
-static void recv_audio_on_stream(media_pipeline_t *p, media_recv_stream_t *s, const uint8_t *data,
-                                 int len, uint16_t seq, uint32_t timestamp) {
-    jitter_buffer_push(s->jb, data, len, seq, timestamp, false);
-
-    jitter_buffer_packet_t jb_pkt;
-    while (jitter_buffer_pop(s->jb, &jb_pkt) == 0) {
-        audio_frame_t decoded;
-        if (audio_decode(&s->audio_dec, jb_pkt.data, jb_pkt.len, &decoded) == RTC_OK) {
+int media_pipeline_tick(media_pipeline_t *p, uint64_t now_ms) {
+    if (!p)
+        return RTC_ERR_INVALID;
+    int result = RTC_OK;
+    for (int i = 0; i < p->recv_count; i++) {
+        media_recv_stream_t *s = &p->recv[i];
+        if (!s->active || s->is_video)
+            continue;
+        jitter_buffer_packet_t packet;
+        for (unsigned frames = 0; frames < 16; frames++) {
+            if (jitter_buffer_pop_audio(s->jb, now_ms, &packet) != 0)
+                break;
+            audio_frame_t decoded;
+            int rc = packet.data ? audio_decode(&s->audio_dec, packet.data, packet.len, &decoded)
+                                 : audio_conceal(&s->audio_dec, packet.sample_count, &decoded);
+            if (rc != RTC_OK) {
+                RTC_LOG_WARN("Pipeline audio decode/concealment failed: %d", rc);
+                result = rc;
+                continue;
+            }
             if (p->renderer.on_audio_samples)
                 p->renderer.on_audio_samples(s->peer_id, s->label, &decoded, p->renderer.user);
         }
     }
+    return result;
 }
 
 int media_pipeline_recv_rtp(media_pipeline_t *p, media_recv_stream_t *stream, const uint8_t *data,
@@ -672,8 +687,14 @@ int media_pipeline_recv_rtp(media_pipeline_t *p, media_recv_stream_t *stream, co
 
     if (s->is_video)
         recv_video_on_stream(p, s, data, len, seq, timestamp, marker);
-    else
-        recv_audio_on_stream(p, s, data, len, seq, timestamp);
+    else {
+        int samples = audio_packet_samples(&s->audio_dec, data, len);
+        if (samples < 0) {
+            RTC_LOG_WARN("Pipeline rejected malformed audio payload: %d", samples);
+            return samples;
+        }
+        return jitter_buffer_push_audio(s->jb, data, len, seq, timestamp, samples, rtc_time_ms());
+    }
 
     return RTC_OK;
 }

@@ -157,9 +157,12 @@ export class Room {
     if (isPublisher) {
       for (const track of this.source!.stream.getTracks()) pc.addTrack(track, this.source!.stream);
       this.codecs(pc);
-      if (graph.mode === 'sfu' || this.id < peer) this.channel(session, pc.createDataChannel('chat'));
+      if (graph.mode === 'sfu' || this.id < peer) this.channel(graph, session, pc.createDataChannel('chat'));
     }
-    pc.ondatachannel = event => this.channel(session, event.channel);
+    pc.ondatachannel = event => {
+      if (this.live(graph)) this.channel(graph, session, event.channel);
+      else event.channel.close();
+    };
     pc.onicecandidate = event => {
       if (!this.live(graph)) return;
       this.send('candidate', { to: peer, epoch: graph.epoch, session_id: id,
@@ -190,14 +193,15 @@ export class Room {
       transceiver.setCodecPreferences(codecs);
     }
   }
-  private channel(session: Session, channel: RTCDataChannel): void {
+  private channel(graph: Graph, session: Session, channel: RTCDataChannel): void {
     const generation = this.generation;
     if (session.channels.size >= 2) { channel.close(); this.fail('Too many data channels'); return; }
     session.channels.add(channel);
     channel.binaryType = 'arraybuffer';
     channel.onclose = () => session.channels.delete(channel);
     channel.onmessage = event => {
-      if (this.closed || generation !== this.generation) return;
+      if (this.closed || generation !== this.generation || !this.live(graph) ||
+          graph.sessions.get(session.id) !== session) return;
       if (!(event.data instanceof ArrayBuffer)) { this.fail('Expected binary conference envelope'); return; }
       try {
         const message = this.history.read(event.data);
@@ -261,8 +265,8 @@ export class Room {
         graph?.peers.delete(peer);
         for (const [id, session] of graph?.sessions ?? []) {
           if (session.peer === peer) {
-            session.decoder.srcObject = null; session.decoder.remove();
-            session.pc.close(); graph!.sessions.delete(id);
+            this.closeSession(session);
+            graph!.sessions.delete(id);
           }
         }
       }
@@ -421,6 +425,9 @@ export class Room {
     const channels = sessions.map(session => [...session.channels].find(channel => channel.readyState === 'open'));
     if (!channels.length || channels.some(channel => !channel)) throw Error('Chat transport is not ready');
     const payload = envelope(this.active.mode === 'sfu' ? '*' : this.id, ++this.sequence, text);
+    if (payload.byteLength > 65535) throw Error('Chat message is too large');
+    if (channels.some(channel => channel!.bufferedAmount + payload.byteLength > 1024 * 1024))
+      throw Error('Chat transport is backpressured; retry after queued messages drain');
     for (const channel of channels) channel!.send(payload);
     this.view.message(this.id, text);
   }
@@ -458,16 +465,23 @@ export class Room {
       sources, connections, errors: [...this.errors], events: [...this.events], messages: [...this.messages],
       capture: this.source?.stream.getTracks().map(track => ({ kind: track.kind, state: track.readyState })) };
   }
-  private closeGraph(graph: Graph | undefined): void {
-    for (const session of graph?.sessions.values() ?? []) {
-      session.pc.onicecandidate = null;
-      session.pc.ontrack = null;
-      session.pc.onconnectionstatechange = null;
-      session.pc.ondatachannel = null;
-      session.pc.close();
-      session.decoder.srcObject = null;
-      session.decoder.remove();
+  private closeSession(session: Session): void {
+    session.pc.onicecandidate = null;
+    session.pc.ontrack = null;
+    session.pc.onconnectionstatechange = null;
+    session.pc.ondatachannel = null;
+    for (const channel of session.channels) {
+      channel.onmessage = null;
+      channel.onclose = null;
+      channel.close();
     }
+    session.channels.clear();
+    session.pc.close();
+    session.decoder.srcObject = null;
+    session.decoder.remove();
+  }
+  private closeGraph(graph: Graph | undefined): void {
+    for (const session of graph?.sessions.values() ?? []) this.closeSession(session);
     graph?.sessions.clear();
   }
   async leave(): Promise<void> {

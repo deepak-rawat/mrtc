@@ -109,7 +109,8 @@ TEST(opus_packet_loss) {
     /* PLC: decode with NULL data (simulates lost packet) */
     audio_frame_t plc_out;
     ASSERT_EQ(audio_decode(&dec, NULL, 0, &plc_out), RTC_OK);
-    ASSERT(plc_out.sample_count > 0);
+    ASSERT_EQ(plc_out.sample_count, frame_samples);
+    ASSERT(plc_out.concealed);
     printf("    PLC output: %d samples (expected ~%d)\n", plc_out.sample_count, frame_samples);
 
     free(pcm);
@@ -152,6 +153,34 @@ TEST(opus_invalid_codec) {
     printf("    invalid codec correctly rejected\n");
 }
 
+TEST(opus_packet_duration_and_exact_concealment) {
+    audio_encoder_t enc;
+    audio_decoder_t dec;
+    ASSERT_EQ(audio_encoder_create(&enc, "opus", 48000, 1, 32000), RTC_OK);
+    ASSERT_EQ(audio_decoder_create(&dec, "opus", 48000, 1), RTC_OK);
+    const int durations[] = {480, 960, 1920, 2880};
+    int16_t pcm[2880];
+    uint8_t packet[4000];
+    for (size_t i = 0; i < sizeof(durations) / sizeof(durations[0]); i++) {
+        fill_sine(pcm, durations[i], 1, 440, 48000);
+        audio_frame_t input = {
+            .samples = pcm, .sample_count = durations[i], .sample_rate = 48000, .channels = 1};
+        int len = sizeof(packet);
+        ASSERT_EQ(audio_encode(&enc, &input, packet, &len), RTC_OK);
+        ASSERT_EQ(audio_packet_samples(&dec, packet, len), durations[i]);
+        audio_frame_t output;
+        ASSERT_EQ(audio_decode(&dec, packet, len, &output), RTC_OK);
+        ASSERT(!output.concealed);
+        ASSERT_EQ(audio_conceal(&dec, durations[i], &output), RTC_OK);
+        ASSERT_EQ(output.sample_count, durations[i]);
+        ASSERT(output.concealed);
+    }
+    audio_frame_t output;
+    ASSERT_EQ(audio_conceal(&dec, 1, &output), RTC_ERR_INVALID);
+    audio_encoder_destroy(&enc);
+    audio_decoder_destroy(&dec);
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  Audio Codec Tests (Opus)\n");
@@ -164,6 +193,7 @@ int main(void) {
     RUN_TEST(opus_packet_loss);
     RUN_TEST(opus_multiple_frames);
     RUN_TEST(opus_invalid_codec);
+    RUN_TEST(opus_packet_duration_and_exact_concealment);
 
     TEST_SUMMARY();
     return _test_fail_count > 0 ? 1 : 0;

@@ -123,6 +123,9 @@ void media_pipeline_remove_peer(media_pipeline_t *p, const char *peer_id);
  */
 int media_pipeline_recv_rtp(media_pipeline_t *p, media_recv_stream_t *stream, const uint8_t *data,
                             int len, uint16_t seq, uint32_t timestamp, bool marker);
+/* Drain due audio/PLC intervals on the same serialized context as recv_rtp.
+ * Native receivers invoke this from their periodic transport-worker tick. */
+int media_pipeline_tick(media_pipeline_t *p, uint64_t now_ms);
 /* Callback must use a rate-limited feedback path, e.g.
  * rtc_rtp_receiver_request_keyframe(). Called on receive/decode thread. */
 int media_pipeline_set_recv_feedback(media_pipeline_t *p, media_recv_stream_t *stream,

@@ -70,6 +70,12 @@ void rtc_rtp_receiver_on_frame(rtc_rtp_receiver_t *receiver, rtc_on_frame_fn fn,
         rtc_rtp_recv_stream_on_frame(receiver->stream, fn, user);
 }
 
+void rtc_rtp_receiver_on_tick(rtc_rtp_receiver_t *receiver, rtc_on_receiver_tick_fn fn,
+                              void *user) {
+    if (receiver)
+        rtc_rtp_recv_stream_on_tick(receiver->stream, fn, user);
+}
+
 void rtc_rtp_receiver_on_source_change(rtc_rtp_receiver_t *receiver, rtc_on_source_change_fn fn,
                                        void *user) {
     if (receiver)

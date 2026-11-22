@@ -587,6 +587,33 @@ TEST(versioned_data_deduplicates_both_graphs_and_rejects_malformed_envelopes) {
     conference_destroy(c);
 }
 
+TEST(concealment_does_not_satisfy_pending_media_readiness) {
+    migration_counts_t counts = {0};
+    conference_t *c = migration_conference(&counts);
+    ASSERT(c != NULL);
+    conf_peer_t *old = alloc_session(c, "bob", "m:1:alice:bob", 1, SIG_SESSION_MESH, false);
+    conf_peer_t *publisher = alloc_session(c, "sfu", "p:2:alice", 2, SIG_SESSION_PUBLISH, true);
+    conf_peer_t *pending = alloc_session(c, "bob", "s:2:alice:bob", 2, SIG_SESSION_SUBSCRIBE, true);
+    ASSERT(old && publisher && pending);
+    c->pending_sfu = true;
+    publisher->connected = publisher->dc_open = true;
+    pending->connected = true;
+    old->last_audio_ms = rtc_time_ms();
+    audio_frame_t audio = {.concealed = true};
+    pipeline_on_audio("bob", "mic", &audio, pending);
+    ASSERT_EQ(atomic_load(&pending->audio_frames), 0);
+    ASSERT_EQ(atomic_load(&pending->last_audio_ms), 0);
+    ASSERT(!graph_ready_locked(c, 2));
+    pipeline_on_audio("bob", "mic", &audio, old);
+    conference_source_stats_t stats;
+    ASSERT_EQ(conference_get_source_stats(c, "bob", &stats), RTC_OK);
+    ASSERT_EQ(stats.audio_frames, 0);
+    audio.concealed = false;
+    pipeline_on_audio("bob", "mic", &audio, pending);
+    ASSERT(graph_ready_locked(c, 2));
+    conference_destroy(c);
+}
+
 int main(void) {
     rtc_client_init();
     RUN_TEST(peer_slots_reused_across_churn);
@@ -603,6 +630,7 @@ int main(void) {
     RUN_TEST(staged_graph_abort_and_stale_events_preserve_active_graph);
     RUN_TEST(pending_readiness_requires_transport_and_recent_media_not_muted_frames);
     RUN_TEST(versioned_data_deduplicates_both_graphs_and_rejects_malformed_envelopes);
+    RUN_TEST(concealment_does_not_satisfy_pending_media_readiness);
     rtc_client_cleanup();
     TEST_SUMMARY();
 }

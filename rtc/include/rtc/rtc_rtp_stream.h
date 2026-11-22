@@ -30,6 +30,7 @@ typedef void (*rtc_rtp_send_stream_pli_fn)(void *user);
 typedef int (*rtc_rtp_recv_stream_feedback_fn)(const uint8_t *data, size_t len, void *user);
 typedef void (*rtc_rtp_recv_stream_source_fn)(uint32_t previous_ssrc, uint32_t current_ssrc,
                                               void *user);
+typedef void (*rtc_rtp_recv_stream_tick_fn)(uint64_t now_ms, void *user);
 
 typedef struct {
     uint8_t payload_type;
@@ -116,6 +117,9 @@ bool rtc_rtp_recv_stream_has_mid(const rtc_rtp_recv_stream_t *stream);
 
 void rtc_rtp_recv_stream_on_frame(rtc_rtp_recv_stream_t *stream, rtc_rtp_recv_stream_frame_fn fn,
                                   void *user);
+/* Periodic media-session tick, independent of packet arrival; worker-owned. */
+void rtc_rtp_recv_stream_on_tick(rtc_rtp_recv_stream_t *stream, rtc_rtp_recv_stream_tick_fn fn,
+                                 void *user);
 /* Called on source replacement/retirement; current_ssrc == 0 means ended or
  * expired. Does not change the negotiated receiver's enabled state. */
 void rtc_rtp_recv_stream_on_source_change(rtc_rtp_recv_stream_t *stream,

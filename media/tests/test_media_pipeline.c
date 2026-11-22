@@ -28,14 +28,17 @@ static void mock_on_video(const char *peer_id, const char *label, const video_fr
 }
 
 static int g_audio_frame_count = 0;
+static int g_audio_concealed_count;
+static int g_audio_sample_count;
 
 static void mock_on_audio(const char *peer_id, const char *label, const audio_frame_t *audio,
                           void *user) {
     (void)peer_id;
     (void)label;
-    (void)audio;
     (void)user;
     g_audio_frame_count++;
+    g_audio_concealed_count += audio->concealed;
+    g_audio_sample_count = audio->sample_count;
 }
 
 static void fill_test_frame(video_frame_t *f, int seed) {
@@ -478,6 +481,43 @@ TEST(pipeline_debug_dump_failure_is_reported) {
     media_pipeline_destroy(p);
 }
 
+TEST(pipeline_audio_ticks_without_new_arrivals_and_stops_after_removal) {
+    media_renderer_t renderer = {.on_audio_samples = mock_on_audio};
+    media_pipeline_t *p = media_pipeline_create(&(media_pipeline_config_t){.renderer = &renderer});
+    ASSERT(p != NULL);
+    media_recv_stream_t *stream = media_pipeline_add_recv_stream(p, "bob", "mic", 1, false, "opus");
+    ASSERT(stream != NULL);
+    audio_encoder_t encoder;
+    ASSERT_EQ(audio_encoder_create(&encoder, "opus", 48000, 1, 32000), RTC_OK);
+    int16_t pcm[960];
+    for (int i = 0; i < 960; i++)
+        pcm[i] = (int16_t)(i * 10);
+    audio_frame_t audio = {
+        .samples = pcm, .sample_count = 960, .sample_rate = 48000, .channels = 1};
+    uint8_t packet[4000];
+    int len = sizeof(packet);
+    ASSERT_EQ(audio_encode(&encoder, &audio, packet, &len), RTC_OK);
+    g_audio_frame_count = g_audio_concealed_count = 0;
+    ASSERT_EQ(media_pipeline_recv_rtp(p, stream, packet, len, 10, 0, false), RTC_OK);
+    ASSERT_EQ(media_pipeline_recv_rtp(p, stream, packet, len, 12, 1920, false), RTC_OK);
+    uint64_t now = rtc_time_ms();
+    ASSERT_EQ(g_audio_frame_count, 0);
+    ASSERT_EQ(media_pipeline_tick(p, now + 40), RTC_OK);
+    ASSERT_EQ(g_audio_frame_count, 1);
+    ASSERT_EQ(g_audio_concealed_count, 0);
+    ASSERT_EQ(media_pipeline_tick(p, now + 60), RTC_OK);
+    ASSERT_EQ(g_audio_concealed_count, 1);
+    ASSERT_EQ(g_audio_sample_count, 960);
+    ASSERT_EQ(media_pipeline_tick(p, now + 80), RTC_OK);
+    ASSERT_EQ(g_audio_frame_count, 3);
+    ASSERT_EQ(g_audio_concealed_count, 1);
+    media_pipeline_remove_recv_stream(p, 1);
+    ASSERT_EQ(media_pipeline_tick(p, now + 100), RTC_OK);
+    ASSERT_EQ(g_audio_frame_count, 3);
+    audio_encoder_destroy(&encoder);
+    media_pipeline_destroy(p);
+}
+
 int main(void) {
     printf("========================================\n");
     printf("  Media Pipeline Tests\n");
@@ -499,6 +539,7 @@ int main(void) {
     RUN_TEST(pipeline_loss_reorder_keyframe_recovery);
     RUN_TEST(pipeline_padding_does_not_stall_delta_frames);
     RUN_TEST(pipeline_debug_dump_failure_is_reported);
+    RUN_TEST(pipeline_audio_ticks_without_new_arrivals_and_stops_after_removal);
 
     rtc_client_cleanup();
     TEST_SUMMARY();

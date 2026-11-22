@@ -13,6 +13,7 @@ typedef struct {
     int sample_count; /* Per channel */
     int sample_rate;  /* e.g. 48000 */
     int channels;     /* 1 or 2 */
+    bool concealed;   /* locally generated recovery, not newly received media */
 } audio_frame_t;
 
 /* Audio encoder vtable */
@@ -26,6 +27,8 @@ typedef struct audio_encoder_ops {
 typedef struct audio_decoder_ops {
     int (*init)(void *ctx, int sample_rate, int channels);
     int (*decode)(void *ctx, const uint8_t *data, int len, audio_frame_t *out);
+    int (*packet_samples)(void *ctx, const uint8_t *data, int len);
+    int (*conceal)(void *ctx, int samples, audio_frame_t *out);
     void (*close)(void *ctx);
 } audio_decoder_ops_t;
 
@@ -54,6 +57,16 @@ static inline int audio_encode(audio_encoder_t *enc, const audio_frame_t *frame,
 static inline int audio_decode(audio_decoder_t *dec, const uint8_t *data, int len,
                                audio_frame_t *out) {
     return dec->ops->decode(dec->ctx, data, len, out);
+}
+
+/* Packet duration in samples per channel, or a negative error. */
+static inline int audio_packet_samples(audio_decoder_t *dec, const uint8_t *data, int len) {
+    return dec->ops->packet_samples(dec->ctx, data, len);
+}
+
+/* Produce exactly the requested missing playout interval. */
+static inline int audio_conceal(audio_decoder_t *dec, int samples, audio_frame_t *out) {
+    return dec->ops->conceal(dec->ctx, samples, out);
 }
 
 #endif /* MEDIA_AUDIO_CODEC_H */

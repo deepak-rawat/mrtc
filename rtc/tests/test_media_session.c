@@ -532,6 +532,42 @@ TEST(receiver_originates_nack_and_limited_pli) {
     rtc_rtp_recv_stream_destroy(stream);
 }
 
+static void count_receive_tick(uint64_t now, void *user) {
+    (void)now;
+    (*(unsigned *)user)++;
+}
+
+static void ignore_received_frame(const uint8_t *data, size_t len, uint16_t seq, uint32_t timestamp,
+                                  uint32_t ssrc, bool marker, void *user) {
+    (void)data;
+    (void)len;
+    (void)seq;
+    (void)timestamp;
+    (void)ssrc;
+    (void)marker;
+    (void)user;
+}
+
+TEST(receive_playout_tick_is_independent_of_packet_arrival) {
+    rtc_rtp_recv_stream_t *stream = rtc_rtp_recv_stream_create(
+        &(rtc_rtp_recv_stream_config_t){.payload_type = 111, .clock_rate = 48000});
+    ASSERT(stream != NULL);
+    unsigned ticks = 0;
+    rtc_rtp_recv_stream_set_active(stream, true);
+    rtc_rtp_recv_stream_on_tick(stream, count_receive_tick, &ticks);
+    rtc_rtp_recv_stream_on_frame(stream, ignore_received_frame, NULL);
+    rtc_rtp_packet_t packet;
+    ASSERT_EQ(rtc_rtp_build(&packet, 111, 1, 0, 123, false, (const uint8_t *)"opus", 4), RTC_OK);
+    rtc_rtp_recv_stream_on_packet(stream, &packet);
+    ASSERT_EQ(ticks, 0);
+    rtc_rtp_recv_stream_tick(stream, rtc_time_ms() + 20);
+    ASSERT_EQ(ticks, 1);
+    rtc_rtp_recv_stream_set_active(stream, false);
+    rtc_rtp_recv_stream_tick(stream, rtc_time_ms() + 40);
+    ASSERT_EQ(ticks, 1);
+    rtc_rtp_recv_stream_destroy(stream);
+}
+
 int main(void) {
     printf("=== rtc_media_session tests ===\n");
     RUN_TEST(nack_routes_to_named_sender);
@@ -547,5 +583,6 @@ int main(void) {
     RUN_TEST(resolve_falls_back_to_payload_type);
     RUN_TEST(receiver_originates_nack_and_limited_pli);
     RUN_TEST(receiver_feedback_respects_negotiated_capabilities);
+    RUN_TEST(receive_playout_tick_is_independent_of_packet_arrival);
     TEST_SUMMARY();
 }

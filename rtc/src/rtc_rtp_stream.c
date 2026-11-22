@@ -15,6 +15,8 @@
 
 #define RTC_PLI_MIN_INTERVAL_MS 500
 
+static void recv_stream_feedback_tick(rtc_rtp_recv_stream_t *stream, uint64_t now_ms);
+
 struct rtc_rtp_send_stream {
     rtc_rtp_session_t rtp_session;
     rtc_transport_t *transport;
@@ -57,6 +59,8 @@ struct rtc_rtp_recv_stream {
     uint32_t clock_rate;
     rtc_rtp_recv_stream_frame_fn on_frame;
     void *on_frame_user;
+    rtc_rtp_recv_stream_tick_fn on_tick;
+    void *tick_user;
     rtc_rtp_recv_stream_source_fn on_source_change;
     void *source_user;
     uint64_t last_activity_ms;
@@ -793,7 +797,7 @@ void rtc_rtp_recv_stream_on_packet(rtc_rtp_recv_stream_t *stream, const rtc_rtp_
                     stream->missing[i].used = false;
         }
     }
-    rtc_rtp_recv_stream_tick(stream, now);
+    recv_stream_feedback_tick(stream, now);
     rtc_rtcp_stats_on_rtp_recv(&stream->rtcp_stats, pkt->header.seq, pkt->header.timestamp,
                                pkt->header.ssrc, stream->clock_rate);
     stream->on_frame(pkt->payload, pkt->payload_len, pkt->header.seq, pkt->header.timestamp,
@@ -875,7 +879,7 @@ int rtc_rtp_recv_stream_request_keyframe(rtc_rtp_recv_stream_t *stream) {
     return rc == RTC_OK ? args.result : rc;
 }
 
-void rtc_rtp_recv_stream_tick(rtc_rtp_recv_stream_t *stream, uint64_t now_ms) {
+static void recv_stream_feedback_tick(rtc_rtp_recv_stream_t *stream, uint64_t now_ms) {
     if (!stream)
         return;
     if (stream->ssrc && stream->last_activity_ms && now_ms >= stream->last_activity_ms &&
@@ -915,6 +919,20 @@ void rtc_rtp_recv_stream_tick(rtc_rtp_recv_stream_t *stream, uint64_t now_ms) {
         stream->recovery = true;
     if (stream->recovery && (stream->feedback & (RTC_SDP_FB_PLI | RTC_SDP_FB_FIR)))
         (void)recv_stream_request_keyframe(stream, now_ms);
+}
+
+void rtc_rtp_recv_stream_on_tick(rtc_rtp_recv_stream_t *stream, rtc_rtp_recv_stream_tick_fn fn,
+                                 void *user) {
+    if (stream) {
+        stream->on_tick = fn;
+        stream->tick_user = user;
+    }
+}
+
+void rtc_rtp_recv_stream_tick(rtc_rtp_recv_stream_t *stream, uint64_t now_ms) {
+    recv_stream_feedback_tick(stream, now_ms);
+    if (stream && stream->active && stream->ssrc && stream->on_tick)
+        stream->on_tick(now_ms, stream->tick_user);
 }
 
 void rtc_rtp_recv_stream_on_sr(rtc_rtp_recv_stream_t *stream, const rtc_rtcp_sr_t *sr) {

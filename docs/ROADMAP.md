@@ -25,6 +25,11 @@ support boundaries, not certification.
 
 Measure performance from priority 1 onward; maintain design clarity throughout.
 
+Current local iteration keeps AUTO, data channels and separate `mrtc_sctp`,
+focusing on codec-aware audio timing, bounded clock-driven concealment and
+simpler generation retirement with regression coverage. H.264 and broader
+deployment qualification remain future work, not part of this iteration.
+
 ## Conditional future work
 
 These are deferred scope, not features to remove or commitments to implement.

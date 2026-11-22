@@ -126,6 +126,12 @@ sequenceDiagram
    Bob's worker decrypts, reassembles and decodes; callbacks copy frames/audio.
    The CLI counts decoded output; SDL uploads/renders only on its main thread.
 
+Audio RTP queues codec-duration packets using its 48 kHz clock. The existing
+media-session worker timer drains due audio independently of packet arrivals,
+with at most 120 ms of Opus concealment before pausing/rebuffering. Contiguous
+sequence numbers with timestamp gaps preserve DTX silence. Concealed samples
+are rendered but do not count as fresh received media for topology readiness.
+
 Feedback belongs to each leg's SSRC/sequence space. Consumers repair downstream
 loss from bounded history or request a new publisher keyframe; blindly relaying
 a rewritten NACK upstream would identify the wrong packet.
@@ -177,6 +183,10 @@ The coordinator, not each client, authorizes changes.
 An epoch is a topology generation, not a participant ID or local call generation.
 An ICE restart keeps the endpoint/session while changing ICE credentials;
 switching remote endpoints creates new DTLS/SCTP sessions.
+
+Native session retirement shares one ownership-aware cleanup path. Browser
+graph/participant retirement also closes channel handlers, so delayed callbacks
+cannot deliver messages from an already removed session.
 
 ## Where to make a change
 

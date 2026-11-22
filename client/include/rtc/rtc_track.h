@@ -38,6 +38,7 @@ typedef enum {
 typedef void (*rtc_on_frame_fn)(const uint8_t *payload, size_t len, uint16_t seq,
                                 uint32_t timestamp, uint32_t ssrc, bool marker, void *user);
 typedef void (*rtc_on_source_change_fn)(uint32_t previous_ssrc, uint32_t current_ssrc, void *user);
+typedef void (*rtc_on_receiver_tick_fn)(uint64_t now_ms, void *user);
 
 /* Opaque handles; internal structs are defined in rtc_track.c. */
 typedef struct rtc_rtp_sender rtc_rtp_sender_t;
@@ -98,6 +99,9 @@ void rtc_rtp_sender_on_pli(rtc_rtp_sender_t *sender, rtc_on_pli_fn fn, void *use
 
 /* Set callback for incoming decoded frames (fires on transport thread) */
 void rtc_rtp_receiver_on_frame(rtc_rtp_receiver_t *receiver, rtc_on_frame_fn fn, void *user);
+/* Periodic receive playout hook on the transport worker, independent of RTP arrival.
+ * Register before media starts or from on_track; teardown cancels the session timer. */
+void rtc_rtp_receiver_on_tick(rtc_rtp_receiver_t *receiver, rtc_on_receiver_tick_fn fn, void *user);
 /* Source replacement/BYE/expiry notification on the transport worker.
  * A zero current SSRC retires source state, not the negotiated track.
  * Register before media starts or from an on_track/transport callback. */

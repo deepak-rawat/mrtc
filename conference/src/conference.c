@@ -107,6 +107,12 @@ struct conference {
 
 static void check_topology_ready(conference_t *c);
 static int send_session(conf_peer_t *p, sig_msg_type_t type, const char *text);
+static void retire_sessions(conference_t *c, uint32_t epoch, const char *peer_id);
+
+static void clear_pending_locked(conference_t *c) {
+    c->pending_epoch = 0;
+    c->ready_sent = false;
+}
 
 static void report_error(conference_t *c, const char *message) {
     RTC_LOG_ERR("Conference: %s", message);
@@ -215,6 +221,15 @@ static void destroy_peer(conference_t *c, conf_peer_t *p) {
     rtc_mutex_unlock(&c->send_mutex);
 }
 
+static void retire_sessions(conference_t *c, uint32_t epoch, const char *peer_id) {
+    for (int i = 0; i < CONF_MAX_PEERS; i++) {
+        conf_peer_t *p = &c->peers[i];
+        if (p->active && (!epoch || p->epoch == epoch) &&
+            (!peer_id || strcmp(p->peer_id, peer_id) == 0))
+            destroy_peer(c, p);
+    }
+}
+
 static void pipeline_on_video(const char *peer_id, const char *label, const video_frame_t *frame,
                               void *user) {
     conf_peer_t *p = user;
@@ -239,11 +254,13 @@ static void pipeline_on_audio(const char *peer_id, const char *label, const audi
                               void *user) {
     conf_peer_t *p = user;
     conference_t *c = p->conf;
-    atomic_fetch_add(&p->audio_frames, 1);
-    p->last_audio_ms = rtc_time_ms();
+    if (!audio->concealed) {
+        atomic_fetch_add(&p->audio_frames, 1);
+        p->last_audio_ms = rtc_time_ms();
+    }
     rtc_mutex_lock(&c->render_mutex);
     bool selected = p->active && !c->leaving && p->epoch == c->active_epoch;
-    if (selected) {
+    if (selected && !audio->concealed) {
         rtc_mutex_lock(&c->send_mutex);
         for (int i = 0; i < c->participant_count; i++)
             if (strcmp(c->participants[i].id, peer_id) == 0)
@@ -421,8 +438,16 @@ static void on_recv_audio_rtp(const uint8_t *payload, size_t len, uint16_t seq, 
         if (!cp->recv_audio)
             return;
     }
-    media_pipeline_recv_rtp(cp->receive_pipeline, cp->recv_audio, payload, (int)len, seq, timestamp,
-                            false);
+    if (media_pipeline_recv_rtp(cp->receive_pipeline, cp->recv_audio, payload, (int)len, seq,
+                                timestamp, false) != RTC_OK)
+        report_error(cp->conf, "audio receive payload rejected");
+}
+
+static void on_audio_playout(uint64_t now_ms, void *user) {
+    conf_peer_t *cp = user;
+    if (cp->active && !cp->conf->leaving && cp->receive_pipeline &&
+        media_pipeline_tick(cp->receive_pipeline, now_ms) != RTC_OK)
+        report_error(cp->conf, "audio playout failed");
 }
 
 static void forget_received_source(conf_peer_t *peer, uint32_t previous_ssrc, bool video) {
@@ -468,6 +493,7 @@ static void on_remote_track(rtc_rtp_receiver_t *receiver, void *user) {
     } else {
         rtc_rtp_receiver_on_source_change(receiver, on_audio_source_change, cp);
         rtc_rtp_receiver_on_frame(receiver, on_recv_audio_rtp, cp);
+        rtc_rtp_receiver_on_tick(receiver, on_audio_playout, cp);
         RTC_LOG_INFO("Conference: receiving audio from %s", cp->peer_id);
     }
 }
@@ -476,6 +502,11 @@ static void on_remote_track(rtc_rtp_receiver_t *receiver, void *user) {
 static void on_dc_open(void *user) {
     conf_peer_t *p = (conf_peer_t *)user;
     p->dc_open = p->active;
+}
+
+static void on_dc_close(void *user) {
+    conf_peer_t *p = user;
+    p->dc_open = p->active && p->dc && rtc_data_channel_state(p->dc) == RTC_DC_OPEN;
 }
 
 static void on_dc_message(const uint8_t *data, size_t len, void *user) {
@@ -522,6 +553,7 @@ static void on_dc_message(const uint8_t *data, size_t len, void *user) {
 static void on_dc_channel(rtc_data_channel_t *channel, void *user) {
     conf_peer_t *p = (conf_peer_t *)user;
     rtc_data_channel_on_open(channel, on_dc_open, p);
+    rtc_data_channel_on_close(channel, on_dc_close, p);
     rtc_data_channel_on_message(channel, on_dc_message, p);
     bool open = rtc_data_channel_state(channel) == RTC_DC_OPEN;
     if (p->active) {
@@ -674,6 +706,7 @@ static int offer_to_peer(conference_t *c, conf_peer_t *cp) {
         cp->dc = channel;
         rtc_mutex_unlock(&c->send_mutex);
         rtc_data_channel_on_open(channel, on_dc_open, cp);
+        rtc_data_channel_on_close(channel, on_dc_close, cp);
         rtc_data_channel_on_message(channel, on_dc_message, cp);
     }
 
@@ -842,15 +875,13 @@ static void sig_on_disconnected(void *user) {
                                      "signaling disconnected", c->cfg.user_data);
     c->leaving = true;
     if (c->v2) {
-        for (int i = 0; i < CONF_MAX_PEERS; i++)
-            if (c->peers[i].active)
-                destroy_peer(c, &c->peers[i]);
+        retire_sessions(c, 0, NULL);
         for (int i = 0; i < c->participant_count; i++)
             if (c->cfg.callbacks.on_peer_left)
                 c->cfg.callbacks.on_peer_left(c->participants[i].id, c->cfg.user_data);
         rtc_mutex_lock(&c->send_mutex);
         c->participant_count = 0;
-        c->pending_epoch = 0;
+        clear_pending_locked(c);
         rtc_mutex_unlock(&c->send_mutex);
         return;
     }
@@ -906,16 +937,14 @@ static void topology_status(conference_t *c, const char *status, uint32_t epoch,
 }
 
 static void retire_epoch(conference_t *c, uint32_t epoch) {
-    for (int i = 0; i < CONF_MAX_PEERS; i++)
-        if (c->peers[i].active && c->peers[i].epoch == epoch)
-            destroy_peer(c, &c->peers[i]);
+    if (epoch)
+        retire_sessions(c, epoch, NULL);
 }
 
 static void abort_pending(conference_t *c, const char *reason) {
     rtc_mutex_lock(&c->send_mutex);
     uint32_t epoch = c->pending_epoch;
-    c->pending_epoch = 0;
-    c->ready_sent = false;
+    clear_pending_locked(c);
     rtc_mutex_unlock(&c->send_mutex);
     if (epoch)
         retire_epoch(c, epoch);
@@ -1081,9 +1110,7 @@ static void sig_on_event(const sig_msg_t *message, void *user) {
     if (message->type == SIG_MSG_PEER_LEFT) {
         if (c->pending_epoch)
             abort_pending(c, "membership changed");
-        for (int i = 0; i < CONF_MAX_PEERS; i++)
-            if (c->peers[i].active && strcmp(c->peers[i].peer_id, message->peer_id) == 0)
-                destroy_peer(c, &c->peers[i]);
+        retire_sessions(c, 0, message->peer_id);
         bool removed = false;
         rtc_mutex_lock(&c->send_mutex);
         for (int i = 0; i < c->participant_count; i++)
@@ -1146,8 +1173,7 @@ static void sig_on_event(const sig_msg_t *message, void *user) {
         uint32_t old_epoch = c->active_epoch;
         c->active_epoch = c->pending_epoch;
         c->sfu_mode = c->pending_sfu;
-        c->pending_epoch = 0;
-        c->ready_sent = false;
+        clear_pending_locked(c);
         rtc_mutex_unlock(&c->send_mutex);
         rtc_mutex_unlock(&c->render_mutex);
         sig_msg_t ack = {.type = SIG_MSG_TOPOLOGY_ACK,
@@ -1470,7 +1496,7 @@ int conference_send_message(conference_t *c, const char *peer_id, const uint8_t 
     uint8_t *message = NULL;
     if (c->v2 || c->sfu_mode) {
         size_t header = c->v2 ? SIG_DC_V2_HEADER_SIZE : SIG_DC_HEADER_SIZE;
-        if (strlen(peer_id) >= SIG_MAX_PEER_ID || len > 65536 - header)
+        if (strlen(peer_id) >= SIG_MAX_PEER_ID || len > RTC_DC_MAX_MSG_SIZE - header)
             return RTC_ERR_INVALID;
         message = calloc(1, header + len);
         if (!message)
@@ -1595,14 +1621,11 @@ void conference_leave(conference_t *c) {
         c->signaling = NULL;
         rtc_mutex_unlock(&c->send_mutex);
     }
-    for (int i = 0; i < CONF_MAX_PEERS; i++)
-        if (c->peers[i].active)
-            destroy_peer(c, &c->peers[i]);
+    retire_sessions(c, 0, NULL);
     rtc_mutex_lock(&c->send_mutex);
     c->participant_count = 0;
-    c->pending_epoch = 0;
+    clear_pending_locked(c);
     c->active_epoch = 0;
-    c->ready_sent = false;
     rtc_mutex_unlock(&c->send_mutex);
 }
 

@@ -78,6 +78,11 @@ message ID. Bounded sender/message-ID deduplication handles overlapping graphs,
 not exactly-once delivery across arbitrary failures. Legacy `MRTC` has the same
 ID field but no message ID; fixed-mode readability is not version negotiation.
 
+Sends select the active topology, not pending/retiring channels. Native and
+browser messages fit the 65535-byte channel limit including the envelope.
+Browser chat rejects admission above 1 MiB of buffered output before fan-out;
+native channels retain their bounded queue. Send success is not a delivery ack.
+
 ## CLI control
 
 Start `./build/app/cli/mrtc_cli --control stdio`. stdin/stdout are one JSON object
