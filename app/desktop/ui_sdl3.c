@@ -7,6 +7,12 @@
 #include <string.h>
 #include <math.h>
 
+#define UI_AUDIO_ON_LEVEL   .015f
+#define UI_AUDIO_OFF_LEVEL  .010f
+#define UI_AUDIO_RELEASE_MS 80
+#define UI_AUDIO_HOLD_MS    300
+#define UI_AUDIO_STALE_MS   400
+
 int ui_sdl3_init(ui_sdl3_t *ui, int win_w, int win_h) {
     memset(ui, 0, sizeof(*ui));
     ui->focused_field = 0;
@@ -287,6 +293,37 @@ void ui_sdl3_on_video_frame(const char *peer_id, const char *label, const video_
     rtc_mutex_unlock(&ui->tiles_mutex);
 }
 
+bool ui_sdl3_audio_active(const ui_audio_activity_t *activity, uint64_t now) {
+    return now < activity->active_until;
+}
+
+void ui_sdl3_update_audio_activity(ui_audio_activity_t *activity, float level, uint64_t now) {
+    uint64_t elapsed = now - activity->updated_at;
+    activity->level =
+        elapsed >= UI_AUDIO_STALE_MS
+            ? level
+            : fmaxf(level, activity->level * expf(-(float)elapsed / UI_AUDIO_RELEASE_MS));
+    float threshold = ui_sdl3_audio_active(activity, now) ? UI_AUDIO_OFF_LEVEL : UI_AUDIO_ON_LEVEL;
+    if (activity->level > threshold)
+        activity->active_until = now + UI_AUDIO_HOLD_MS;
+    activity->updated_at = now;
+}
+
+static float audio_level(const audio_frame_t *audio) {
+    double sum = 0;
+    size_t count = (size_t)audio->sample_count * audio->channels;
+    for (size_t i = 0; i < count; i++)
+        sum += (double)audio->samples[i] * audio->samples[i];
+    return (float)(sqrt(sum / count) / 32768.0);
+}
+
+void ui_sdl3_on_local_audio(const audio_frame_t *audio, void *user) {
+    ui_sdl3_t *ui = user;
+    if (!ui || !audio || !audio->samples || audio->sample_count <= 0 || audio->channels <= 0)
+        return;
+    ui_sdl3_update_audio_activity(&ui->local_audio_activity, audio_level(audio), rtc_time_ms());
+}
+
 void ui_sdl3_on_audio_samples(const char *peer_id, const char *label, const audio_frame_t *audio,
                               void *user) {
     ui_sdl3_t *ui = (ui_sdl3_t *)user;
@@ -294,22 +331,15 @@ void ui_sdl3_on_audio_samples(const char *peer_id, const char *label, const audi
     if (!ui || !audio || !audio->samples || audio->sample_count <= 0 || audio->channels <= 0)
         return;
 
-    /* Compute RMS audio level */
-    float sum = 0;
-    int n = audio->sample_count < 256 ? audio->sample_count : 256;
-    for (int i = 0; i < n; i++)
-        sum += (float)audio->samples[i] * (float)audio->samples[i];
-    float level = sqrtf(sum / (float)n) / 32768.0f;
+    float level = audio_level(audio);
 
     /* Update tile's audio level */
     rtc_mutex_lock(&ui->tiles_mutex);
     ui_tile_t *tile = find_tile(ui, peer_id, "camera");
     if (!tile)
         tile = find_tile(ui, peer_id, "screen");
-    if (tile && !tile->remove_pending) {
-        tile->audio_level = level;
-        tile->audio_time = rtc_time_ms();
-    }
+    if (tile && !tile->remove_pending)
+        ui_sdl3_update_audio_activity(&tile->audio_activity, level, rtc_time_ms());
     size_t samples = (size_t)audio->sample_count * audio->channels;
     size_t capacity = sizeof(ui->pending_audio) / sizeof(ui->pending_audio[0]);
     if (samples <= capacity - ui->pending_audio_count) {
@@ -608,7 +638,7 @@ void ui_sdl3_on_message(const char *peer_id, const uint8_t *data, size_t len, vo
 
 static void draw_tile(ui_sdl3_t *ui, SDL_FRect r, SDL_Texture *texture, int w, int h,
                       const char *name, bool speaking, const char *placeholder) {
-    box(ui, r, speaking);
+    box(ui, r, false);
     if (speaking) {
         SDL_SetRenderDrawColor(ui->renderer, 64, 210, 140, 255);
         SDL_RenderRect(ui->renderer, &r);
@@ -681,8 +711,9 @@ static void draw_screen(ui_sdl3_t *ui) {
                          strcmp(t->label, "camera") ? t->label : "");
             else
                 snprintf(label, sizeof(label), "You%s", ui->mic_muted ? " / muted" : "");
-            bool speaking = t ? t->audio_level > .015f && rtc_time_ms() - t->audio_time < 400
-                              : !ui->mic_muted && ui->local_audio_level > .015f;
+            bool speaking = (t || !ui->mic_muted) &&
+                            ui_sdl3_audio_active(t ? &t->audio_activity : &ui->local_audio_activity,
+                                                 rtc_time_ms());
             draw_tile(ui, rect,
                       t               ? t->texture
                       : ui->cam_muted ? NULL

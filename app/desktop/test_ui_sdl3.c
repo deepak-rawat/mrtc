@@ -101,6 +101,123 @@ TEST(topology_and_audio_callbacks_are_deferred_to_main_render) {
     SDL_Quit();
 }
 
+TEST(audio_activity_smooths_release_and_holds_through_quiet_frames) {
+    ui_audio_activity_t activity = {0};
+    ui_sdl3_update_audio_activity(&activity, .014f, 1000);
+    ASSERT(!ui_sdl3_audio_active(&activity, 1000));
+    ui_sdl3_update_audio_activity(&activity, .020f, 1020);
+    ASSERT(ui_sdl3_audio_active(&activity, 1020));
+    ui_sdl3_update_audio_activity(&activity, 0, 1040);
+    ASSERT(activity.level > .015f);
+    ASSERT(activity.level < .020f);
+    for (uint64_t now = 1060; now <= 1300; now += 20) {
+        ui_sdl3_update_audio_activity(&activity, .012f, now);
+        ASSERT(ui_sdl3_audio_active(&activity, now));
+    }
+    ui_sdl3_update_audio_activity(&activity, 0, 1400);
+    ASSERT(activity.level < .010f);
+    ASSERT_EQ(activity.active_until, 1600);
+    ASSERT(ui_sdl3_audio_active(&activity, 1599));
+    ASSERT(!ui_sdl3_audio_active(&activity, 1600));
+    ui_sdl3_update_audio_activity(&activity, .012f, 2000);
+    ASSERT(!ui_sdl3_audio_active(&activity, 2000));
+    ui_sdl3_update_audio_activity(&activity, .020f, 2020);
+    ASSERT(ui_sdl3_audio_active(&activity, 2020));
+    ASSERT(!ui_sdl3_audio_active(&activity, 2320));
+}
+
+TEST(local_and_remote_activity_measure_the_entire_audio_frame) {
+    ui_sdl3_t ui;
+    ASSERT_EQ(ui_sdl3_init(&ui, 640, 480), 0);
+    ui_sdl3_on_peer_joined("alice", &ui);
+    int16_t samples[1920] = {0};
+    for (size_t i = 256; i < sizeof(samples) / sizeof(samples[0]); i++)
+        samples[i] = 3277;
+    audio_frame_t audio = {
+        .samples = samples, .sample_count = 960, .sample_rate = 48000, .channels = 2};
+    ui_sdl3_on_local_audio(&audio, &ui);
+    ui_sdl3_on_audio_samples("alice", "mic", &audio, &ui);
+    ASSERT(ui.local_audio_activity.level > .09f);
+    ASSERT(ui.local_audio_activity.level < .10f);
+    ASSERT_EQ(ui.local_audio_activity.level, ui.tiles[0].audio_activity.level);
+    ASSERT(ui_sdl3_audio_active(&ui.local_audio_activity, ui.local_audio_activity.updated_at));
+    ASSERT(
+        ui_sdl3_audio_active(&ui.tiles[0].audio_activity, ui.tiles[0].audio_activity.updated_at));
+    ASSERT_EQ(ui.pending_audio_count, 1920);
+    ui_sdl3_close(&ui);
+    SDL_Quit();
+}
+
+TEST(speaking_changes_only_tile_border_and_indicator) {
+    ui_sdl3_t ui;
+    ASSERT_EQ(ui_sdl3_init(&ui, 640, 480), 0);
+    ui.in_call = true;
+    ui_sdl3_on_peer_joined("alice", &ui);
+    ui_layout_t layout;
+    ui_sdl3_layout(640, 480, false, &layout);
+    SDL_FRect tiles[] = {ui_sdl3_tile_rect(layout.gallery, 2, 0),
+                         ui_sdl3_tile_rect(layout.gallery, 2, 1)};
+    char path[128];
+    snprintf(path, sizeof(path), "ui-activity-%llu.bmp", (unsigned long long)SDL_GetTicksNS());
+    const char *previous = SDL_getenv("MRTC_UI_SNAPSHOT");
+    char *saved = previous ? SDL_strdup(previous) : NULL;
+    ASSERT(!previous || saved);
+    ASSERT(SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "MRTC_UI_SNAPSHOT", path, true));
+    ui_sdl3_render(&ui);
+    SDL_Surface *idle = SDL_LoadBMP(path);
+    ASSERT(idle != NULL);
+
+    int16_t samples[960];
+    for (size_t i = 0; i < sizeof(samples) / sizeof(samples[0]); i++)
+        samples[i] = 3277;
+    audio_frame_t audio = {
+        .samples = samples, .sample_count = 960, .sample_rate = 48000, .channels = 1};
+    ui_sdl3_on_audio_samples("alice", "mic", &audio, &ui);
+    ui_sdl3_on_local_audio(&audio, &ui);
+    ui_sdl3_render(&ui);
+    SDL_Surface *active = SDL_LoadBMP(path);
+    ASSERT(active != NULL);
+    ui.mic_muted = true;
+    ui_sdl3_render(&ui);
+    SDL_Surface *muted = SDL_LoadBMP(path);
+    ASSERT(muted != NULL);
+    if (saved)
+        ASSERT(SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "MRTC_UI_SNAPSHOT", saved, true));
+    else
+        ASSERT(SDL_UnsetEnvironmentVariable(SDL_GetEnvironment(), "MRTC_UI_SNAPSHOT"));
+    SDL_free(saved);
+    ASSERT_EQ(remove(path), 0);
+    for (size_t i = 0; i < sizeof(tiles) / sizeof(tiles[0]); i++) {
+        SDL_Color before, after, muted_border;
+        int x = (int)(tiles[i].x + tiles[i].w / 2);
+        int y = (int)(tiles[i].y + tiles[i].h / 2);
+        ASSERT(SDL_ReadSurfacePixel(idle, x, y, &before.r, &before.g, &before.b, &before.a));
+        ASSERT(SDL_ReadSurfacePixel(active, x, y, &after.r, &after.g, &after.b, &after.a));
+        ASSERT_MEM_EQ(&before, &after, sizeof(before));
+        x = (int)tiles[i].x;
+        y = (int)tiles[i].y;
+        ASSERT(SDL_ReadSurfacePixel(idle, x, y, &before.r, &before.g, &before.b, &before.a));
+        ASSERT(SDL_ReadSurfacePixel(active, x, y, &after.r, &after.g, &after.b, &after.a));
+        ASSERT_EQ(after.r, 64);
+        ASSERT_EQ(after.g, 210);
+        ASSERT_EQ(after.b, 140);
+        ASSERT(SDL_ReadSurfacePixel(muted, x, y, &muted_border.r, &muted_border.g, &muted_border.b,
+                                    &muted_border.a));
+        ASSERT_MEM_EQ(&muted_border, i == 0 ? &after : &before, sizeof(muted_border));
+        x = (int)(tiles[i].x + tiles[i].w - 12);
+        y = (int)(tiles[i].y + tiles[i].h - 18);
+        ASSERT(SDL_ReadSurfacePixel(active, x, y, &after.r, &after.g, &after.b, &after.a));
+        ASSERT_EQ(after.r, 64);
+        ASSERT_EQ(after.g, 210);
+        ASSERT_EQ(after.b, 140);
+    }
+    SDL_DestroySurface(idle);
+    SDL_DestroySurface(active);
+    SDL_DestroySurface(muted);
+    ui_sdl3_close(&ui);
+    SDL_Quit();
+}
+
 TEST(responsive_layout_keeps_chat_and_controls_separate) {
     const int widths[] = {640, 1120, 1920};
     for (size_t i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
@@ -320,6 +437,9 @@ int main(void) {
     RUN_TEST(peer_left_removes_all_tiles);
     RUN_TEST(peer_left_before_first_render);
     RUN_TEST(topology_and_audio_callbacks_are_deferred_to_main_render);
+    RUN_TEST(audio_activity_smooths_release_and_holds_through_quiet_frames);
+    RUN_TEST(local_and_remote_activity_measure_the_entire_audio_frame);
+    RUN_TEST(speaking_changes_only_tile_border_and_indicator);
     RUN_TEST(responsive_layout_keeps_chat_and_controls_separate);
     RUN_TEST(small_window_keeps_controls_and_join_form_inside_bounds);
     RUN_TEST(named_placeholders_stay_in_place_until_frames_arrive);

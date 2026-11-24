@@ -28,15 +28,19 @@ typedef struct {
 } ui_layout_t;
 
 typedef struct {
+    float level;
+    uint64_t updated_at, active_until;
+} ui_audio_activity_t;
+
+typedef struct {
     char peer_id[64];
     char label[32];
     char name[128];
     SDL_Texture *texture;
     int width, height;
-    float audio_level; /* 0.0-1.0, updated from audio callback */
+    ui_audio_activity_t audio_activity;
     bool active;
     bool remove_pending;
-    uint64_t audio_time;
 
     /* Protected by tiles_mutex, including upload on the main thread. */
     uint8_t *pending_yuv;
@@ -69,7 +73,7 @@ typedef struct {
     /* Local preview */
     SDL_Texture *local_preview;
     int preview_w, preview_h;
-    float local_audio_level; /* 0.0-1.0, for mic level bar */
+    ui_audio_activity_t local_audio_activity;
     uint64_t remote_video_uploads;
     bool in_call, mic_muted, cam_muted, chat_open, use_camera, use_mic;
     int focused_field;
@@ -83,6 +87,9 @@ void ui_sdl3_layout(float width, float height, bool chat_open, ui_layout_t *out)
 SDL_FRect ui_sdl3_fit(SDL_FRect bounds, int width, int height);
 SDL_FRect ui_sdl3_tile_rect(SDL_FRect bounds, int count, int index);
 size_t ui_sdl3_wrap_line(const char *text, size_t columns);
+void ui_sdl3_update_audio_activity(ui_audio_activity_t *activity, float level, uint64_t now);
+bool ui_sdl3_audio_active(const ui_audio_activity_t *activity, uint64_t now);
+void ui_sdl3_on_local_audio(const audio_frame_t *audio, void *user);
 ui_action_t ui_sdl3_event(ui_sdl3_t *ui, const SDL_Event *event);
 void ui_sdl3_on_peer_joined(const char *peer_id, void *user);
 void ui_sdl3_set_peer_name(ui_sdl3_t *ui, const char *peer_id, const char *name);

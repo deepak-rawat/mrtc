@@ -1,6 +1,5 @@
 #include "ui_sdl3.h"
 #include <app_session.h>
-#include <math.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,15 +12,6 @@ static void preview(const video_frame_t *frame, void *user) {
 static void joined(const char *id, void *user) {
     (void)id;
     ui_sdl3_set_status(user, "Joined room. Waiting for participants.");
-}
-
-static void local_audio(const audio_frame_t *audio, void *user) {
-    ui_sdl3_t *ui = user;
-    double sum = 0;
-    for (int i = 0; i < audio->sample_count; i++)
-        sum += (double)audio->samples[i] * audio->samples[i];
-    ui->local_audio_level =
-        audio->sample_count ? (float)sqrt(sum / audio->sample_count) / 32768 : 0;
 }
 
 static int prepare_devices(ui_sdl3_t *ui) {
@@ -69,7 +59,7 @@ static void capture(ui_sdl3_t *ui, app_session_t *session) {
             if (bytes == (int)sizeof(pcm)) {
                 audio_frame_t audio = {
                     .samples = pcm, .sample_count = 960, .sample_rate = 48000, .channels = 1};
-                local_audio(&audio, ui);
+                ui_sdl3_on_local_audio(&audio, ui);
                 conference_push_audio(conference, "mic", &audio);
             } else if (bytes < 0) {
                 ui_sdl3_on_error("Microphone capture failed.", ui);
@@ -163,7 +153,7 @@ int main(int argc, char **argv) {
                       .on_joined = joined,
                       .on_message = ui_sdl3_on_message},
         .on_local_video = preview,
-        .on_local_audio = local_audio,
+        .on_local_audio = ui_sdl3_on_local_audio,
         .user_data = &ui,
     };
     app_session_t *session = app_session_create(&config);
